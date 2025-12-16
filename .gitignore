@@ -1,0 +1,9 @@
+node_modules/
+build/
+.vscode/
+.uploads/
+uploads/
+.env
+server-err.log
+server-out.log
+.env
