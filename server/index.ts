@@ -1117,6 +1117,15 @@ const fileHandler = async (req: Request, res: Response) => {
 app.get('/api/files/:fileId', fileHandler);
 app.head('/api/files/:fileId', fileHandler);
 
+// Serve static frontend files in production
+const buildPath = path.resolve(process.cwd(), 'build');
+if (fs.existsSync(buildPath)) {
+  app.use(express.static(buildPath));
+  app.get('*', (_req, res) => {
+    res.sendFile(path.join(buildPath, 'index.html'));
+  });
+}
+
 app
   .listen(port)
   .once('listening', () => {
