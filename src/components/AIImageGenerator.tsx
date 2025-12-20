@@ -503,7 +503,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                     className="rounded-2xl border border-slate-200 overflow-hidden bg-slate-50 shadow-sm"
                   >
                     <div className="aspect-square bg-white">
-                      <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-cover" />
+                      <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain" />
                     </div>
                     <div className="p-3 flex items-center justify-between">
                       <div>

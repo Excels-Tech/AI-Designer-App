@@ -574,7 +574,7 @@ export function MyDesigns() {
                     <img
                       src={detailObjectUrls[`view:${img.view}`] || resolveSrc(img)}
                       alt={img.view}
-                      className="w-full h-full object-cover"
+                      className="w-full h-full object-contain"
                     />
                   </div>
                   <div className="p-3 flex items-center justify-between text-sm">
