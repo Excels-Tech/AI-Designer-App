@@ -22,6 +22,7 @@ import {
   deleteGridFSFile,
   getFileInfo,
   getReadStream,
+  getReadStreamRange,
 } from './gridfs';
 import archiver from 'archiver';
 import { Types } from 'mongoose';
@@ -1038,6 +1039,89 @@ app.get('/api/video-designs/:id/download.mp4', async (req, res) => {
   } catch (err) {
     console.error('Failed to download video', err);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to download video.' });
+  }
+});
+
+app.get('/api/video-designs/:id/stream.mp4', async (req, res) => {
+  const userId =
+    ((req.headers['x-user-id'] as string | undefined)?.trim() ||
+      (typeof req.query.uid === 'string' ? req.query.uid.trim() : '')) ??
+    '';
+  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+
+  try {
+    const { id } = req.params;
+    if (!Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid video id.' });
+    }
+
+    const doc = await VideoDesign.findOne({ _id: id, userId });
+    if (!doc) return res.status(404).json({ error: 'Video not found.' });
+
+    const fileInfo = await getFileInfo(doc.video.fileId);
+    if (!fileInfo) return res.status(404).json({ error: 'Video file not found.' });
+
+    const size = Number(fileInfo.length || 0);
+    const range = req.headers.range;
+
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `inline; filename="video-${id}.mp4"`);
+    res.setHeader('Cache-Control', 'private, max-age=0');
+    res.setHeader('Accept-Ranges', 'bytes');
+
+    if (!range || !size) {
+      if (size) res.setHeader('Content-Length', String(size));
+      const stream = await getReadStream(doc.video.fileId);
+      stream.on('error', (err) => {
+        console.error('Video stream error', err);
+        if (!res.headersSent) res.status(500);
+        res.end();
+      });
+      stream.pipe(res);
+      return;
+    }
+
+    const match = /bytes=(\\d*)-(\\d*)/.exec(range);
+    if (!match) {
+      res.status(416).setHeader('Content-Range', `bytes */${size}`).end();
+      return;
+    }
+
+    let start = match[1] ? Number(match[1]) : NaN;
+    let end = match[2] ? Number(match[2]) : NaN;
+
+    if (Number.isNaN(start)) {
+      if (!Number.isFinite(end) || end <= 0) {
+        res.status(416).setHeader('Content-Range', `bytes */${size}`).end();
+        return;
+      }
+      start = Math.max(size - end, 0);
+      end = size - 1;
+    } else {
+      if (Number.isNaN(end) || end >= size) {
+        end = size - 1;
+      }
+    }
+
+    if (start < 0 || start > end || start >= size) {
+      res.status(416).setHeader('Content-Range', `bytes */${size}`).end();
+      return;
+    }
+
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+    res.setHeader('Content-Length', String(end - start + 1));
+
+    const stream = await getReadStreamRange(doc.video.fileId, start, end);
+    stream.on('error', (err) => {
+      console.error('Video stream error', err);
+      if (!res.headersSent) res.status(500);
+      res.end();
+    });
+    stream.pipe(res);
+  } catch (err) {
+    console.error('Failed to stream video', err);
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to stream video.' });
   }
 });
 

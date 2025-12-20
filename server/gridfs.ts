@@ -68,3 +68,8 @@ export async function getReadStream(fileId: string) {
   const bucket = await getGridFSBucket();
   return bucket.openDownloadStream(new ObjectId(fileId));
 }
+
+export async function getReadStreamRange(fileId: string, start: number, endInclusive: number) {
+  const bucket = await getGridFSBucket();
+  return bucket.openDownloadStream(new ObjectId(fileId), { start, end: endInclusive + 1 });
+}

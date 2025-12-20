@@ -44,6 +44,7 @@ export function MyDesigns() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deletingVideo, setDeletingVideo] = useState<string | null>(null);
+  const [previewVideoId, setPreviewVideoId] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [thumbObjectUrls, setThumbObjectUrls] = useState<Record<string, string>>({});
   const [detailObjectUrls, setDetailObjectUrls] = useState<Record<string, string>>({});
@@ -396,6 +397,32 @@ export function MyDesigns() {
           </div>
         </div>
 
+        {previewVideoId && userId && (
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm text-slate-700">
+                <VideoIcon className="h-4 w-4 text-slate-600" />
+                Video Preview
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewVideoId(null)}
+                className="px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-sm text-slate-800"
+              >
+                Close
+              </button>
+            </div>
+            <div className="rounded-2xl border border-slate-200 overflow-hidden bg-slate-900">
+              <video
+                controls
+                preload="metadata"
+                className="w-full max-h-[520px]"
+                src={`/api/video-designs/${previewVideoId}/stream.mp4?uid=${encodeURIComponent(userId)}`}
+              />
+            </div>
+          </div>
+        )}
+
         {videosLoading && videos.length === 0 ? (
           <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
             {Array.from({ length: 3 }).map((_, idx) => (
@@ -426,6 +453,13 @@ export function MyDesigns() {
                 </div>
 
                 <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPreviewVideoId(video.id)}
+                    className="flex-1 px-3 py-2 rounded-xl bg-white border border-slate-200 hover:border-purple-300 text-sm text-slate-800"
+                  >
+                    Preview
+                  </button>
                   <button
                     type="button"
                     onClick={() => downloadVideo(video.id, video.title)}
