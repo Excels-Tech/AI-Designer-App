@@ -385,8 +385,12 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
               </div>
             </div>
 
-            <div className="rounded-2xl border border-slate-200 overflow-hidden bg-slate-900">
-              <img src={result.composite} alt="Composite" className="w-full h-full object-contain max-h-[480px] mx-auto" />
+            <div className="rounded-2xl border border-slate-200 bg-slate-900 p-2">
+              <img
+                src={result.composite}
+                alt="Composite"
+                className="w-full h-auto object-contain max-h-[70vh] mx-auto"
+              />
             </div>
 
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 flex flex-col md:flex-row gap-3 md:items-end md:justify-between">
