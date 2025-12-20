@@ -7,7 +7,7 @@ let bucket: GridFSBucket | null = null;
 export async function getGridFSBucket() {
   if (!bucket) {
     const db = await getDb();
-    bucket = new GridFSBucket(db, { bucketName: 'designFiles' });
+    bucket = new GridFSBucket(db!, { bucketName: 'designFiles' });
   }
   return bucket;
 }
@@ -21,7 +21,7 @@ export async function uploadDataUrlToGridFS(dataUrl: string, filename: string) {
   const buffer = Buffer.from(match[2], 'base64');
   const bucket = await getGridFSBucket();
   return new Promise<ObjectId>((resolve, reject) => {
-    const uploadStream = bucket!.openUploadStream(filename, { contentType: mime });
+    const uploadStream = bucket!.openUploadStream(filename, { metadata: { contentType: mime } });
     uploadStream.on('error', reject);
     uploadStream.on('finish', () => {
       resolve(uploadStream.id as ObjectId);
@@ -33,7 +33,7 @@ export async function uploadDataUrlToGridFS(dataUrl: string, filename: string) {
 export async function uploadFileToGridFS(filePath: string, filename: string, contentType: string) {
   const bucket = await getGridFSBucket();
   return new Promise<ObjectId>((resolve, reject) => {
-    const uploadStream = bucket!.openUploadStream(filename, { contentType });
+    const uploadStream = bucket!.openUploadStream(filename, { metadata: { contentType } });
     uploadStream.on('error', reject);
     uploadStream.on('finish', () => resolve(uploadStream.id as ObjectId));
     fs.createReadStream(filePath)

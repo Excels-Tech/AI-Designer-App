@@ -99,7 +99,7 @@ export async function generateBaseImage(
   const result = await client.models.generateContent({
     model: IMAGE_MODEL,
     contents: viewPrompt,
-    generationConfig: { responseMimeType: 'image/png' },
+    config: { responseMimeType: 'image/png' },
   });
 
   const buffer = extractImageBuffer(result, `[generateBaseImage:${view}]`);
@@ -127,7 +127,7 @@ export async function generateDerivedViewImage(
         { inlineData: { data: base64, mimeType: 'image/png' } },
         { text: derivedPrompt },
       ],
-      generationConfig: { responseMimeType: 'image/png' },
+      config: { responseMimeType: 'image/png' },
     });
     const buffer = extractImageBuffer(result, `[generateDerived:${targetView}]`);
     return normalizeImage(buffer, resolution);

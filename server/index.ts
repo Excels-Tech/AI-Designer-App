@@ -197,20 +197,20 @@ function validateDesignPayload(body: any) {
   if (!allowedResolutions.has(resolution)) return { ok: false, error: 'Invalid resolution.' };
   if (!views.length) return { ok: false, error: 'At least one view is required.' };
   if (new Set(views).size !== views.length) return { ok: false, error: 'Views must be unique.' };
-  if (!views.every((v) => allowedViews.has(v))) return { ok: false, error: 'Invalid view value.' };
+  if (!views.every((v: string) => allowedViews.has(v))) return { ok: false, error: 'Invalid view value.' };
   if (views.length > 6) return { ok: false, error: 'Maximum 6 views allowed.' };
   if (!isPngDataUrl(composite) && typeof composite !== 'object') {
     return { ok: false, error: 'Composite must be a PNG data URL.' };
   }
   if (images.length !== views.length) return { ok: false, error: 'Images must match number of views.' };
 
-  const normalizedImages = images.map((img: any) => ({
-    view: img?.view,
+  const normalizedImages = images.map((img: { view: string; mime: 'image/png'; dataUrl: string }) => ({
+    view: img.view,
     mime: 'image/png' as const,
-    dataUrl: typeof img?.src === 'string' ? img.src : img?.dataUrl,
+    dataUrl: img.dataUrl,
   }));
 
-  if (!normalizedImages.every((img) => typeof img.view === 'string' && isPngDataUrl(img.dataUrl))) {
+  if (!normalizedImages.every((img: { view: string; mime: 'image/png'; dataUrl: string }) => typeof img.view === 'string' && isPngDataUrl(img.dataUrl))) {
     return { ok: false, error: 'Each image must include a view and PNG data URL.' };
   }
 
@@ -225,7 +225,7 @@ function validateDesignPayload(body: any) {
       userId,
       views,
       composite: { mime: 'image/png' as const, dataUrl: composite },
-      images: normalizedImages.map((img) => ({ view: img.view, mime: 'image/png' as const, dataUrl: img.dataUrl })),
+      images: normalizedImages.map((img: { view: string; mime: 'image/png'; dataUrl: string }) => ({ view: img.view, mime: 'image/png' as const, dataUrl: img.dataUrl })),
     },
   };
 }
@@ -276,17 +276,18 @@ async function saveDesign(data: {
     throw new Error(validation.error);
   }
 
+  const validatedData = validation.data!;
   const compositeFileId = await uploadDataUrlToGridFS(data.composite, `composite-${Date.now()}.png`);
   const imageFileIds = await Promise.all(
-    data.images.map((img, idx) => uploadDataUrlToGridFS(img.src, `${img.view || idx}-${Date.now()}.png`))
+    data.images.map((img: { view: string; src: string }, idx: number) => uploadDataUrlToGridFS(img.src, `${img.view || idx}-${Date.now()}.png`))
   );
 
   const doc = await Design.create({
-    ...validation.data,
-    name: validation.data.name,
-    title: validation.data.name,
+    ...validatedData,
+    name: validatedData.name,
+    title: validatedData.name,
     composite: { mime: 'image/png', fileId: compositeFileId.toString() },
-    images: data.images.map((img, idx) => ({
+    images: data.images.map((img: { view: string; src: string }, idx: number) => ({
       view: img.view,
       mime: 'image/png',
       fileId: imageFileIds[idx].toString(),
@@ -547,7 +548,7 @@ app.post('/api/sam2/color-layers', async (req: Request, res: Response) => {
       body: JSON.stringify({ imageDataUrl, num_layers: numLayers }),
     }, 20000);
 
-    const payload = await response.json().catch(() => ({}));
+    const payload = await response.json().catch(() => ({})) as { detail?: string; error?: string };
     if (!response.ok) {
       return res.status(502).json({
         ok: false,
@@ -579,7 +580,7 @@ app.post('/api/sam2/auto', async (req: Request, res: Response) => {
       body: JSON.stringify({ imageDataUrl }),
     }, 20000);
 
-    const payload = await response.json().catch(() => ({}));
+    const payload = await response.json().catch(() => ({})) as { detail?: string; error?: string };
     if (!response.ok) {
       return res.status(502).json({
         ok: false,
@@ -657,15 +658,16 @@ app.post('/api/designs', async (req, res) => {
     if (!validation.ok) {
       return res.status(400).json({ error: validation.error });
     }
-    const compositeFileId = await uploadDataUrlToGridFS(validation.data.composite.dataUrl!, `composite-${Date.now()}.png`);
+    const validatedData = validation.data!;
+    const compositeFileId = await uploadDataUrlToGridFS(validatedData.composite.dataUrl!, `composite-${Date.now()}.png`);
     const imageFileIds = await Promise.all(
-      validation.data.images.map((img, idx) => uploadDataUrlToGridFS(img.dataUrl!, `${img.view || idx}-${Date.now()}.png`))
+      validatedData.images.map((img: { view: string; mime: 'image/png'; dataUrl: string }, idx: number) => uploadDataUrlToGridFS(img.dataUrl!, `${img.view || idx}-${Date.now()}.png`))
     );
 
     const doc = await Design.create({
-      ...validation.data,
+      ...validatedData,
       composite: { mime: 'image/png', fileId: compositeFileId.toString() },
-      images: validation.data.images.map((img, idx) => ({
+      images: validatedData.images.map((img: { view: string; mime: 'image/png'; dataUrl: string }, idx: number) => ({
         view: img.view,
         mime: img.mime,
         fileId: imageFileIds[idx].toString(),
@@ -744,7 +746,7 @@ app.get('/api/designs/:id', async (req, res) => {
         url: buildFileUrl(doc.composite.fileId),
         dataUrl: doc.composite.dataUrl,
       },
-      images: doc.images.map((img) => ({
+      images: doc.images.map((img: { view: string; mime: string; fileId?: string; dataUrl?: string }) => ({
         view: img.view,
         mime: img.mime,
         url: buildFileUrl(img.fileId),
@@ -771,7 +773,7 @@ app.delete('/api/designs/:id', async (req, res) => {
     if (doc) {
       const fileIds = [
         doc.composite?.fileId,
-        ...doc.images.map((img) => img.fileId).filter(Boolean),
+        ...doc.images.map((img: { fileId?: string }) => img.fileId).filter(Boolean),
       ].filter(Boolean) as string[];
       await Promise.all(fileIds.map((fid) => deleteGridFSFile(fid)));
     }
@@ -1278,7 +1280,8 @@ app.get('/api/video/files/:fileId', async (req: Request, res: Response) => {
       return res.status(304).end();
     }
 
-    res.setHeader('Content-Type', fileInfo.contentType || 'image/png');
+    const contentType = (fileInfo.metadata as { contentType?: string } | undefined)?.contentType || 'image/png';
+    res.setHeader('Content-Type', contentType);
     res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
     res.setHeader('ETag', etag);
     if (lastModified) res.setHeader('Last-Modified', lastModified);
@@ -1320,7 +1323,7 @@ app.use((err: any, _req: Request, res: Response, next: () => void) => {
 app.get('/api/ping-db', async (_req, res) => {
   try {
     const db = await getDb();
-    const info = await db.admin().serverInfo();
+    const info = await db!.admin().serverInfo();
     res.json({ ok: true, version: info.version });
   } catch (err) {
     console.error('Mongo ping failed', err);
@@ -1368,7 +1371,8 @@ const fileHandler = async (req: Request, res: Response) => {
       return res.status(304).end();
     }
 
-    res.setHeader('Content-Type', fileInfo.contentType || 'image/png');
+    const fileContentType = (fileInfo.metadata as { contentType?: string } | undefined)?.contentType || 'image/png';
+    res.setHeader('Content-Type', fileContentType);
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     res.setHeader('ETag', etag);
     if (lastModified) res.setHeader('Last-Modified', lastModified);
