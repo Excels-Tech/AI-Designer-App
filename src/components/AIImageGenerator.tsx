@@ -277,7 +277,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                   <Camera className="w-4 h-4 text-slate-600" />
                   <p className="text-sm text-slate-700">{selectedViewsLabel}</p>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="flex flex-wrap gap-2">
                   {viewOptions.map((view) => {
                     const active = selectedViews.includes(view.id);
                     return (
@@ -285,17 +285,13 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                         key={view.id}
                         onClick={() => toggleView(view.id)}
                         className={clsx(
-                          'p-2 rounded-xl border-2 text-left transition-all',
+                          'px-4 py-2 rounded-xl text-sm border transition-all',
                           active
-                            ? 'border-purple-500 bg-purple-50 shadow-sm shadow-purple-200'
-                            : 'border-slate-200 hover:border-slate-300 bg-white'
+                            ? 'bg-purple-500 text-white border-purple-500 shadow-lg shadow-purple-500/30'
+                            : 'bg-white text-slate-700 border-slate-200 hover:border-purple-300'
                         )}
                       >
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-medium text-slate-900">{view.label}</span>
-                          {active && <span className="text-[10px] text-purple-600">Selected</span>}
-                        </div>
-                        <p className="text-[11px] text-slate-500 mt-1 leading-snug">{view.description}</p>
+                        {view.label}
                       </button>
                     );
                   })}
