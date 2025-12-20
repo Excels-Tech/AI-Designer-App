@@ -76,6 +76,13 @@ export function VideoCreator({ designUrl }: VideoCreatorProps) {
     progress?: number;
     error?: string | null;
   }>({ status: 'idle' });
+  const [videoTitle, setVideoTitle] = useState('');
+  const [videoSaveState, setVideoSaveState] = useState<{
+    status: 'idle' | 'saving' | 'saved' | 'error';
+    id?: string;
+    message?: string;
+    error?: string;
+  }>({ status: 'idle' });
 
   const totalDuration = useMemo(
     () => project.slides.reduce((acc, slide) => acc + slide.durationSec, 0),
@@ -232,6 +239,7 @@ export function VideoCreator({ designUrl }: VideoCreatorProps) {
 
   const renderVideo = async () => {
     setError(null);
+    setVideoSaveState({ status: 'idle' });
     if (project.slides.length === 0) {
       setError('Add at least one slide to render.');
       return;
@@ -279,6 +287,31 @@ export function VideoCreator({ designUrl }: VideoCreatorProps) {
       setRenderState({ status: 'rendering', jobId: data.jobId });
     } catch (err: any) {
       setRenderState({ status: 'error', error: err?.message || 'Render failed.' });
+    }
+  };
+
+  const saveVideo = async () => {
+    if (renderState.status !== 'done' || !renderState.jobId) return;
+    const title = videoTitle.trim();
+    if (!title) {
+      setVideoSaveState({ status: 'error', error: 'Enter a video name before saving.' });
+      return;
+    }
+
+    setVideoSaveState({ status: 'saving' });
+    try {
+      const res = await authFetch('/api/video-designs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, jobId: renderState.jobId, project }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to save video.');
+      }
+      setVideoSaveState({ status: 'saved', id: data.id, message: 'Saved to My Designs.' });
+    } catch (err: any) {
+      setVideoSaveState({ status: 'error', error: err?.message || 'Failed to save video.' });
     }
   };
 
@@ -342,6 +375,55 @@ export function VideoCreator({ designUrl }: VideoCreatorProps) {
           <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             <AlertTriangle className="w-4 h-4" />
             <span>{renderState.error}</span>
+          </div>
+        )}
+
+        {renderState.status === 'done' && renderState.jobId && (
+          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4 space-y-3">
+            <div className="flex items-center justify-between gap-4 flex-wrap">
+              <div>
+                <p className="text-sm text-slate-900 font-medium">Save Video to My Designs</p>
+                <p className="text-xs text-slate-500">Keeps a copy so you can download later.</p>
+              </div>
+            </div>
+            <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
+              <div className="flex-1">
+                <label className="block text-sm text-slate-700 mb-2">Video name</label>
+                <input
+                  value={videoTitle}
+                  onChange={(e) => setVideoTitle(e.target.value)}
+                  placeholder="e.g., Shirt promo video"
+                  className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 focus:border-purple-500 focus:outline-none text-sm"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={saveVideo}
+                disabled={videoSaveState.status === 'saving' || videoSaveState.status === 'saved' || !videoTitle.trim()}
+                className={
+                  videoSaveState.status === 'saving' || videoSaveState.status === 'saved' || !videoTitle.trim()
+                    ? 'px-5 py-3 rounded-2xl text-sm bg-slate-200 text-slate-500 cursor-not-allowed whitespace-nowrap'
+                    : 'px-5 py-3 rounded-2xl text-sm bg-gradient-to-r from-violet-500 to-purple-500 text-white hover:shadow-xl hover:shadow-purple-500/30 whitespace-nowrap'
+                }
+              >
+                {videoSaveState.status === 'saving'
+                  ? 'Saving...'
+                  : videoSaveState.status === 'saved'
+                  ? 'Saved'
+                  : 'Save to My Designs'}
+              </button>
+            </div>
+            {(videoSaveState.message || videoSaveState.error) && (
+              <div
+                className={
+                  videoSaveState.message
+                    ? 'rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800'
+                    : 'rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700'
+                }
+              >
+                {videoSaveState.message || videoSaveState.error}
+              </div>
+            )}
           </div>
         )}
 

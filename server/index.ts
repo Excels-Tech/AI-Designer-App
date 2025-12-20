@@ -14,8 +14,10 @@ import sharp from 'sharp';
 import { GoogleGenAI } from '@google/genai';
 import { connectMongo, getDb } from './db';
 import { Design } from './models/Design';
+import { VideoDesign } from './models/VideoDesign';
 import {
   uploadDataUrlToGridFS,
+  uploadFileToGridFS,
   downloadGridFSFile,
   deleteGridFSFile,
   getFileInfo,
@@ -813,6 +815,7 @@ app.get('/api/video/status/:id', (req, res) => {
 
   const job = getVideoJob(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found.' });
+  if (job.userId && job.userId !== userId) return res.status(404).json({ error: 'Job not found.' });
   res.json({ status: job.status, error: job.error, progress: job.progress });
 });
 
@@ -823,6 +826,7 @@ app.get('/api/video/download/:id', (req, res) => {
   const { id } = req.params;
   const job = getVideoJob(id);
   if (!job) return res.status(404).json({ error: 'Job not found.' });
+  if (job.userId && job.userId !== userId) return res.status(404).json({ error: 'Job not found.' });
   if (job.status !== 'done' || !hasJobOutput(id)) {
     return res.status(409).json({ error: 'Video not ready.' });
   }
@@ -889,6 +893,152 @@ app.get('/api/video/download/:id', (req, res) => {
   });
   stream.pipe(res);
   return;
+});
+
+app.post('/api/video-designs', async (req, res) => {
+  const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
+  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+
+  try {
+    const title = String(req.body?.title || '').trim();
+    const jobId = String(req.body?.jobId || '').trim();
+    const project = req.body?.project;
+
+    if (!title) return res.status(400).json({ error: 'Missing title.' });
+    if (title.length > 80) return res.status(400).json({ error: 'Title is too long.' });
+    if (!jobId) return res.status(400).json({ error: 'Missing jobId.' });
+
+    const job = getVideoJob(jobId);
+    if (!job || (job.userId && job.userId !== userId)) {
+      return res.status(404).json({ error: 'Job not found.' });
+    }
+    if (job.status !== 'done' || !hasJobOutput(jobId)) {
+      return res.status(409).json({ error: 'Video not ready.' });
+    }
+
+    const outputPath = getJobOutputPath(jobId)!;
+    const videoFileId = await uploadFileToGridFS(outputPath, `video-${Date.now()}.mp4`, 'video/mp4');
+
+    const doc = await VideoDesign.create({
+      title,
+      userId,
+      video: { mime: 'video/mp4', fileId: videoFileId.toString() },
+      project,
+    });
+
+    res.json({
+      id: doc._id.toString(),
+      title: doc.title,
+      downloadUrl: `/api/video-designs/${doc._id.toString()}/download.mp4`,
+    });
+  } catch (err: any) {
+    console.error('Failed to save video design', err);
+    res.status(500).json({ error: err?.message || 'Failed to save video.' });
+  }
+});
+
+app.get('/api/video-designs', async (req, res) => {
+  const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
+  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+
+  try {
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit || 24)));
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : '';
+
+    const filter: any = { userId };
+    if (cursor && Types.ObjectId.isValid(cursor)) {
+      filter._id = { $lt: new Types.ObjectId(cursor) };
+    }
+
+    const docs = await VideoDesign.find(filter).sort({ _id: -1 }).limit(limit + 1);
+    const items = docs.slice(0, limit).map((doc) => ({
+      id: doc._id.toString(),
+      title: doc.title,
+      createdAt: doc.createdAt,
+    }));
+
+    const nextCursor = docs.length > limit ? docs[limit]._id.toString() : null;
+    res.json({ items, nextCursor });
+  } catch (err) {
+    console.error('Failed to list video designs', err);
+    res.status(500).json({ error: 'Failed to load videos.' });
+  }
+});
+
+app.get('/api/video-designs/:id', async (req, res) => {
+  const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
+  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+
+  try {
+    const { id } = req.params;
+    if (!Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid video id.' });
+    }
+
+    const doc = await VideoDesign.findOne({ _id: id, userId });
+    if (!doc) return res.status(404).json({ error: 'Video not found.' });
+
+    res.json({
+      id: doc._id.toString(),
+      title: doc.title,
+      createdAt: doc.createdAt,
+      downloadUrl: `/api/video-designs/${doc._id.toString()}/download.mp4`,
+    });
+  } catch (err) {
+    console.error('Failed to fetch video design', err);
+    res.status(500).json({ error: 'Failed to load video.' });
+  }
+});
+
+app.delete('/api/video-designs/:id', async (req, res) => {
+  const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
+  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+
+  try {
+    const { id } = req.params;
+    if (!Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid video id.' });
+    }
+
+    const doc = await VideoDesign.findOneAndDelete({ _id: id, userId });
+    if (doc?.video?.fileId) {
+      await deleteGridFSFile(doc.video.fileId);
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Failed to delete video design', err);
+    res.status(500).json({ error: 'Failed to delete video.' });
+  }
+});
+
+app.get('/api/video-designs/:id/download.mp4', async (req, res) => {
+  const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
+  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+
+  try {
+    const { id } = req.params;
+    if (!Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid video id.' });
+    }
+
+    const doc = await VideoDesign.findOne({ _id: id, userId });
+    if (!doc) return res.status(404).json({ error: 'Video not found.' });
+
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="video-${id}.mp4"`);
+    res.setHeader('Cache-Control', 'private, max-age=0');
+
+    const stream = await getReadStream(doc.video.fileId);
+    stream.on('error', (err) => {
+      console.error('Video stream error', err);
+      if (!res.headersSent) res.status(500);
+      res.end();
+    });
+    stream.pipe(res);
+  } catch (err) {
+    console.error('Failed to download video', err);
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to download video.' });
+  }
 });
 
 const videoUploadTmpDir = path.join(os.tmpdir(), 'ai-designer-video-uploads');
@@ -1116,15 +1266,6 @@ const fileHandler = async (req: Request, res: Response) => {
 
 app.get('/api/files/:fileId', fileHandler);
 app.head('/api/files/:fileId', fileHandler);
-
-// Serve static frontend files in production
-const buildPath = path.resolve(process.cwd(), 'build');
-if (fs.existsSync(buildPath)) {
-  app.use(express.static(buildPath));
-  app.get('*', (_req, res) => {
-    res.sendFile(path.join(buildPath, 'index.html'));
-  });
-}
 
 app
   .listen(port)

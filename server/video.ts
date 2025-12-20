@@ -34,6 +34,7 @@ export type VideoProjectInput = {
 
 type VideoJob = {
   id: string;
+  userId?: string;
   status: 'queued' | 'running' | 'done' | 'error';
   outputPath?: string;
   workDir?: string;
@@ -422,7 +423,14 @@ export const createVideoJob = async (
 
   const jobId = randomUUID();
   const now = Date.now();
-  jobStore.set(jobId, { id: jobId, status: 'queued', createdAt: now, updatedAt: now, progress: 0 });
+  jobStore.set(jobId, {
+    id: jobId,
+    userId,
+    status: 'queued',
+    createdAt: now,
+    updatedAt: now,
+    progress: 0,
+  });
 
   const run = async () => {
     const job = jobStore.get(jobId);

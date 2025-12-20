@@ -1,5 +1,6 @@
 import { GridFSBucket, ObjectId } from 'mongodb';
 import { getDb } from './db';
+import fs from 'node:fs';
 
 let bucket: GridFSBucket | null = null;
 
@@ -26,6 +27,18 @@ export async function uploadDataUrlToGridFS(dataUrl: string, filename: string) {
       resolve(uploadStream.id as ObjectId);
     });
     uploadStream.end(buffer);
+  });
+}
+
+export async function uploadFileToGridFS(filePath: string, filename: string, contentType: string) {
+  const bucket = await getGridFSBucket();
+  return new Promise<ObjectId>((resolve, reject) => {
+    const uploadStream = bucket!.openUploadStream(filename, { contentType });
+    uploadStream.on('error', reject);
+    uploadStream.on('finish', () => resolve(uploadStream.id as ObjectId));
+    fs.createReadStream(filePath)
+      .on('error', reject)
+      .pipe(uploadStream);
   });
 }
 
