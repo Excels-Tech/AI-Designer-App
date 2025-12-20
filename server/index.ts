@@ -374,7 +374,12 @@ async function generateViewImage(
 
   const raw = Buffer.from(imagePart.data as string, 'base64');
   const resized = await sharp(raw)
-    .resize(targetWidth, targetHeight, { fit: 'cover' })
+    .resize(targetWidth, targetHeight, {
+      fit: 'contain',
+      background: { r: 245, g: 246, b: 248, alpha: 1 },
+      position: 'center',
+      withoutEnlargement: true,
+    })
     .png()
     .toBuffer();
 
