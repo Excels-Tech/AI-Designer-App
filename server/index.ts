@@ -105,7 +105,8 @@ app.use(
       const normalizedOrigin = normalizeOrigin(origin);
       return callback(null, allowedOrigins.includes(normalizedOrigin));
     },
-    allowedHeaders: ['Content-Type', 'x-user-id'],
+    allowedHeaders: ['Content-Type', 'x-user-id', 'Range'],
+    exposedHeaders: ['Content-Range', 'Accept-Ranges', 'Content-Length'],
     credentials: true,
   })
 );
@@ -1081,7 +1082,7 @@ app.get('/api/video-designs/:id/stream.mp4', async (req, res) => {
       return;
     }
 
-    const match = /bytes=(\\d*)-(\\d*)/.exec(range);
+    const match = /bytes=(\d*)-(\d*)/.exec(range);
     if (!match) {
       res.status(416).setHeader('Content-Range', `bytes */${size}`).end();
       return;

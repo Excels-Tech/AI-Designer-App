@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Loader2, AlertTriangle, Image as ImageIcon, Trash2, Video as VideoIcon } from 'lucide-react';
 import clsx from 'clsx';
-import { authFetch, getUserId, resolveApiAssetUrl } from '../utils/auth';
+import { authFetch, getUserId } from '../utils/auth';
 
 type DesignListItem = {
   id: string;
@@ -45,6 +45,8 @@ export function MyDesigns() {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deletingVideo, setDeletingVideo] = useState<string | null>(null);
   const [previewVideoId, setPreviewVideoId] = useState<string | null>(null);
+  const [previewVideoUrl, setPreviewVideoUrl] = useState<string | null>(null);
+  const [previewVideoLoading, setPreviewVideoLoading] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
   const [thumbObjectUrls, setThumbObjectUrls] = useState<Record<string, string>>({});
   const [detailObjectUrls, setDetailObjectUrls] = useState<Record<string, string>>({});
@@ -165,6 +167,7 @@ export function MyDesigns() {
     return () => {
       Object.values(thumbObjectUrls).forEach((u) => URL.revokeObjectURL(u));
       Object.values(detailObjectUrls).forEach((u) => URL.revokeObjectURL(u));
+      if (previewVideoUrl) URL.revokeObjectURL(previewVideoUrl);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -285,6 +288,31 @@ export function MyDesigns() {
       .catch((err) => setVideoError(err?.message || 'Download failed.'));
   };
 
+  const openVideoPreview = async (id: string) => {
+    setVideoError(null);
+    setPreviewVideoId(id);
+    setPreviewVideoLoading(true);
+    if (previewVideoUrl) {
+      URL.revokeObjectURL(previewVideoUrl);
+      setPreviewVideoUrl(null);
+    }
+    try {
+      const res = await authFetch(`/api/video-designs/${id}/download.mp4`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to load video.');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      setPreviewVideoUrl(url);
+    } catch (err: any) {
+      setVideoError(err?.message || 'Failed to load video.');
+      setPreviewVideoId(null);
+    } finally {
+      setPreviewVideoLoading(false);
+    }
+  };
+
   return (
     <div className="p-8 space-y-6 max-w-6xl mx-auto">
       <div className="flex items-center justify-between">
@@ -397,7 +425,7 @@ export function MyDesigns() {
           </div>
         </div>
 
-        {previewVideoId && userId && (
+        {previewVideoId && (
           <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-sm text-slate-700">
@@ -413,15 +441,18 @@ export function MyDesigns() {
               </button>
             </div>
             <div className="rounded-2xl border border-slate-200 overflow-hidden bg-slate-900">
-              <video
-                controls
-                preload="metadata"
-                className="w-full max-h-[520px]"
-                crossOrigin="anonymous"
-                src={resolveApiAssetUrl(
-                  `/api/video-designs/${previewVideoId}/stream.mp4?uid=${encodeURIComponent(userId)}`
-                )}
-              />
+              {previewVideoLoading ? (
+                <div className="h-[280px] flex items-center justify-center text-slate-200">
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  <span className="ml-2 text-sm">Loading video...</span>
+                </div>
+              ) : previewVideoUrl ? (
+                <video controls preload="metadata" className="w-full max-h-[520px]" src={previewVideoUrl} />
+              ) : (
+                <div className="h-[280px] flex items-center justify-center text-slate-200 text-sm">
+                  Video not available.
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -458,7 +489,7 @@ export function MyDesigns() {
                 <div className="flex gap-2">
                   <button
                     type="button"
-                    onClick={() => setPreviewVideoId(video.id)}
+                    onClick={() => openVideoPreview(video.id)}
                     className="flex-1 px-3 py-2 rounded-xl bg-white border border-slate-200 hover:border-purple-300 text-sm text-slate-800"
                   >
                     Preview
