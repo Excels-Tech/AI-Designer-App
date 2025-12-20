@@ -25,10 +25,6 @@ export function SlideList({ slides, selectedId, onSelect, onReorder, onRemove }:
       {slides.map((slide, index) => (
         <div
           key={slide.id}
-          draggable
-          onDragStart={(event) => {
-            event.dataTransfer.setData('text/plain', slide.id);
-          }}
           onDragOver={(event) => {
             event.preventDefault();
           }}
@@ -50,7 +46,20 @@ export function SlideList({ slides, selectedId, onSelect, onReorder, onRemove }:
             <p className="text-xs text-slate-500">{slide.durationSec}s</p>
           </div>
           <div className="flex items-center gap-2 text-slate-400">
-            <GripVertical className="h-4 w-4" />
+            <button
+              type="button"
+              draggable
+              onClick={(event) => event.stopPropagation()}
+              onDragStart={(event) => {
+                event.stopPropagation();
+                event.dataTransfer.setData('text/plain', slide.id);
+              }}
+              className="rounded-lg p-1 hover:bg-slate-100 cursor-grab active:cursor-grabbing"
+              aria-label="Drag to reorder"
+              title="Drag to reorder"
+            >
+              <GripVertical className="h-4 w-4" />
+            </button>
             {slides.length > 1 && (
               <button
                 type="button"

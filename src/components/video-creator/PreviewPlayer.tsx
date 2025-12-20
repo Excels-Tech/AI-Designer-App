@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Pause, Play } from 'lucide-react';
 import type { Slide } from './types';
 import type { PointerEvent as ReactPointerEvent } from 'react';
@@ -9,6 +9,7 @@ type PreviewPlayerProps = {
   currentTime: number;
   isPlaying: boolean;
   videoUrl?: string | null;
+  imageScale?: number;
   onPlayToggle: (next: boolean) => void;
   onSeek: (time: number) => void;
   onSlideChange: (index: number) => void;
@@ -27,11 +28,13 @@ export function PreviewPlayer({
   currentTime,
   isPlaying,
   videoUrl,
+  imageScale = 1,
   onPlayToggle,
   onSeek,
   onSlideChange,
 }: PreviewPlayerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const [motionNonce, setMotionNonce] = useState(0);
   const totalDuration = useMemo(
     () => slides.reduce((acc, slide) => acc + slide.durationSec, 0),
     [slides]
@@ -78,12 +81,23 @@ export function PreviewPlayer({
     for (let i = 0; i < slides.length; i += 1) {
       const slide = slides[i];
       acc += slide.durationSec;
-      if (currentTime <= acc + 0.001) {
+      // Use strict boundary: if time equals a slide end, show the next slide.
+      if (currentTime < acc) {
         return { currentSlide: slide, currentIndex: i };
       }
     }
     return { currentSlide: slides[slides.length - 1], currentIndex: Math.max(0, slides.length - 1) };
   }, [currentTime, slides]);
+
+  useEffect(() => {
+    if (!currentSlide) return;
+    setMotionNonce((prev) => prev + 1);
+  }, [currentSlide?.id, currentSlide?.animation]);
+
+  useEffect(() => {
+    if (!isPlaying) return;
+    setMotionNonce((prev) => prev + 1);
+  }, [isPlaying]);
 
   useEffect(() => {
     if (slides.length === 0) return;
@@ -113,6 +127,45 @@ export function PreviewPlayer({
       </div>
     );
   }
+
+  const motion = currentSlide.animation || 'fadeIn';
+  const motionName =
+    motion === 'none'
+      ? ''
+      : motion === 'fadeIn'
+      ? 'vcFadeIn'
+      : motion === 'slide'
+      ? 'vcSlide'
+      : motion === 'zoom'
+      ? 'vcZoom'
+      : motion === 'rotate'
+      ? 'vcRotate'
+      : 'vcFadeIn';
+
+  const zoomStart = imageScale;
+  const zoomEnd = imageScale * 1.08;
+  const motionDuration =
+    motion === 'fadeIn'
+      ? '0.55s'
+      : motion === 'none'
+      ? '0s'
+      : `${Math.max(1.2, currentSlide.durationSec)}s`;
+
+  const motionStyle: CSSProperties =
+    motionName && motion !== 'none'
+      ? ({
+          animationName: motionName,
+          animationDuration: motionDuration,
+          animationTimingFunction: motion === 'zoom' ? 'ease-out' : 'cubic-bezier(0.2, 0.8, 0.2, 1)',
+          animationFillMode: 'both',
+          ['--vc-scale' as any]: String(imageScale),
+          ['--vc-zoom-start' as any]: String(zoomStart),
+          ['--vc-zoom-end' as any]: String(zoomEnd),
+        } as CSSProperties)
+      : ({
+          transform: `scale(${imageScale})`,
+          transformOrigin: 'center',
+        } as CSSProperties);
 
   const startDrag = (event: ReactPointerEvent) => {
     if (!currentSlide || !onSlideUpdate) return;
@@ -144,8 +197,18 @@ export function PreviewPlayer({
 
   return (
     <div className="space-y-4">
+      <style>{`
+        @keyframes vcFadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes vcSlide { from { opacity: 0; transform: translateX(-2%) scale(var(--vc-scale)); } to { opacity: 1; transform: translateX(0%) scale(var(--vc-scale)); } }
+        @keyframes vcZoom { from { transform: scale(var(--vc-zoom-start)); } to { transform: scale(var(--vc-zoom-end)); } }
+        @keyframes vcRotate { from { opacity: 0; transform: rotate(-1deg) scale(var(--vc-scale)); } to { opacity: 1; transform: rotate(0deg) scale(var(--vc-scale)); } }
+      `}</style>
       <div ref={containerRef} className="relative aspect-video bg-slate-900 rounded-2xl overflow-hidden">
-        <img src={currentSlide.imageSrc} alt="Preview" className="h-full w-full object-contain bg-black" />
+        <div className="absolute inset-0 flex items-center justify-center bg-black">
+          <div key={`${currentSlide.id}:${motionNonce}`} style={motionStyle}>
+            <img src={currentSlide.imageSrc} alt="Preview" className="max-h-full max-w-full object-contain" />
+          </div>
+        </div>
 
         {currentSlide.overlayText && (
           <div

@@ -1,5 +1,20 @@
-import { useMemo, useState, useEffect } from 'react';
-import { Sparkles, Wand2, Loader2, Camera, AlertCircle, ImageDown, ShieldCheck, Users, User, Baby } from 'lucide-react';
+import { useMemo, useRef, useState, useEffect, type ReactNode } from 'react';
+import {
+  Sparkles,
+  Wand2,
+  Loader2,
+  Camera,
+  Maximize2,
+  Palette,
+  AlertCircle,
+  ImageDown,
+  ShieldCheck,
+  Users,
+  User,
+  Baby,
+  ChevronDown,
+  Check,
+} from 'lucide-react';
 import clsx from 'clsx';
 import { authFetch, getUserId } from '../utils/auth';
 
@@ -71,7 +86,67 @@ const viewLabel = (view: ViewKey) => viewOptions.find((v) => v.id === view)?.lab
 const isModelStyle = (style: StyleKey): style is ModelStyleKey =>
   style === 'modelMale' || style === 'modelFemale' || style === 'modelKid';
 
+const styleLabelFor = (style: StyleKey) => {
+  if (isModelStyle(style)) {
+    const match = modelOptions.find((opt) => opt.id === style);
+    return match ? `Model (${match.label})` : 'Model';
+  }
+  return styleOptions.find((opt) => opt.id === style)?.label ?? 'Style';
+};
+
+function MenuDropdown({
+  open,
+  onToggle,
+  onClose,
+  button,
+  children,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  button: ReactNode;
+  children: ReactNode;
+}) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (rootRef.current?.contains(target)) return;
+      onClose();
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open, onClose]);
+
+  return (
+    <div ref={rootRef} className="relative">
+      <div onClick={onToggle}>{button}</div>
+      {open && (
+        <div className="absolute left-0 top-full mt-2 z-20 w-[min(320px,calc(100vw-2rem))] rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/10 overflow-hidden">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
+  const controlButtonBase =
+    'inline-flex items-center gap-2 px-4 py-3 rounded-2xl border-2 bg-white transition-all text-sm text-slate-800 whitespace-nowrap hover:border-purple-300 hover:shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-200';
+
   const [prompt, setPrompt] = useState('');
   const [style, setStyle] = useState<StyleKey>('realistic');
   const [resolution, setResolution] = useState<number>(1024);
@@ -87,6 +162,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const [userId, setUserId] = useState<string | null>(null);
   const [designName, setDesignName] = useState('');
   const [hasResultFlag, setHasResultFlag] = useState(false);
+  const [openMenu, setOpenMenu] = useState<'resolution' | 'style' | 'views' | null>(null);
 
   useEffect(() => {
     setUserId(getUserId());
@@ -98,6 +174,8 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     () => `Select View Angles (${selectedViews.length} selected)`,
     [selectedViews.length]
   );
+
+  const selectedStyleLabel = useMemo(() => styleLabelFor(style), [style]);
 
   const toggleView = (viewId: ViewKey) => {
     setSelectedViews((prev) =>
@@ -260,109 +338,94 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             </div>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-6">
-            <div className="space-y-4">
-              <div>
-                <p className="text-sm text-slate-700 mb-2">Resolution</p>
-                <div className="flex flex-wrap gap-2">
-                  {resolutionOptions.map((res) => (
-                    <button
-                      key={res}
-                      onClick={() => setResolution(res)}
-                      className={clsx(
-                        'px-4 py-2 rounded-xl text-sm border transition-all',
-                        resolution === res
-                          ? 'bg-purple-500 text-white border-purple-500 shadow-lg shadow-purple-500/30'
-                          : 'bg-white text-slate-700 border-slate-200 hover:border-purple-300'
-                      )}
-                    >
-                      {res}x{res}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <div className="flex items-center gap-2 mb-3">
-                  <Camera className="w-4 h-4 text-slate-600" />
-                  <p className="text-sm text-slate-700">{selectedViewsLabel}</p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {viewOptions.map((view) => {
-                    const active = selectedViews.includes(view.id);
-                    return (
+          <div className="space-y-3">
+            <div className="flex items-center gap-3 overflow-x-auto pb-1">
+              <MenuDropdown
+                open={openMenu === 'resolution'}
+                onToggle={() => setOpenMenu((prev) => (prev === 'resolution' ? null : 'resolution'))}
+                onClose={() => setOpenMenu(null)}
+                button={
+                  <button
+                    type="button"
+                    className={`${controlButtonBase} ${openMenu === 'resolution' ? 'border-purple-300 bg-purple-50' : 'border-slate-200'}`}
+                  >
+                    <Maximize2 className="w-4 h-4 text-slate-600" />
+                    Resolution: {resolution}x{resolution}
+                    <ChevronDown className="w-4 h-4 text-slate-500" />
+                  </button>
+                }
+              >
+                <div className="p-2">
+                  <p className="px-2 pt-1 pb-2 text-xs text-slate-500">Resolution</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {resolutionOptions.map((res) => (
                       <button
-                        key={view.id}
-                        onClick={() => toggleView(view.id)}
+                        key={res}
+                        type="button"
+                        onClick={() => {
+                          setResolution(res);
+                          setOpenMenu(null);
+                        }}
                         className={clsx(
-                          'px-4 py-2 rounded-xl text-sm border transition-all',
-                          active
-                            ? 'bg-purple-500 text-white border-purple-500 shadow-lg shadow-purple-500/30'
-                            : 'bg-white text-slate-700 border-slate-200 hover:border-purple-300'
+                          'px-3 py-2 rounded-xl text-sm border-2 text-left transition-all',
+                          resolution === res
+                            ? 'bg-purple-50 text-slate-900 border-purple-300 shadow-sm'
+                            : 'bg-white text-slate-700 border-slate-200 hover:border-purple-300 hover:bg-slate-50'
                         )}
                       >
-                        {view.label}
+                        {res}x{res}
                       </button>
-                    );
-                  })}
+                    ))}
+                  </div>
                 </div>
-                <p className="text-xs text-slate-500 mt-2">
-                  All selected views will be arranged in a single composite image and auto-cropped.
-                </p>
-              </div>
-            </div>
+              </MenuDropdown>
 
-            <div className="space-y-3">
-              <p className="text-sm text-slate-700">Style</p>
-              <div className="grid grid-cols-2 gap-3">
-                {styleOptions.filter((item) => !isModelStyle(item.id)).map((item) => {
-                  const active = style === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      onClick={() => setStyle(item.id)}
-                      className={clsx(
-                        'group flex items-center gap-3 rounded-xl border-2 px-3 py-2 text-left transition-all',
-                        active
-                          ? 'border-purple-500 bg-purple-50 shadow-sm shadow-purple-200'
-                          : 'border-slate-200 hover:border-slate-300 bg-white'
-                      )}
-                    >
-                      <div className="h-12 w-12 rounded-lg overflow-hidden bg-slate-100 flex-none">
-                        <img src={item.preview} alt={item.label} className="h-full w-full object-cover" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-xs font-medium text-slate-900">{item.label}</p>
-                        <p className="text-[11px] text-slate-500 line-clamp-1">{item.helper}</p>
-                      </div>
-                    </button>
-                  );
-                })}
+              <MenuDropdown
+                open={openMenu === 'style'}
+                onToggle={() => setOpenMenu((prev) => (prev === 'style' ? null : 'style'))}
+                onClose={() => setOpenMenu(null)}
+                button={
+                  <button
+                    type="button"
+                    className={`${controlButtonBase} ${openMenu === 'style' ? 'border-purple-300 bg-purple-50' : 'border-slate-200'}`}
+                  >
+                    <Palette className="w-4 h-4 text-slate-600" />
+                    Style: {selectedStyleLabel}
+                    <ChevronDown className="w-4 h-4 text-slate-500" />
+                  </button>
+                }
+              >
+                <div className="p-2">
+                  <p className="px-2 pt-1 pb-2 text-xs text-slate-500">Styles</p>
+                  <div className="space-y-1">
+                    {styleOptions.map((opt) => {
+                      const active = style === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => {
+                            setStyle(opt.id);
+                            setOpenMenu(null);
+                          }}
+                          className={clsx(
+                            'w-full flex items-start justify-between gap-3 px-3 py-2 rounded-xl border transition-colors text-left',
+                            active
+                              ? 'bg-purple-50 text-slate-900 border-purple-300'
+                              : 'bg-white text-slate-800 border-transparent hover:bg-slate-50'
+                          )}
+                        >
+                          <span className="min-w-0">
+                            <span className="block text-sm">{opt.label}</span>
+                            <span className="block text-xs text-slate-500 line-clamp-1">{opt.helper}</span>
+                          </span>
+                          {active && <Check className="w-4 h-4 text-purple-600 flex-none mt-0.5" />}
+                        </button>
+                      );
+                    })}
 
-                <button
-                  type="button"
-                  onClick={() => setStyle('modelMale')}
-                  className={clsx(
-                    'group flex items-center gap-3 rounded-xl border-2 px-3 py-2 text-left transition-all',
-                    isModelStyle(style)
-                      ? 'border-purple-500 bg-purple-50 shadow-sm shadow-purple-200'
-                      : 'border-slate-200 hover:border-slate-300 bg-white'
-                  )}
-                >
-                  <div className="h-12 w-12 rounded-lg overflow-hidden bg-gradient-to-br from-fuchsia-500 to-violet-600 flex-none flex items-center justify-center">
-                    <Users className="h-6 w-6 text-white" />
-                  </div>
-                  <div className="min-w-0">
-                    <p className="text-xs font-medium text-slate-900">Model</p>
-                    <p className="text-[11px] text-slate-500 line-clamp-1">see design on male/female/kid</p>
-                  </div>
-                </button>
-              </div>
-
-              {isModelStyle(style) && (
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-xs text-slate-700 mb-2">Choose model</p>
-                  <div className="flex flex-wrap gap-2">
+                    <div className="my-2 border-t border-slate-100" />
+                    <p className="px-2 pt-1 pb-2 text-xs text-slate-500">Model</p>
                     {modelOptions.map((opt) => {
                       const active = style === opt.id;
                       const Icon = opt.icon;
@@ -370,23 +433,80 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                         <button
                           key={opt.id}
                           type="button"
-                          onClick={() => setStyle(opt.id)}
+                          onClick={() => {
+                            setStyle(opt.id);
+                            setOpenMenu(null);
+                          }}
                           className={clsx(
-                            'inline-flex items-center gap-2 px-3 py-2 rounded-xl text-sm border transition-all',
+                            'w-full flex items-center justify-between gap-3 px-3 py-2 rounded-xl border transition-colors text-left',
                             active
-                              ? 'bg-purple-500 text-white border-purple-500 shadow-lg shadow-purple-500/30'
-                              : 'bg-white text-slate-700 border-slate-200 hover:border-purple-300'
+                              ? 'bg-purple-50 text-slate-900 border-purple-300'
+                              : 'bg-white text-slate-800 border-transparent hover:bg-slate-50'
                           )}
                         >
-                          <Icon className="h-4 w-4" />
-                          {opt.label}
+                          <span className="inline-flex items-center gap-2 min-w-0">
+                            <Icon className="w-4 h-4 text-slate-600 flex-none" />
+                            <span className="min-w-0">
+                              <span className="block text-sm">Model ({opt.label})</span>
+                              <span className="block text-xs text-slate-500 line-clamp-1">{opt.helper}</span>
+                            </span>
+                          </span>
+                          {active && <Check className="w-4 h-4 text-purple-600 flex-none" />}
                         </button>
                       );
                     })}
                   </div>
                 </div>
-              )}
+              </MenuDropdown>
+
+              <MenuDropdown
+                open={openMenu === 'views'}
+                onToggle={() => setOpenMenu((prev) => (prev === 'views' ? null : 'views'))}
+                onClose={() => setOpenMenu(null)}
+                button={
+                  <button
+                    type="button"
+                    className={`${controlButtonBase} ${openMenu === 'views' ? 'border-purple-300 bg-purple-50' : 'border-slate-200'}`}
+                  >
+                    <Camera className="w-4 h-4 text-slate-600" />
+                    {selectedViewsLabel}
+                    <ChevronDown className="w-4 h-4 text-slate-500" />
+                  </button>
+                }
+              >
+                <div className="p-2">
+                  <p className="px-2 pt-1 pb-2 text-xs text-slate-500">View angles</p>
+                  <div className="space-y-1">
+                    {viewOptions.map((view) => {
+                      const active = selectedViews.includes(view.id);
+                      return (
+                        <button
+                          key={view.id}
+                          type="button"
+                          onClick={() => toggleView(view.id)}
+                          className={clsx(
+                            'w-full flex items-start justify-between gap-3 px-3 py-2 rounded-xl border transition-colors text-left',
+                            active
+                              ? 'bg-purple-50 text-slate-900 border-purple-300'
+                              : 'bg-white text-slate-800 border-transparent hover:bg-slate-50'
+                          )}
+                        >
+                          <span className="min-w-0">
+                            <span className="block text-sm">{view.label}</span>
+                            <span className="block text-xs text-slate-500 line-clamp-1">{view.description}</span>
+                          </span>
+                          {active && <Check className="w-4 h-4 text-purple-600 flex-none mt-0.5" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </MenuDropdown>
             </div>
+
+            <p className="text-xs text-slate-500">
+              All selected views will be arranged in a single composite image and auto-cropped.
+            </p>
           </div>
 
           {error && (
@@ -428,7 +548,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
               <div>
                 <p className="text-slate-900 font-medium">Composite Preview</p>
                 <p className="text-sm text-slate-500">
-                  {selectedViews.length} views · {resolution}x{resolution} · {styleOptions.find((s) => s.id === style)?.label}
+                  {selectedViews.length} views · {resolution}x{resolution} · {selectedStyleLabel}
                 </p>
               </div>
               <div className="flex flex-wrap gap-2 items-center justify-end overflow-visible">

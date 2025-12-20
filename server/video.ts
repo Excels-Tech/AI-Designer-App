@@ -311,9 +311,35 @@ const buildSlideFilter = (
   filters.push(
     `scale=${width}:${height}:force_original_aspect_ratio=decrease`,
     `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black`,
-    'setsar=1',
-    `fps=${fps}`
+    'setsar=1'
   );
+
+  const frames = Math.max(1, Math.round(slide.durationSec * fps));
+  const denom = Math.max(1, frames - 1);
+
+  if (slide.animation === 'zoom') {
+    const startZoom = 1.0;
+    const endZoom = 1.12;
+    const step = (endZoom - startZoom) / denom;
+    filters.push(
+      `zoompan=z='if(eq(on,0),${startZoom.toFixed(3)},min(${endZoom.toFixed(3)},zoom+${step.toFixed(
+        6
+      )}))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps}`
+    );
+  } else if (slide.animation === 'slide') {
+    const zoom = 1.08;
+    filters.push(
+      `zoompan=z='${zoom.toFixed(
+        3
+      )}':x='(iw-iw/zoom)*on/${denom}':y='(ih-ih/zoom)/2':d=${frames}:s=${width}x${height}:fps=${fps}`
+    );
+  } else {
+    filters.push(`fps=${fps}`);
+    if (slide.animation === 'rotate') {
+      const amp = 0.02;
+      filters.push(`rotate=${amp}*sin(2*PI*t/${Math.max(0.01, slide.durationSec)}):ow=iw:oh=ih:c=black`);
+    }
+  }
 
   if (slide.overlayText) {
     const color = ffmpegColor(slide.overlayColorHex);
@@ -324,7 +350,8 @@ const buildSlideFilter = (
     );
   }
 
-  const fadeDur = Math.min(0.4, Math.max(0, slide.durationSec - 0.2) / 2);
+  const shouldFade = slide.animation !== 'none';
+  const fadeDur = shouldFade ? Math.min(0.4, Math.max(0, slide.durationSec - 0.2) / 2) : 0;
   if (fadeDur > 0) {
     filters.push(`fade=t=in:st=0:d=${fadeDur}`, `fade=t=out:st=${slide.durationSec - fadeDur}:d=${fadeDur}`);
   }
