@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Loader2, AlertTriangle, Image as ImageIcon, Trash2, Video as VideoIcon } from 'lucide-react';
 import clsx from 'clsx';
-import { authFetch, getUserId } from '../utils/auth';
+import { authFetch, getUserId, resolveApiAssetUrl } from '../utils/auth';
 
 type DesignListItem = {
   id: string;
@@ -417,7 +417,10 @@ export function MyDesigns() {
                 controls
                 preload="metadata"
                 className="w-full max-h-[520px]"
-                src={`/api/video-designs/${previewVideoId}/stream.mp4?uid=${encodeURIComponent(userId)}`}
+                crossOrigin="anonymous"
+                src={resolveApiAssetUrl(
+                  `/api/video-designs/${previewVideoId}/stream.mp4?uid=${encodeURIComponent(userId)}`
+                )}
               />
             </div>
           </div>
