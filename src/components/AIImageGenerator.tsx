@@ -285,17 +285,17 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                         key={view.id}
                         onClick={() => toggleView(view.id)}
                         className={clsx(
-                          'p-3 rounded-xl border-2 text-left transition-all',
+                          'p-2 rounded-xl border-2 text-left transition-all',
                           active
                             ? 'border-purple-500 bg-purple-50 shadow-sm shadow-purple-200'
                             : 'border-slate-200 hover:border-slate-300 bg-white'
                         )}
                       >
                         <div className="flex items-center justify-between">
-                          <span className="text-sm text-slate-900">{view.label}</span>
-                          {active && <span className="text-xs text-purple-600">Selected</span>}
+                          <span className="text-xs font-medium text-slate-900">{view.label}</span>
+                          {active && <span className="text-[10px] text-purple-600">Selected</span>}
                         </div>
-                        <p className="text-xs text-slate-500 mt-1">{view.description}</p>
+                        <p className="text-[11px] text-slate-500 mt-1 leading-snug">{view.description}</p>
                       </button>
                     );
                   })}
@@ -316,21 +316,18 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                       key={item.id}
                       onClick={() => setStyle(item.id)}
                       className={clsx(
-                        'group relative overflow-hidden rounded-2xl border-2 transition-all',
-                        active ? 'border-purple-500 shadow-lg shadow-purple-200' : 'border-slate-200 hover:border-slate-300'
+                        'group flex items-center gap-3 rounded-xl border-2 px-3 py-2 text-left transition-all',
+                        active
+                          ? 'border-purple-500 bg-purple-50 shadow-sm shadow-purple-200'
+                          : 'border-slate-200 hover:border-slate-300 bg-white'
                       )}
                     >
-                      <div className="aspect-square bg-slate-100">
-                        <img src={item.preview} alt={item.label} className="w-full h-full object-cover" />
+                      <div className="h-12 w-12 rounded-lg overflow-hidden bg-slate-100 flex-none">
+                        <img src={item.preview} alt={item.label} className="h-full w-full object-cover" />
                       </div>
-                      <div
-                        className={clsx(
-                          'absolute inset-0 flex flex-col justify-center items-center gap-1 text-sm transition-colors',
-                          active ? 'bg-purple-500/80 text-white' : 'bg-black/40 text-white'
-                        )}
-                      >
-                        <span>{item.label}</span>
-                        <span className="text-xs opacity-90">{item.helper}</span>
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium text-slate-900">{item.label}</p>
+                        <p className="text-[11px] text-slate-500 line-clamp-1">{item.helper}</p>
                       </div>
                     </button>
                   );
