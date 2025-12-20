@@ -197,7 +197,7 @@ function validateDesignPayload(body: any) {
   if (!allowedResolutions.has(resolution)) return { ok: false, error: 'Invalid resolution.' };
   if (!views.length) return { ok: false, error: 'At least one view is required.' };
   if (new Set(views).size !== views.length) return { ok: false, error: 'Views must be unique.' };
-  if (!views.every((v: string) => allowedViews.has(v))) return { ok: false, error: 'Invalid view value.' };
+  if (!views.every((v: string) => allowedViews.has(v as ViewKey))) return { ok: false, error: 'Invalid view value.' };
   if (views.length > 6) return { ok: false, error: 'Maximum 6 views allowed.' };
   if (!isPngDataUrl(composite) && typeof composite !== 'object') {
     return { ok: false, error: 'Composite must be a PNG data URL.' };
