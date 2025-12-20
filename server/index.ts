@@ -345,6 +345,7 @@ function buildViewPrompt(basePrompt: string, style: StyleKey, view: ViewKey, wid
     `Single-frame image of the SAME product/design viewed from the ${viewLabels[view]} angle.`,
     `View requirement: ${viewSpecificInstructions[view]}`,
     `No grids, no collages, no multi-panel layouts. One centered subject on a neutral studio background.`,
+    `Ensure the entire product is fully visible in frame with comfortable margins; no parts cut off by the image edges.`,
     `Keep lighting, materials, and colors identical to every other view.`,
     `Do not mirror or flip the subject. Do not swap left/right. Each requested view must be distinct and match its angle.`,
     `Style: ${styleModifiers[style]}.`,
@@ -373,13 +374,21 @@ async function generateViewImage(
   }
 
   const raw = Buffer.from(imagePart.data as string, 'base64');
-  const resized = await sharp(raw)
-    .resize(targetWidth, targetHeight, {
-      fit: 'contain',
-      background: { r: 245, g: 246, b: 248, alpha: 1 },
-      position: 'center',
-      withoutEnlargement: true,
-    })
+  const background = { r: 245, g: 246, b: 248, alpha: 1 };
+  const insetScale = 0.9;
+  const insetWidth = Math.max(1, Math.round(targetWidth * insetScale));
+  const insetHeight = Math.max(1, Math.round(targetHeight * insetScale));
+  const inset = await sharp(raw)
+    .resize(insetWidth, insetHeight, { fit: 'contain', background, withoutEnlargement: true })
+    .png()
+    .toBuffer();
+
+  const left = Math.floor((targetWidth - insetWidth) / 2);
+  const top = Math.floor((targetHeight - insetHeight) / 2);
+  const resized = await sharp({
+    create: { width: targetWidth, height: targetHeight, channels: 4, background },
+  })
+    .composite([{ input: inset, left, top }])
     .png()
     .toBuffer();
 
