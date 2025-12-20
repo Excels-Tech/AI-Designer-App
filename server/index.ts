@@ -1394,6 +1394,17 @@ const fileHandler = async (req: Request, res: Response) => {
 app.get('/api/files/:fileId', fileHandler);
 app.head('/api/files/:fileId', fileHandler);
 
+// Serve the built Vite app in production (Render, etc.)
+const clientBuildDir = path.resolve(process.cwd(), 'build');
+const clientIndexHtml = path.join(clientBuildDir, 'index.html');
+if (fs.existsSync(clientIndexHtml)) {
+  app.use(express.static(clientBuildDir));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) return next();
+    res.sendFile(clientIndexHtml);
+  });
+}
+
 app
   .listen(port)
   .once('listening', () => {
