@@ -12,7 +12,7 @@ export interface DesignDoc extends Document {
   title: string;
   prompt: string;
   userId: string;
-  style: 'realistic' | '3d' | 'lineart' | 'watercolor';
+  style: 'realistic' | '3d' | 'lineart' | 'watercolor' | 'modelMale' | 'modelFemale' | 'modelKid';
   resolution: number;
   views: string[];
   composite: {
@@ -31,7 +31,11 @@ const DesignSchema = new Schema<DesignDoc>(
     title: { type: String, default: 'Untitled Design', trim: true },
     prompt: { type: String, required: true, trim: true },
     userId: { type: String, required: true, index: true },
-    style: { type: String, enum: ['realistic', '3d', 'lineart', 'watercolor'], required: true },
+    style: {
+      type: String,
+      enum: ['realistic', '3d', 'lineart', 'watercolor', 'modelMale', 'modelFemale', 'modelKid'],
+      required: true,
+    },
     resolution: { type: Number, required: true },
     views: { type: [String], required: true },
     composite: {

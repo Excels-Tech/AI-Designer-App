@@ -3,7 +3,7 @@ import { Sparkles, Wand2, Loader2, Camera, AlertCircle, ImageDown, ShieldCheck }
 import clsx from 'clsx';
 import { authFetch, getUserId } from '../utils/auth';
 
-type StyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor';
+type StyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor' | 'modelMale' | 'modelFemale' | 'modelKid';
 type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'top';
 
 interface AIImageGeneratorProps {
@@ -43,10 +43,22 @@ const styleOptions: { id: StyleKey; label: string; preview: string; helper: stri
     helper: 'ink on white, no shading',
   },
   {
-    id: 'watercolor',
-    label: 'Watercolor',
-    preview: 'https://images.unsplash.com/photo-1547891654-e66ed7ebb968?w=400&h=400&fit=crop',
-    helper: 'soft edges, paper grain',
+    id: 'modelMale',
+    label: 'Model (Male)',
+    preview: 'https://images.unsplash.com/photo-1520975958221-8f5b4f03e0f4?w=400&h=400&fit=crop',
+    helper: 'shirt on male model',
+  },
+  {
+    id: 'modelFemale',
+    label: 'Model (Female)',
+    preview: 'https://images.unsplash.com/photo-1520975867597-0a7a0a9b5ed2?w=400&h=400&fit=crop',
+    helper: 'shirt on female model',
+  },
+  {
+    id: 'modelKid',
+    label: 'Model (Kid)',
+    preview: 'https://images.unsplash.com/photo-1520975685343-7d0b5dd01cf2?w=400&h=400&fit=crop',
+    helper: 'shirt on kid model',
   },
 ];
 

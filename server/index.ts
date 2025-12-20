@@ -31,7 +31,7 @@ import multer from 'multer';
 import os from 'node:os';
 import { getAssetInfo, saveUploadedAsset, startAssetCleanup } from './videoAssets';
 
-type StyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor';
+type StyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor' | 'modelMale' | 'modelFemale' | 'modelKid';
 type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'top';
 
 interface GenerateRequestBody {
@@ -69,6 +69,9 @@ const styleModifiers: Record<StyleKey, string> = {
   '3d': 'high-quality 3D render, PBR materials, studio lighting, octane/cycles style',
   lineart: 'clean line art, black ink on white background, no shading, no color',
   watercolor: 'watercolor painting, paper texture, soft edges, gentle pigment blooms',
+  modelMale: 'photorealistic studio photo of a male model wearing the product, fashion lookbook, natural pose',
+  modelFemale: 'photorealistic studio photo of a female model wearing the product, fashion lookbook, natural pose',
+  modelKid: 'photorealistic studio photo of a child model wearing the product, catalog photo, natural pose',
 };
 
 const viewLabels: Record<ViewKey, string> = {
@@ -143,7 +146,7 @@ connectMongo().catch((err) => {
   process.exit(1);
 });
 
-const allowedStyles: StyleKey[] = ['realistic', '3d', 'lineart', 'watercolor'];
+const allowedStyles: StyleKey[] = ['realistic', '3d', 'lineart', 'watercolor', 'modelMale', 'modelFemale', 'modelKid'];
 const allowedViews = new Set<ViewKey>(['front', 'back', 'left', 'right', 'threeQuarter', 'top']);
 
 const pngDataUrlRegex = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/i;
