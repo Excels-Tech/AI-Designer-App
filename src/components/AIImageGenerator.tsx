@@ -1,9 +1,10 @@
 import { useMemo, useState, useEffect } from 'react';
-import { Sparkles, Wand2, Loader2, Camera, AlertCircle, ImageDown, ShieldCheck } from 'lucide-react';
+import { Sparkles, Wand2, Loader2, Camera, AlertCircle, ImageDown, ShieldCheck, Users, User, Baby } from 'lucide-react';
 import clsx from 'clsx';
 import { authFetch, getUserId } from '../utils/auth';
 
-type StyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor' | 'modelMale' | 'modelFemale' | 'modelKid';
+type ModelStyleKey = 'modelMale' | 'modelFemale' | 'modelKid';
+type StyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor' | ModelStyleKey;
 type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'top';
 
 interface AIImageGeneratorProps {
@@ -43,23 +44,17 @@ const styleOptions: { id: StyleKey; label: string; preview: string; helper: stri
     helper: 'ink on white, no shading',
   },
   {
-    id: 'modelMale',
-    label: 'Model (Male)',
-    preview: 'https://images.unsplash.com/photo-1520975958221-8f5b4f03e0f4?w=400&h=400&fit=crop',
-    helper: 'shirt on male model',
+    id: 'watercolor',
+    label: 'Watercolor',
+    preview: 'https://images.unsplash.com/photo-1547891654-e66ed7ebb968?w=400&h=400&fit=crop',
+    helper: 'soft edges, paper grain',
   },
-  {
-    id: 'modelFemale',
-    label: 'Model (Female)',
-    preview: 'https://images.unsplash.com/photo-1520975867597-0a7a0a9b5ed2?w=400&h=400&fit=crop',
-    helper: 'shirt on female model',
-  },
-  {
-    id: 'modelKid',
-    label: 'Model (Kid)',
-    preview: 'https://images.unsplash.com/photo-1520975685343-7d0b5dd01cf2?w=400&h=400&fit=crop',
-    helper: 'shirt on kid model',
-  },
+];
+
+const modelOptions: Array<{ id: ModelStyleKey; label: string; icon: typeof Users; helper: string }> = [
+  { id: 'modelMale', label: 'Male', icon: User, helper: 'shirt on male model' },
+  { id: 'modelFemale', label: 'Female', icon: User, helper: 'shirt on female model' },
+  { id: 'modelKid', label: 'Kid', icon: Baby, helper: 'shirt on kid model' },
 ];
 
 const viewOptions: { id: ViewKey; label: string; description: string }[] = [
@@ -72,6 +67,9 @@ const viewOptions: { id: ViewKey; label: string; description: string }[] = [
 ];
 
 const viewLabel = (view: ViewKey) => viewOptions.find((v) => v.id === view)?.label ?? view;
+
+const isModelStyle = (style: StyleKey): style is ModelStyleKey =>
+  style === 'modelMale' || style === 'modelFemale' || style === 'modelKid';
 
 export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const [prompt, setPrompt] = useState('');
@@ -317,7 +315,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             <div className="space-y-3">
               <p className="text-sm text-slate-700">Style</p>
               <div className="grid grid-cols-2 gap-3">
-                {styleOptions.map((item) => {
+                {styleOptions.filter((item) => !isModelStyle(item.id)).map((item) => {
                   const active = style === item.id;
                   return (
                     <button
@@ -340,7 +338,54 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                     </button>
                   );
                 })}
+
+                <button
+                  type="button"
+                  onClick={() => setStyle('modelMale')}
+                  className={clsx(
+                    'group flex items-center gap-3 rounded-xl border-2 px-3 py-2 text-left transition-all',
+                    isModelStyle(style)
+                      ? 'border-purple-500 bg-purple-50 shadow-sm shadow-purple-200'
+                      : 'border-slate-200 hover:border-slate-300 bg-white'
+                  )}
+                >
+                  <div className="h-12 w-12 rounded-lg overflow-hidden bg-gradient-to-br from-fuchsia-500 to-violet-600 flex-none flex items-center justify-center">
+                    <Users className="h-6 w-6 text-white" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-slate-900">Model</p>
+                    <p className="text-[11px] text-slate-500 line-clamp-1">see design on male/female/kid</p>
+                  </div>
+                </button>
               </div>
+
+              {isModelStyle(style) && (
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-xs text-slate-700 mb-2">Choose model</p>
+                  <div className="flex flex-wrap gap-2">
+                    {modelOptions.map((opt) => {
+                      const active = style === opt.id;
+                      const Icon = opt.icon;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => setStyle(opt.id)}
+                          className={clsx(
+                            'inline-flex items-center gap-2 px-3 py-2 rounded-xl text-sm border transition-all',
+                            active
+                              ? 'bg-purple-500 text-white border-purple-500 shadow-lg shadow-purple-500/30'
+                              : 'bg-white text-slate-700 border-slate-200 hover:border-purple-300'
+                          )}
+                        >
+                          <Icon className="h-4 w-4" />
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
