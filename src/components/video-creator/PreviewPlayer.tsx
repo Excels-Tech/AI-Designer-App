@@ -31,6 +31,7 @@ export function PreviewPlayer({
   onSeek,
   onSlideChange,
 }: PreviewPlayerProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const totalDuration = useMemo(
     () => slides.reduce((acc, slide) => acc + slide.durationSec, 0),
     [slides]
@@ -127,9 +128,8 @@ export function PreviewPlayer({
     if (!currentSlide || !onSlideUpdate) return;
     const drag = dragRef.current;
     if (!drag) return;
-    const parent = (event.currentTarget as HTMLElement).parentElement;
-    if (!parent) return;
-    const rect = parent.getBoundingClientRect();
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
     if (!rect.width || !rect.height) return;
     const dxPct = (event.clientX - drag.startClientX) / rect.width;
     const dyPct = (event.clientY - drag.startClientY) / rect.height;
@@ -144,43 +144,41 @@ export function PreviewPlayer({
 
   return (
     <div className="space-y-4">
-      <div className="relative aspect-video bg-slate-900 rounded-2xl overflow-hidden">
-        <img src={currentSlide.imageSrc} alt="Preview" className="h-full w-full object-cover" />
+      <div ref={containerRef} className="relative aspect-video bg-slate-900 rounded-2xl overflow-hidden">
+        <img src={currentSlide.imageSrc} alt="Preview" className="h-full w-full object-contain bg-black" />
 
         {currentSlide.overlayText && (
-          <div className="absolute inset-0 pointer-events-none z-20">
-            <div
-              className="absolute pointer-events-auto rounded-2xl bg-black/45 px-8 py-4 text-center text-white shadow-xl cursor-move select-none"
+          <div
+            className="absolute z-20 rounded-2xl bg-black/45 px-8 py-4 text-center text-white shadow-xl cursor-move select-none"
+            style={{
+              left:
+                currentSlide.position === 'custom'
+                  ? `${Math.round(((currentSlide.xPct ?? 0.5) * 100 + Number.EPSILON) * 100) / 100}%`
+                  : '50%',
+              top:
+                currentSlide.position === 'custom'
+                  ? `${Math.round(((currentSlide.yPct ?? 0.85) * 100 + Number.EPSILON) * 100) / 100}%`
+                  : currentSlide.position === 'top'
+                  ? '10%'
+                  : currentSlide.position === 'center'
+                  ? '50%'
+                  : '85%',
+              transform: 'translate(-50%, -50%)',
+            }}
+            onPointerDown={startDrag}
+            onPointerMove={onDragMove}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
+          >
+            <p
               style={{
-                left:
-                  currentSlide.position === 'custom'
-                    ? `${Math.round(((currentSlide.xPct ?? 0.5) * 100 + Number.EPSILON) * 100) / 100}%`
-                    : '50%',
-                top:
-                  currentSlide.position === 'custom'
-                    ? `${Math.round(((currentSlide.yPct ?? 0.85) * 100 + Number.EPSILON) * 100) / 100}%`
-                    : currentSlide.position === 'top'
-                    ? '10%'
-                    : currentSlide.position === 'center'
-                    ? '50%'
-                    : '85%',
-                transform: 'translate(-50%, -50%)',
+                fontSize: `${currentSlide.fontSizePx}px`,
+                fontFamily: fontFamilies[currentSlide.fontStyle] || fontFamilies.modern,
+                color: currentSlide.overlayColorHex || '#FFFFFF',
               }}
-              onPointerDown={startDrag}
-              onPointerMove={onDragMove}
-              onPointerUp={endDrag}
-              onPointerCancel={endDrag}
             >
-              <p
-                style={{
-                  fontSize: `${currentSlide.fontSizePx}px`,
-                  fontFamily: fontFamilies[currentSlide.fontStyle] || fontFamilies.modern,
-                  color: currentSlide.overlayColorHex || '#FFFFFF',
-                }}
-              >
-                {currentSlide.overlayText}
-              </p>
-            </div>
+              {currentSlide.overlayText}
+            </p>
           </div>
         )}
 
