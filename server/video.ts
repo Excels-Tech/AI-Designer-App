@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -52,6 +53,8 @@ const QUALITY_MAP = {
   '1080p': { width: 1920, height: 1080 },
 };
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const FONT_DIR = path.resolve(__dirname, 'assets', 'fonts');
 const FONT_MAP: Record<string, string> = {
   modern: path.join(FONT_DIR, 'Inter-Regular.ttf'),
