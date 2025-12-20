@@ -141,10 +141,15 @@ function mapGeminiError(err: any) {
   return 'Gemini request failed. Check server logs.';
 }
 
-connectMongo().catch((err) => {
-  console.error('Failed to connect to MongoDB', err);
-  process.exit(1);
-});
+connectMongo()
+  .then(() => {
+    console.log('MongoDB connected successfully');
+  })
+  .catch((err) => {
+    console.error('Failed to connect to MongoDB:', err.message);
+    console.error('Make sure DATABASE_URL or MONGODB_URI is set correctly');
+    process.exit(1);
+  });
 
 const allowedStyles: StyleKey[] = ['realistic', '3d', 'lineart', 'watercolor', 'modelMale', 'modelFemale', 'modelKid'];
 const allowedViews = new Set<ViewKey>(['front', 'back', 'left', 'right', 'threeQuarter', 'top']);
@@ -1324,10 +1329,24 @@ app.get('/api/ping-db', async (_req, res) => {
   try {
     const db = await getDb();
     const info = await db!.admin().serverInfo();
-    res.json({ ok: true, version: info.version });
-  } catch (err) {
+    const dbUrl = process.env.DATABASE_URL || process.env.MONGODB_URI;
+    res.json({ 
+      ok: true, 
+      version: info.version,
+      connected: true,
+      hasDbUrl: !!dbUrl,
+      dbUrlPrefix: dbUrl ? dbUrl.substring(0, 20) + '...' : 'none'
+    });
+  } catch (err: any) {
     console.error('Mongo ping failed', err);
-    res.status(500).json({ ok: false, error: 'Mongo unavailable' });
+    const dbUrl = process.env.DATABASE_URL || process.env.MONGODB_URI;
+    res.status(500).json({ 
+      ok: false, 
+      error: err.message || 'Mongo unavailable',
+      connected: false,
+      hasDbUrl: !!dbUrl,
+      dbUrlPrefix: dbUrl ? dbUrl.substring(0, 20) + '...' : 'none'
+    });
   }
 });
 

@@ -11,6 +11,10 @@ services:
         fromDatabase:
           name: ai-designer-db
           property: connectionString
+      - key: MONGODB_URI
+        fromDatabase:
+          name: ai-designer-db
+          property: connectionString
       - key: DATABASE_SSL
         value: "true"
       - key: GEMINI_API_KEY
