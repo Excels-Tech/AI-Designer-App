@@ -314,11 +314,24 @@ function computeGrid(n: number): { columns: number; rows: number } {
   return { columns, rows };
 }
 
+const viewSpecificInstructions: Record<ViewKey, string> = {
+  front: 'Front view (head-on). Show the front-facing side only. Not mirrored.',
+  back: 'Back view (rear). Show the back-facing side only. Not mirrored.',
+  left: "Left side view (subject's left). Camera on the subject's left side. Not mirrored; do not output the right side.",
+  right:
+    "Right side view (subject's right). Camera on the subject's right side. Not mirrored; do not output the left side.",
+  threeQuarter:
+    "Three-quarter view from the FRONT-RIGHT (subject turned slightly left so the camera sees the front and the subject's right side). Not mirrored.",
+  top: 'Top-down overhead view. Camera directly above. Not mirrored.',
+};
+
 function buildViewPrompt(basePrompt: string, style: StyleKey, view: ViewKey, width: number, height: number) {
   return [
     `Single-frame image of the SAME product/design viewed from the ${viewLabels[view]} angle.`,
+    `View requirement: ${viewSpecificInstructions[view]}`,
     `No grids, no collages, no multi-panel layouts. One centered subject on a neutral studio background.`,
     `Keep lighting, materials, and colors identical to every other view.`,
+    `Do not mirror or flip the subject. Do not swap left/right. Each requested view must be distinct and match its angle.`,
     `Style: ${styleModifiers[style]}.`,
     `Base prompt: ${basePrompt}`,
     `Target output size close to ${width}x${height}px (square crop friendly).`,
