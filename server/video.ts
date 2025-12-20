@@ -9,6 +9,7 @@ import net from 'node:net';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { getAssetInfo, touchAsset } from './videoAssets';
+import ffmpegPath from 'ffmpeg-static';
 
 type SlideInput = {
   imageSrc: string;
@@ -334,7 +335,8 @@ const buildSlideFilter = (
 
 const runFfmpeg = (args: string[]) =>
   new Promise<void>((resolve, reject) => {
-    const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const bin = ffmpegPath || 'ffmpeg';
+    const proc = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     proc.stderr.on('data', (data) => {
       stderr += data.toString();

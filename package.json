@@ -38,10 +38,11 @@
         "cors": "^2.8.5",
         "dotenv": "^16.4.7",
         "embla-carousel-react": "^8.6.0",
-        "express": "^4.21.2",
-        "input-otp": "^1.4.2",
-        "lucide-react": "^0.487.0",
-        "mongodb": "^7.0.0",
+    "express": "^4.21.2",
+    "ffmpeg-static": "^5.2.0",
+    "input-otp": "^1.4.2",
+    "lucide-react": "^0.487.0",
+    "mongodb": "^7.0.0",
         "mongoose": "^9.0.2",
         "multer": "^1.4.5-lts.1",
         "next-themes": "^0.4.6",
@@ -73,7 +74,6 @@
         "dev:server": "tsx watch server/index.ts",
         "dev:sam2": "cd sam2_service && python -m uvicorn app:app --host 0.0.0.0 --port 8008",
         "dev:all": "concurrently --kill-others --kill-others-on-fail \"npm:dev:client\" \"npm:dev:server\" \"npm:dev:sam2\"",
-        "build": "vite build",
-        "start": "tsx server/index.ts"
+        "build": "vite build"
     }
 }
