@@ -148,7 +148,7 @@ export function PreviewPlayer({
         <img src={currentSlide.imageSrc} alt="Preview" className="h-full w-full object-cover" />
 
         {currentSlide.overlayText && (
-          <div className="absolute inset-0 pointer-events-none">
+          <div className="absolute inset-0 pointer-events-none z-20">
             <div
               className="absolute pointer-events-auto rounded-2xl bg-black/45 px-8 py-4 text-center text-white shadow-xl cursor-move select-none"
               style={{
@@ -187,7 +187,7 @@ export function PreviewPlayer({
         <button
           type="button"
           onClick={() => onPlayToggle(!isPlaying)}
-          className="absolute inset-0 flex items-center justify-center bg-black/20 hover:bg-black/30 transition-colors"
+          className="absolute inset-0 z-10 flex items-center justify-center bg-black/20 hover:bg-black/30 transition-colors"
         >
           <div className="h-16 w-16 rounded-full bg-white/90 flex items-center justify-center shadow-2xl">
             {isPlaying ? <Pause className="h-6 w-6 text-slate-900" /> : <Play className="h-6 w-6 text-slate-900" />}

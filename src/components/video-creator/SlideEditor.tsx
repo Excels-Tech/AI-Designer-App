@@ -1,5 +1,5 @@
-import { Type, Wand2, MoveVertical } from 'lucide-react';
-import type { Slide, TextPosition } from './types';
+import { MoveVertical, Type, Wand2 } from 'lucide-react';
+import type { Slide } from './types';
 
 type SlideEditorProps = {
   slide: Slide | null;
@@ -12,8 +12,6 @@ const fontStyles = [
   { id: 'bold', label: 'Bold' },
   { id: 'script', label: 'Script' },
 ] as const;
-
-const positionOptions: TextPosition[] = ['top', 'center', 'bottom'];
 
 const isValidHex = (value: string) => /^#[0-9a-f]{6}$/i.test(value.trim());
 
@@ -88,40 +86,18 @@ export function SlideEditor({ slide, onUpdate }: SlideEditorProps) {
           <div />
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm text-slate-700 mb-2">Font Size</label>
-            <div className="flex items-center gap-3">
-              <input
-                type="range"
-                min={18}
-                max={96}
-                value={slide.fontSizePx}
-                onChange={(event) => onUpdate({ fontSizePx: Number(event.target.value) })}
-                className="flex-1"
-              />
-              <span className="text-xs text-slate-500 w-12">{slide.fontSizePx}px</span>
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm text-slate-700 mb-2">Text Position</label>
-            <div className="grid grid-cols-3 gap-2">
-              {positionOptions.map((position) => (
-                <button
-                  key={position}
-                  type="button"
-                  onClick={() => onUpdate({ position })}
-                  className={`rounded-xl px-3 py-2 text-xs capitalize transition-all ${
-                    slide.position === position
-                      ? 'bg-purple-500 text-white'
-                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
-                >
-                  {position}
-                </button>
-              ))}
-            </div>
+        <div>
+          <label className="block text-sm text-slate-700 mb-2">Font Size</label>
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min={18}
+              max={96}
+              value={slide.fontSizePx}
+              onChange={(event) => onUpdate({ fontSizePx: Number(event.target.value) })}
+              className="flex-1"
+            />
+            <span className="text-xs text-slate-500 w-12">{slide.fontSizePx}px</span>
           </div>
         </div>
 
