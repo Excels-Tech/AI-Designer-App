@@ -315,14 +315,26 @@ function computeGrid(n: number): { columns: number; rows: number } {
 }
 
 const viewSpecificInstructions: Record<ViewKey, string> = {
-  front: 'Front view (head-on). Show the front-facing side only. Not mirrored.',
-  back: 'Back view (rear). Show the back-facing side only. Not mirrored.',
-  left: "Left side view (subject's left). Camera on the subject's left side. Not mirrored; do not output the right side.",
-  right:
-    "Right side view (subject's right). Camera on the subject's right side. Not mirrored; do not output the left side.",
-  threeQuarter:
-    "Three-quarter view from the FRONT-RIGHT (subject turned slightly left so the camera sees the front and the subject's right side). Not mirrored.",
-  top: 'Top-down overhead view. Camera directly above. Not mirrored.',
+  front: 'STRICT: Front view (head-on). Subject faces the camera. Show the front-facing side only.',
+  back: 'STRICT: Back view (rear). Subject faces away from the camera. Show the back-facing side only (no front).',
+  left: [
+    "STRICT: Left side view (subject's LEFT).",
+    "Camera is on the subject's LEFT side.",
+    'The subject should be facing RIGHT in the frame (front points to the RIGHT side of the image).',
+    "Show the LEFT side only; do NOT show the subject's RIGHT side.",
+  ].join(' '),
+  right: [
+    "STRICT: Right side view (subject's RIGHT).",
+    "Camera is on the subject's RIGHT side.",
+    'The subject should be facing LEFT in the frame (front points to the LEFT side of the image).',
+    "Show the RIGHT side only; do NOT show the subject's LEFT side.",
+  ].join(' '),
+  threeQuarter: [
+    'STRICT: Three-quarter view from FRONT-RIGHT.',
+    "Camera sees the front and the subject's RIGHT side at the same time.",
+    'The subject is turned slightly LEFT (front points slightly LEFT).',
+  ].join(' '),
+  top: 'STRICT: Top-down overhead view. Camera directly above. Show the top view only.',
 };
 
 function buildViewPrompt(basePrompt: string, style: StyleKey, view: ViewKey, width: number, height: number) {
