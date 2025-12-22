@@ -145,7 +145,9 @@ function MenuDropdown({
 
 export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const controlButtonBase =
-    'inline-flex items-center gap-2 px-4 py-3 rounded-2xl border-2 bg-white transition-all text-sm text-slate-800 whitespace-nowrap hover:border-purple-300 hover:shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-200';
+    'inline-flex h-[42px] items-center justify-between gap-2 rounded-2xl border-2 bg-white px-4 text-sm leading-tight text-slate-800 whitespace-nowrap transition-all hover:border-purple-300 hover:shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-200';
+  const dropdownButtonStyle = { width: 336, minWidth: 336 } as const;
+  const dropdownButtonSize = 'shrink-0';
 
   const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
     const bytes = new Uint8Array(buffer);
@@ -276,17 +278,17 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       const compositeDataUrl = await ensurePngDataUrl(result.composite);
       const imageDataUrls = await Promise.all(result.images.map((img) => ensurePngDataUrl(img.src)));
 
-      const payload = {
-        name: finalName.slice(0, 60),
-        title: finalName.slice(0, 60),
-        prompt: prompt.trim(),
-        userId: uid,
-        style,
-        resolution,
-        views: viewsToSave,
-        composite: compositeDataUrl,
-        images: result.images.map((img, idx) => ({ view: img.view, src: imageDataUrls[idx] })),
-      };
+       const payload = {
+         name: finalName.slice(0, 60),
+         title: finalName.slice(0, 60),
+         prompt: prompt.trim(),
+         userId: uid,
+         style,
+         resolution,
+         views: viewsToSave,
+         composite: compositeDataUrl,
+         images: result.images.map((img, idx) => ({ view: img.view, dataUrl: imageDataUrls[idx] })),
+       };
 
       const response = await authFetch('/api/designs', {
         method: 'POST',
@@ -379,10 +381,13 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                 button={
                   <button
                     type="button"
-                    className={`${controlButtonBase} ${openMenu === 'resolution' ? 'border-purple-300 bg-purple-50' : 'border-slate-200'}`}
+                    style={dropdownButtonStyle}
+                    className={`${controlButtonBase} ${dropdownButtonSize} ${openMenu === 'resolution' ? 'border-purple-300 bg-purple-50' : 'border-slate-200'}`}
                   >
-                    <Maximize2 className="w-4 h-4 text-slate-600" />
-                    Resolution: {resolution}x{resolution}
+                    <span className="inline-flex items-center gap-2 min-w-0">
+                      <Maximize2 className="w-4 h-4 text-slate-600 flex-none" />
+                      <span className="truncate">Resolution: {resolution}x{resolution}</span>
+                    </span>
                     <ChevronDown className="w-4 h-4 text-slate-500" />
                   </button>
                 }
@@ -419,17 +424,20 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                 button={
                   <button
                     type="button"
-                    className={`${controlButtonBase} ${openMenu === 'style' ? 'border-purple-300 bg-purple-50' : 'border-slate-200'}`}
+                    style={dropdownButtonStyle}
+                    className={`${controlButtonBase} ${dropdownButtonSize} ${openMenu === 'style' ? 'border-purple-300 bg-purple-50' : 'border-slate-200'}`}
                   >
-                    <Palette className="w-4 h-4 text-slate-600" />
-                    Style: {selectedStyleLabel}
+                    <span className="inline-flex items-center gap-2 min-w-0">
+                      <Palette className="w-4 h-4 text-slate-600 flex-none" />
+                      <span className="truncate">Style: {selectedStyleLabel}</span>
+                    </span>
                     <ChevronDown className="w-4 h-4 text-slate-500" />
                   </button>
                 }
               >
                 <div className="p-2">
                   <p className="px-2 pt-1 pb-2 text-xs text-slate-500">Styles</p>
-                  <div className="space-y-1">
+                  <div className="grid grid-cols-2 gap-2">
                     {styleOptions.map((opt) => {
                       const active = style === opt.id;
                       return (
@@ -441,10 +449,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                             setOpenMenu(null);
                           }}
                           className={clsx(
-                            'w-full flex items-start justify-between gap-3 px-3 py-2 rounded-xl border transition-colors text-left',
+                            'w-full flex items-start justify-between gap-3 px-3 py-2 rounded-xl border transition-all text-left',
                             active
                               ? 'bg-purple-50 text-slate-900 border-purple-300'
-                              : 'bg-white text-slate-800 border-transparent hover:bg-slate-50'
+                              : 'bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50'
                           )}
                         >
                           <span className="min-w-0">
@@ -455,9 +463,11 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                         </button>
                       );
                     })}
+                  </div>
 
-                    <div className="my-2 border-t border-slate-100" />
-                    <p className="px-2 pt-1 pb-2 text-xs text-slate-500">Model</p>
+                  <div className="my-2 border-t border-slate-100" />
+                  <p className="px-2 pt-1 pb-2 text-xs text-slate-500">Model</p>
+                  <div className="grid grid-cols-2 gap-2">
                     {modelOptions.map((opt) => {
                       const active = style === opt.id;
                       const Icon = opt.icon;
@@ -470,10 +480,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                             setOpenMenu(null);
                           }}
                           className={clsx(
-                            'w-full flex items-center justify-between gap-3 px-3 py-2 rounded-xl border transition-colors text-left',
+                            'w-full flex items-center justify-between gap-3 px-3 py-2 rounded-xl border transition-all text-left',
                             active
                               ? 'bg-purple-50 text-slate-900 border-purple-300'
-                              : 'bg-white text-slate-800 border-transparent hover:bg-slate-50'
+                              : 'bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50'
                           )}
                         >
                           <span className="inline-flex items-center gap-2 min-w-0">
@@ -498,10 +508,13 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                 button={
                   <button
                     type="button"
-                    className={`${controlButtonBase} ${openMenu === 'views' ? 'border-purple-300 bg-purple-50' : 'border-slate-200'}`}
+                    style={dropdownButtonStyle}
+                    className={`${controlButtonBase} ${dropdownButtonSize} ${openMenu === 'views' ? 'border-purple-300 bg-purple-50' : 'border-slate-200'}`}
                   >
-                    <Camera className="w-4 h-4 text-slate-600" />
-                    {selectedViewsLabel}
+                    <span className="inline-flex items-center gap-2 min-w-0">
+                      <Camera className="w-4 h-4 text-slate-600 flex-none" />
+                      <span className="truncate">{selectedViewsLabel}</span>
+                    </span>
                     <ChevronDown className="w-4 h-4 text-slate-500" />
                   </button>
                 }

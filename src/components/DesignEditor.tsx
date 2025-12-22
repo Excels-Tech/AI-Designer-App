@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { 
   Layers, 
   Plus, 
@@ -22,8 +22,12 @@ import {
   Wand2,
   Loader2
 } from 'lucide-react';
-import { tintCutout } from '../utils/recolor';
 import { renderComposite } from '../utils/composite';
+import { authFetch, getUserId } from '../utils/auth';
+import { RightSidePanel } from './video-creator/RightSidePanel';
+import { RightDrawerMyDesigns } from './editor/RightDrawerMyDesigns';
+import type { DesignCardItem } from './video-creator/DesignsGrid';
+import { toast } from 'sonner@2.0.3';
 
 interface DesignEditorProps {
   baseImages: string[];
@@ -39,7 +43,9 @@ interface Layer {
   imageUrl?: string;
   originalCutoutUrl?: string;
   maskUrl?: string;
+  maskDataUrl?: string;
   color?: string;
+  originalAverageColor?: string;
   isColorChangeable?: boolean;
   position?: { x: number; y: number };
   scale?: number;
@@ -47,15 +53,111 @@ interface Layer {
   blendMode?: GlobalCompositeOperation;
 }
 
+function hexToRgb(hex: string) {
+  const normalized = hex.replace('#', '').trim();
+  const value = normalized.length === 3 ? normalized.split('').map((ch) => ch + ch).join('') : normalized;
+  const intVal = Number.parseInt(value, 16);
+  return {
+    r: (intVal >> 16) & 255,
+    g: (intVal >> 8) & 255,
+    b: intVal & 255,
+  };
+}
+
+function colorNameFromHex(hex?: string) {
+  if (!hex) return 'Color';
+  const { r, g, b } = hexToRgb(hex);
+  const candidates: Array<{ name: string; rgb: [number, number, number] }> = [
+    { name: 'Black', rgb: [20, 20, 20] },
+    { name: 'White', rgb: [245, 245, 245] },
+    { name: 'Gray', rgb: [160, 160, 160] },
+    { name: 'Red', rgb: [220, 60, 60] },
+    { name: 'Orange', rgb: [245, 140, 40] },
+    { name: 'Yellow', rgb: [240, 220, 70] },
+    { name: 'Green', rgb: [60, 180, 90] },
+    { name: 'Blue', rgb: [70, 120, 240] },
+    { name: 'Purple', rgb: [150, 90, 220] },
+    { name: 'Pink', rgb: [240, 100, 180] },
+    { name: 'Brown', rgb: [140, 95, 60] },
+  ];
+  let best = candidates[0];
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const c of candidates) {
+    const dr = r - c.rgb[0];
+    const dg = g - c.rgb[1];
+    const db = b - c.rgb[2];
+    const d = dr * dr + dg * dg + db * db;
+    if (d < bestDist) {
+      bestDist = d;
+      best = c;
+    }
+  }
+  return best.name;
+}
+
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Failed to load image.'));
+    img.src = src;
+  });
+}
+
+async function makeCutoutPreview(imageDataUrl: string, maskDataUrl: string) {
+  const [img, mask] = await Promise.all([loadImage(imageDataUrl), loadImage(maskDataUrl)]);
+  const canvas = document.createElement('canvas');
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Canvas 2D context not available.');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0);
+  ctx.globalCompositeOperation = 'destination-in';
+  ctx.drawImage(mask, 0, 0, canvas.width, canvas.height);
+  ctx.globalCompositeOperation = 'source-over';
+  return canvas.toDataURL('image/png');
+}
+
 function toDataUrl(inputUrlOrDataUrl: string): Promise<string> {
   if (inputUrlOrDataUrl.startsWith('data:')) {
     return Promise.resolve(inputUrlOrDataUrl);
   }
 
-  return fetch(inputUrlOrDataUrl, { mode: 'cors' })
+  const resolveApiFilesToVideoFiles = (input: string) => {
+    try {
+      const parsed = new URL(input, window.location.origin);
+      if (!parsed.pathname.startsWith('/api/files/')) return input;
+      const fileId = parsed.pathname.slice('/api/files/'.length);
+      parsed.pathname = `/api/video/files/${fileId}`;
+      parsed.searchParams.set('uid', getUserId());
+      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    } catch {
+      if (!input.startsWith('/api/files/')) return input;
+      const fileId = input.slice('/api/files/'.length);
+      return `/api/video/files/${fileId}?uid=${encodeURIComponent(getUserId())}`;
+    }
+  };
+
+  const fetchUrl = resolveApiFilesToVideoFiles(inputUrlOrDataUrl);
+
+  const shouldUseAuthFetch = (() => {
+    if (fetchUrl.startsWith('/api/')) return false;
+    try {
+      const parsed = new URL(fetchUrl, window.location.origin);
+      if (parsed.pathname.startsWith('/api/video/files/')) return false;
+      return parsed.pathname.startsWith('/api/');
+    } catch {
+      return false;
+    }
+  })();
+
+  const fetcher = shouldUseAuthFetch ? authFetch : fetch;
+
+  return fetcher(fetchUrl, { mode: 'cors' } as any)
     .then((res) => {
       if (!res.ok) {
-        throw new Error('Failed to fetch image.');
+        throw new Error(`Failed to fetch image (HTTP ${res.status}).`);
       }
       return res.blob();
     })
@@ -84,11 +186,33 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [realisticPrompt, setRealisticPrompt] = useState('');
   const [compositePreview, setCompositePreview] = useState<string | null>(null);
+  const [undoStack, setUndoStack] = useState<Layer[][]>([]);
+  const [redoStack, setRedoStack] = useState<Layer[][]>([]);
+  const [isMyDesignsOpen, setIsMyDesignsOpen] = useState(false);
+  const [selectedDesignId, setSelectedDesignId] = useState<string | null>(null);
+  const [objectMaskDataUrl, setObjectMaskDataUrl] = useState<string | null>(null);
+  const [hoveredMaskLayerId, setHoveredMaskLayerId] = useState<string | null>(null);
+  const [maskCacheTick, setMaskCacheTick] = useState(0);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const logoInputRef = useRef<HTMLInputElement>(null);
+  const layersRef = useRef<Layer[]>(layers);
+  const baseImageRef = useRef<string | null>(null);
+  const baseImageSizeRef = useRef<{ width: number; height: number } | null>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const layerListRef = useRef<HTMLDivElement>(null);
+  const layerCardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const maskCacheRef = useRef<
+    Map<string, { width: number; height: number; alpha: Uint8Array; outlineDataUrl?: string }>
+  >(new Map());
+  const rafRef = useRef<number | null>(null);
+  const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
 
   const selectedLayerData = layers.find((l) => l.id === selectedLayer);
+
+  useEffect(() => {
+    layersRef.current = layers;
+  }, [layers]);
 
   useEffect(() => {
     if (selectedLayerData?.color) {
@@ -105,6 +229,375 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
     }, 150);
     return () => window.clearTimeout(handle);
   }, [layers]);
+
+  const commitLayers = (next: Layer[]) => {
+    setUndoStack((prev) => [...prev, layersRef.current]);
+    setRedoStack([]);
+    setLayers(next);
+  };
+
+  useEffect(() => {
+    const baseLayer = layers.find((l) => l.type === 'image' && l.imageUrl);
+    const next = baseLayer?.imageUrl || null;
+    const prev = baseImageRef.current;
+    baseImageRef.current = next;
+    if (!prev || !next || prev === next) return;
+
+    setObjectMaskDataUrl(null);
+    setShowLayerMap(false);
+    setSelectionMode(false);
+    setShowLayerExtractor(true);
+
+    const cleaned = layersRef.current.filter((l) => l.type !== 'auto-extracted');
+    if (cleaned.length !== layersRef.current.length) {
+      commitLayers(cleaned);
+      setSelectedLayer(cleaned.find((l) => l.type === 'image')?.id || cleaned[0]?.id || '1');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layers.find((l) => l.type === 'image')?.imageUrl]);
+
+  useEffect(() => {
+    const baseLayer = layers.find((l) => l.type === 'image' && l.imageUrl);
+    const url = baseLayer?.imageUrl;
+    if (!url) return;
+    let cancelled = false;
+    loadImage(url)
+      .then((img) => {
+        if (cancelled) return;
+        baseImageSizeRef.current = { width: img.width || 1024, height: img.height || 1024 };
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [layers.find((l) => l.type === 'image')?.imageUrl]);
+
+  useEffect(() => {
+    const el = layerCardRefs.current.get(selectedLayer);
+    if (!el) return;
+    el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [selectedLayer]);
+
+  const extractedLayers = useMemo(
+    () => layers.filter((l) => l.type === 'auto-extracted' && l.visible && (l.maskDataUrl || l.maskUrl)),
+    [layers]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const ensureMaskCache = async (layer: Layer) => {
+      if (!layer.maskDataUrl) return;
+      if (maskCacheRef.current.has(layer.id)) return;
+      const img = await loadImage(layer.maskDataUrl);
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(img, 0, 0);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const alpha = new Uint8Array(canvas.width * canvas.height);
+      for (let i = 0, p = 0; i < imageData.data.length; i += 4, p += 1) {
+        alpha[p] = imageData.data[i]; // grayscale stored in RGB
+      }
+
+      // Build a 1px outline mask for clearer selection.
+      const edge = new Uint8ClampedArray(canvas.width * canvas.height);
+      const threshold = 20;
+      for (let y = 1; y < canvas.height - 1; y += 1) {
+        for (let x = 1; x < canvas.width - 1; x += 1) {
+          const idx = y * canvas.width + x;
+          if (alpha[idx] <= threshold) continue;
+          const n =
+            (alpha[idx - 1] > threshold ? 1 : 0) +
+            (alpha[idx + 1] > threshold ? 1 : 0) +
+            (alpha[idx - canvas.width] > threshold ? 1 : 0) +
+            (alpha[idx + canvas.width] > threshold ? 1 : 0);
+          if (n < 4) edge[idx] = 255;
+        }
+      }
+      const outlinePng = await sharpEdgeToDataUrl(edge, canvas.width, canvas.height);
+
+      maskCacheRef.current.set(layer.id, {
+        width: canvas.width,
+        height: canvas.height,
+        alpha,
+        outlineDataUrl: outlinePng,
+      });
+      setMaskCacheTick((v) => v + 1);
+    };
+
+    const run = async () => {
+      for (const layer of extractedLayers) {
+        await ensureMaskCache(layer);
+        if (cancelled) return;
+      }
+    };
+
+    run().catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [extractedLayers]);
+
+  function sharpEdgeToDataUrl(edge: Uint8ClampedArray, width: number, height: number) {
+    // Minimal "dilate" by 1px for visibility.
+    const dilated = new Uint8ClampedArray(edge.length);
+    for (let y = 1; y < height - 1; y += 1) {
+      for (let x = 1; x < width - 1; x += 1) {
+        const idx = y * width + x;
+        if (edge[idx]) {
+          dilated[idx] = 255;
+          dilated[idx - 1] = 255;
+          dilated[idx + 1] = 255;
+          dilated[idx - width] = 255;
+          dilated[idx + width] = 255;
+        }
+      }
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return Promise.resolve(undefined);
+    const imgData = ctx.createImageData(width, height);
+    for (let i = 0; i < dilated.length; i += 1) {
+      const v = dilated[i];
+      const o = i * 4;
+      imgData.data[o] = v;
+      imgData.data[o + 1] = v;
+      imgData.data[o + 2] = v;
+      imgData.data[o + 3] = 255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+    return Promise.resolve(canvas.toDataURL('image/png'));
+  }
+
+  const getImageSpacePoint = (clientX: number, clientY: number) => {
+    const el = canvasRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    if (x < 0 || y < 0 || x > rect.width || y > rect.height) return null;
+
+    const imgW = baseImageSizeRef.current?.width || 1024;
+    const imgH = baseImageSizeRef.current?.height || 1024;
+
+    const scale = Math.min(rect.width / imgW, rect.height / imgH);
+    const dispW = imgW * scale;
+    const dispH = imgH * scale;
+    const offsetX = (rect.width - dispW) / 2;
+    const offsetY = (rect.height - dispH) / 2;
+    const localX = x - offsetX;
+    const localY = y - offsetY;
+    if (localX < 0 || localY < 0 || localX > dispW || localY > dispH) return null;
+
+    return {
+      normX: localX / dispW,
+      normY: localY / dispH,
+    };
+  };
+
+  const hitTestMaskLayers = (normX: number, normY: number) => {
+    const visible = layersRef.current.filter((l) => l.type === 'auto-extracted' && l.visible && l.maskDataUrl);
+    const threshold = 20;
+    for (let i = visible.length - 1; i >= 0; i -= 1) {
+      const layer = visible[i];
+      const cache = maskCacheRef.current.get(layer.id);
+      if (!cache) continue;
+      const px = Math.floor(Math.max(0, Math.min(1, normX)) * (cache.width - 1));
+      const py = Math.floor(Math.max(0, Math.min(1, normY)) * (cache.height - 1));
+      const v = cache.alpha[py * cache.width + px];
+      if (v > threshold) return layer.id;
+    }
+    return null;
+  };
+
+  const scheduleHoverHitTest = (clientX: number, clientY: number) => {
+    lastPointerRef.current = { x: clientX, y: clientY };
+    if (rafRef.current != null) return;
+    rafRef.current = window.requestAnimationFrame(() => {
+      rafRef.current = null;
+      if (!showLayerMap) return;
+      if (!layersRef.current.some((l) => l.type === 'auto-extracted')) return;
+      const last = lastPointerRef.current;
+      if (!last) return;
+      const pt = getImageSpacePoint(last.x, last.y);
+      if (!pt) {
+        setHoveredMaskLayerId(null);
+        return;
+      }
+      const hit = hitTestMaskLayers(pt.normX, pt.normY);
+      setHoveredMaskLayerId(hit);
+    });
+  };
+
+  const handleUndo = () => {
+    setUndoStack((prev) => {
+      if (!prev.length) return prev;
+      const previous = prev[prev.length - 1];
+      setRedoStack((redo) => [layersRef.current, ...redo]);
+      setLayers(previous);
+      return prev.slice(0, -1);
+    });
+  };
+
+  const handleRedo = () => {
+    setRedoStack((prev) => {
+      if (!prev.length) return prev;
+      const next = prev[0];
+      setUndoStack((undo) => [...undo, layersRef.current]);
+      setLayers(next);
+      return prev.slice(1);
+    });
+  };
+
+  const getCompositeDataUrl = async () => {
+    const composite = await renderComposite(layersRef.current);
+    setCompositePreview(composite);
+    return composite;
+  };
+
+  const clearExtractedLayers = () => {
+    setObjectMaskDataUrl(null);
+    const cleaned = layersRef.current.filter((l) => l.type !== 'auto-extracted');
+    if (cleaned.length !== layersRef.current.length) {
+      commitLayers(cleaned);
+      setSelectedLayer(cleaned.find((l) => l.type === 'image')?.id || cleaned[0]?.id || '1');
+    }
+  };
+
+  const startLayerMapSelection = () => {
+    setErrorMessage(null);
+    setShowLayerExtractor(false);
+    setShowLayerMap(true);
+    setSelectionMode(true);
+    clearExtractedLayers();
+  };
+
+  const pickObjectAndSplitColors = async (normX: number, normY: number) => {
+    setIsExtracting(true);
+    setErrorMessage(null);
+
+    const baseLayer = layersRef.current.find((l) => l.type === 'image' && l.imageUrl);
+    if (!baseLayer?.imageUrl) {
+      setIsExtracting(false);
+      setErrorMessage('Base image is missing.');
+      return;
+    }
+
+    try {
+      const imageDataUrl = await toDataUrl(baseLayer.imageUrl);
+      const objectRes = await fetch('/api/sam2/object-from-point', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageDataUrl, x: normX, y: normY }),
+      });
+      const objectData = await objectRes.json().catch(() => ({}));
+      if (!objectRes.ok || objectData?.ok === false) {
+        throw new Error(objectData?.error || 'Object selection failed.');
+      }
+
+      const objectMask = objectData?.objectMaskDataUrl as string | undefined;
+      if (!objectMask) throw new Error('Object mask missing.');
+      setObjectMaskDataUrl(objectMask);
+
+      const splitRes = await fetch('/api/sam2/split-colors-in-mask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageDataUrl, objectMaskDataUrl: objectMask, max_colors: 6, min_area_ratio: 0.02 }),
+      });
+      const splitData = await splitRes.json().catch(() => ({}));
+      if (!splitRes.ok || splitData?.ok === false) {
+        throw new Error(splitData?.error || 'Color detection failed.');
+      }
+
+      const rawLayers: any[] = Array.isArray(splitData?.layers) ? splitData.layers : [];
+      if (!rawLayers.length) {
+        throw new Error('No colors detected on the selected object.');
+      }
+
+      const extractedLayers: Layer[] = await Promise.all(
+        rawLayers.map(async (layer, idx) => {
+          const maskDataUrl = layer.maskDataUrl as string;
+          const avgColor = layer.avgColor as string;
+          const preview = await makeCutoutPreview(imageDataUrl, maskDataUrl).catch(() => undefined);
+          return {
+            id: typeof layer.id === 'string' ? layer.id : `color-${idx + 1}`,
+            name: `Shirt – ${colorNameFromHex(avgColor)}`,
+            type: 'auto-extracted',
+            visible: true,
+            locked: false,
+            imageUrl: preview,
+            originalCutoutUrl: preview,
+            maskUrl: maskDataUrl,
+            maskDataUrl,
+            originalAverageColor: avgColor,
+            color: avgColor,
+            isColorChangeable: true,
+            opacity: 1,
+          };
+        })
+      );
+
+      const next = (() => {
+        const prev = layersRef.current.filter((l) => l.type !== 'auto-extracted');
+        const baseIndex = prev.findIndex((l) => l.type === 'image');
+        const insertAt = baseIndex >= 0 ? baseIndex + 1 : 1;
+        return [...prev.slice(0, insertAt), ...extractedLayers, ...prev.slice(insertAt)];
+      })();
+
+      commitLayers(next);
+      setSelectedLayer(extractedLayers[0].id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Selection failed.';
+      setErrorMessage(message);
+      setObjectMaskDataUrl(null);
+    } finally {
+      setIsExtracting(false);
+    }
+  };
+
+  const handleSelectSavedDesign = async (item: DesignCardItem) => {
+    setErrorMessage(null);
+    setSelectedDesignId(item.id);
+    try {
+      const res = await authFetch(`/api/designs/${encodeURIComponent(item.id)}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error || 'Failed to load design.');
+      }
+      const data = await res.json();
+      const src =
+        data?.composite?.dataUrl ||
+        data?.composite?.url ||
+        data?.images?.[0]?.dataUrl ||
+        data?.images?.[0]?.url ||
+        '';
+      if (!src) {
+        throw new Error('Design has no image to load.');
+      }
+
+      const imageDataUrl = await toDataUrl(src);
+
+      const next = layersRef.current
+        .filter((layer) => layer.type !== 'auto-extracted')
+        .map((layer) => (layer.type === 'image' ? { ...layer, imageUrl: imageDataUrl, name: item.title || layer.name } : layer));
+
+      setCompositePreview(null);
+      setRealisticPreview(null);
+      setShowRealisticPreview(false);
+      setShowLayerMap(false);
+      setSelectionMode(false);
+      setShowLayerExtractor(true);
+      commitLayers(next);
+      setSelectedLayer(next.find((l) => l.type === 'image')?.id || next[0]?.id || '1');
+      setIsMyDesignsOpen(false);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to load design.');
+    }
+  };
 
   // Upload image from PC
   const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -123,7 +616,7 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
           position: { x: 50, y: 50 },
           scale: 1,
         };
-        setLayers([...layers, newLayer]);
+        commitLayers([...layersRef.current, newLayer]);
         setSelectedLayer(newLayer.id);
         setShowLayerExtractor(true);
       };
@@ -148,82 +641,16 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
           position: { x: 50, y: 50 },
           scale: 0.3,
         };
-        setLayers([...layers, logoLayer]);
+        commitLayers([...layersRef.current, logoLayer]);
         setSelectedLayer(logoLayer.id);
       };
       reader.readAsDataURL(file);
     }
   };
 
-  // Auto-extract layers from image with color-based detection
+  // Enable click-to-select object + adaptive color layers (no fixed num_layers).
   const handleAutoExtractLayers = async () => {
-    setIsExtracting(true);
-    setShowLayerExtractor(false);
-    setErrorMessage(null);
-
-    const sourceLayer =
-      selectedLayerData && (selectedLayerData.type === 'uploaded' || selectedLayerData.type === 'logo')
-        ? selectedLayerData
-        : layers.find((layer) => layer.type === 'image') ?? layers[0];
-
-    if (!sourceLayer?.imageUrl) {
-      setErrorMessage('Please select a layer with an image to analyze.');
-      setIsExtracting(false);
-      setShowLayerExtractor(true);
-      return;
-    }
-
-    try {
-      const imageDataUrl = await toDataUrl(sourceLayer.imageUrl);
-      const response = await fetch('/api/sam2/color-layers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageDataUrl, num_layers: 4 }),
-      });
-
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data?.error || 'Layer detection failed. Try a simpler image or increase contrast.');
-      }
-
-      const extractedLayers: Layer[] = (data.layers || []).map((layer: any) => ({
-        id: layer.id,
-        name: layer.label,
-        type: 'auto-extracted',
-        visible: true,
-        locked: false,
-        imageUrl: layer.cutoutPng,
-        originalCutoutUrl: layer.cutoutPng,
-        maskUrl: layer.maskPng,
-        color: layer.suggestedColor,
-        isColorChangeable: true,
-        opacity: 1,
-      }));
-
-      if (!extractedLayers.length) {
-        throw new Error('Layer detection failed. Try a simpler image or increase contrast.');
-      }
-
-      setLayers((prev) => {
-        const baseIndex = prev.findIndex((layer) => layer.type === 'image');
-        const insertAt = baseIndex >= 0 ? baseIndex + 1 : 1;
-        return [...prev.slice(0, insertAt), ...extractedLayers, ...prev.slice(insertAt)];
-      });
-      setIsExtracting(false);
-      setSelectedLayer(extractedLayers[0].id);
-      setShowLayerMap(true);
-      setSelectionMode(true);
-    } catch (err) {
-      console.error(err);
-      const message = err instanceof Error ? err.message : 'Layer detection failed.';
-      if (message.toLowerCase().includes('cors') || message.toLowerCase().includes('fetch')) {
-        setErrorMessage('Cannot access remote image due to CORS. Please upload the image file instead.');
-      } else {
-        setErrorMessage(message);
-      }
-      setIsExtracting(false);
-      setShowLayerExtractor(true);
-    }
+    startLayerMapSelection();
   };
 
   // Generate realistic preview from edited layers
@@ -232,8 +659,7 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
     setErrorMessage(null);
 
     try {
-      const composite = await renderComposite(layers);
-      setCompositePreview(composite);
+      const composite = await getCompositeDataUrl();
 
       const response = await fetch('/api/realistic/render', {
         method: 'POST',
@@ -257,51 +683,38 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
   };
 
   const toggleLayerVisibility = (id: string) => {
-    setLayers(layers.map((layer) =>
-      layer.id === id ? { ...layer, visible: !layer.visible } : layer
-    ));
+    commitLayers(
+      layersRef.current.map((layer) => (layer.id === id ? { ...layer, visible: !layer.visible } : layer))
+    );
   };
 
   const toggleLayerLock = (id: string) => {
-    setLayers(layers.map((layer) =>
-      layer.id === id ? { ...layer, locked: !layer.locked } : layer
-    ));
+    commitLayers(
+      layersRef.current.map((layer) => (layer.id === id ? { ...layer, locked: !layer.locked } : layer))
+    );
   };
 
   const deleteLayer = (id: string) => {
     if (layers.length === 1) return;
-    setLayers(layers.filter((layer) => layer.id !== id));
+    const next = layersRef.current.filter((layer) => layer.id !== id);
+    commitLayers(next);
     if (selectedLayer === id) {
-      setSelectedLayer(layers[0].id);
+      setSelectedLayer(next[0]?.id || '1');
     }
   };
 
-  const updateLayerColor = async (color: string) => {
-    setSelectedColor(color);
-    const currentLayer = layers.find((layer) => layer.id === selectedLayer);
-    if (currentLayer?.type === 'auto-extracted' && currentLayer.originalCutoutUrl) {
-      try {
-        const tinted = await tintCutout(currentLayer.originalCutoutUrl, color);
-        setLayers((prev) =>
-          prev.map((layer) =>
-            layer.id === selectedLayer ? { ...layer, color, imageUrl: tinted } : layer
-          )
-        );
-      } catch (err) {
-        console.error(err);
-        setErrorMessage('Failed to apply color. Please try again.');
-        setLayers((prev) =>
-          prev.map((layer) => (layer.id === selectedLayer ? { ...layer, color } : layer))
-        );
-      }
-    } else {
-      setLayers((prev) => prev.map((layer) => (layer.id === selectedLayer ? { ...layer, color } : layer)));
+  const updateLayerColor = (color: string) => {
+    if (!selectedLayerData || selectedLayerData.type !== 'auto-extracted' || !selectedLayerData.maskDataUrl) {
+      toast('Click a region on the shirt to select it first');
+      return;
     }
+    setSelectedColor(color);
+    commitLayers(layersRef.current.map((layer) => (layer.id === selectedLayer ? { ...layer, color } : layer)));
   };
 
   return (
     <div className="h-screen flex bg-slate-50">
-      {/* Left Panel - Layers */}
+        {/* Left Panel - Layers */}
       <div className="w-80 bg-white border-r border-slate-200 flex flex-col overflow-hidden">
         <div className="p-4 border-b border-slate-200">
           <h4 className="text-slate-900 flex items-center gap-2 mb-3">
@@ -324,6 +737,15 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
             onChange={handleImageUpload}
             className="hidden"
           />
+
+          <button
+            type="button"
+            onClick={() => setIsMyDesignsOpen(true)}
+            className="w-full mt-3 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl transition-all flex items-center justify-center gap-2 text-sm"
+          >
+            <ImageIcon className="w-4 h-4" />
+            Select from My Designs
+          </button>
         </div>
 
         {/* Layer Extractor Banner */}
@@ -346,12 +768,12 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
               {isExtracting ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Detecting colors...</span>
+                  <span>Analyzing...</span>
                 </>
               ) : (
                 <>
                   <Scissors className="w-4 h-4" />
-                  <span>Detect Color Layers</span>
+                  <span>Click Shirt to Detect Colors</span>
                 </>
               )}
             </button>
@@ -374,26 +796,36 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
         </div>
 
         {/* Layer Map Toggle */}
-        {layers.some(l => l.type === 'auto-extracted') && (
-          <div className="px-4 pb-2">
-            <button
-              onClick={() => setShowLayerMap(!showLayerMap)}
-              className={`w-full px-4 py-2 rounded-xl text-sm flex items-center justify-center gap-2 transition-all ${
-                showLayerMap
-                  ? 'bg-green-500 text-white shadow-lg'
-                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-              }`}
-            >
-              <Layers className="w-4 h-4" />
-              {showLayerMap ? 'Layer Map ON' : 'Show Layer Map'}
-            </button>
-          </div>
-        )}
+        <div className="px-4 pb-2">
+          <button
+            onClick={() => {
+              if (showLayerMap) {
+                setShowLayerMap(false);
+                setSelectionMode(false);
+                setObjectMaskDataUrl(null);
+              } else {
+                startLayerMapSelection();
+              }
+            }}
+            className={`w-full px-4 py-2 rounded-xl text-sm flex items-center justify-center gap-2 transition-all ${
+              showLayerMap
+                ? 'bg-green-500 text-white shadow-lg'
+                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+            }`}
+          >
+            <Layers className="w-4 h-4" />
+            {showLayerMap ? 'Layer Map ON' : 'Layer Map'}
+          </button>
+        </div>
         
-        <div className="flex-1 overflow-auto p-4 space-y-2">
+        <div ref={layerListRef} className="flex-1 overflow-auto p-4 space-y-2">
           {layers.map((layer) => (
             <div
               key={layer.id}
+              ref={(el) => {
+                if (el) layerCardRefs.current.set(layer.id, el);
+                else layerCardRefs.current.delete(layer.id);
+              }}
               onClick={() => !layer.locked && setSelectedLayer(layer.id)}
               onMouseEnter={() => setHoveredLayer(layer.id)}
               onMouseLeave={() => setHoveredLayer(null)}
@@ -406,6 +838,11 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
               }`}
             >
               <div className="flex items-center gap-2 mb-2">
+                {layer.type === 'auto-extracted' && (layer.originalAverageColor || layer.color) && (
+                  <div className="flex items-center gap-2">
+                    <div className="w-4 h-4 rounded border border-white shadow-sm" style={{ backgroundColor: layer.color || layer.originalAverageColor }} />
+                  </div>
+                )}
                 <span className="text-sm flex-1 text-slate-900">{layer.name}</span>
                 <button
                   onClick={(e) => {
@@ -468,10 +905,18 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
         {/* Top Bar */}
         <div className="bg-white border-b border-slate-200 p-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <button className="w-10 h-10 rounded-xl bg-slate-100 hover:bg-slate-200 flex items-center justify-center transition-colors">
+            <button
+              onClick={handleUndo}
+              disabled={!undoStack.length}
+              className="w-10 h-10 rounded-xl bg-slate-100 hover:bg-slate-200 flex items-center justify-center transition-colors disabled:opacity-50"
+            >
               <Undo className="w-5 h-5 text-slate-600" />
             </button>
-            <button className="w-10 h-10 rounded-xl bg-slate-100 hover:bg-slate-200 flex items-center justify-center transition-colors">
+            <button
+              onClick={handleRedo}
+              disabled={!redoStack.length}
+              className="w-10 h-10 rounded-xl bg-slate-100 hover:bg-slate-200 flex items-center justify-center transition-colors disabled:opacity-50"
+            >
               <Redo className="w-5 h-5 text-slate-600" />
             </button>
           </div>
@@ -505,7 +950,14 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
               Save Version
             </button>
             <button
-              onClick={() => onComplete(realisticPreview || selectedLayerData?.imageUrl || baseImages[0])}
+              onClick={async () => {
+                try {
+                  const output = realisticPreview || (await getCompositeDataUrl());
+                  onComplete(output);
+                } catch (err) {
+                  setErrorMessage(err instanceof Error ? err.message : 'Failed to export design.');
+                }
+              }}
               className="px-6 py-2 bg-gradient-to-r from-violet-500 to-purple-500 text-white rounded-xl hover:shadow-xl hover:shadow-purple-500/30 transition-all flex items-center gap-2"
             >
               <Check className="w-4 h-4" />
@@ -539,8 +991,8 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
                     <>
                       <button
                         onClick={() => {
-                          setLayers((prev) =>
-                            prev.map((layer) =>
+                          commitLayers(
+                            layersRef.current.map((layer) =>
                               layer.type === 'image' ? { ...layer, imageUrl: realisticPreview } : layer
                             )
                           );
@@ -560,7 +1012,7 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
                             locked: false,
                             imageUrl: realisticPreview,
                           };
-                          setLayers((prev) => [...prev, newLayer]);
+                          commitLayers([...layersRef.current, newLayer]);
                           setSelectedLayer(newLayer.id);
                           setShowRealisticPreview(false);
                         }}
@@ -616,67 +1068,142 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
           ) : (
             // Layer Editor Mode
             <div className="relative bg-white rounded-3xl shadow-2xl p-8" style={{ width: '600px', height: '600px' }}>
-              <div className="relative w-full h-full bg-slate-50 rounded-2xl overflow-hidden">
+              <div
+                ref={canvasRef}
+                className="relative w-full h-full bg-slate-50 rounded-2xl overflow-hidden"
+                onMouseMove={(e) => {
+                  if (!showLayerMap) return;
+                  scheduleHoverHitTest(e.clientX, e.clientY);
+                }}
+                onMouseLeave={() => setHoveredMaskLayerId(null)}
+                onClick={(e) => {
+                  if (!showLayerMap || isExtracting) return;
+                  const pt = getImageSpacePoint(e.clientX, e.clientY);
+                  if (!pt) return;
+
+                  const hasExtracted = layersRef.current.some((l) => l.type === 'auto-extracted');
+                  if (!hasExtracted) {
+                    pickObjectAndSplitColors(pt.normX, pt.normY);
+                    return;
+                  }
+
+                  const hit = hitTestMaskLayers(pt.normX, pt.normY);
+                  if (hit) {
+                    setSelectedLayer(hit);
+                    setHoveredMaskLayerId(hit);
+                    return;
+                  }
+                }}
+              >
                 {/* Composite Preview */}
                 {compositePreview ? (
                   <img
                     src={compositePreview}
                     alt="Composite preview"
-                    className="absolute inset-0 w-full h-full object-cover"
+                    className="absolute inset-0 w-full h-full object-contain"
                   />
                 ) : (
                   layers[0]?.imageUrl && (
                     <img
                       src={layers[0].imageUrl}
                       alt="Base layer"
-                      className="absolute inset-0 w-full h-full object-cover"
+                      className="absolute inset-0 w-full h-full object-contain"
                     />
                   )
                 )}
 
                 {/* Color-Coded Layer Map Overlay */}
                 {showLayerMap && (
-                  <div className="absolute inset-0 z-20">
-                    {layers.filter(l => l.type === 'auto-extracted' && l.visible && l.maskUrl).map((layer, index) => {
-                      const layerColors = [
-                        'rgba(239, 68, 68, 0.4)',   // Red
-                        'rgba(59, 130, 246, 0.4)',  // Blue
-                        'rgba(16, 185, 129, 0.4)',  // Green
-                        'rgba(245, 158, 11, 0.4)',  // Orange
-                        'rgba(139, 92, 246, 0.4)',  // Purple
-                      ];
+                  <div className="absolute inset-0 z-20 pointer-events-none">
+                    {objectMaskDataUrl && (
+                      <div
+                        className="absolute inset-0"
+                        style={{
+                          backgroundColor: 'rgba(34, 197, 94, 0.22)',
+                          WebkitMaskImage: `url(${objectMaskDataUrl})`,
+                          maskImage: `url(${objectMaskDataUrl})`,
+                          WebkitMaskSize: '100% 100%',
+                          maskSize: '100% 100%',
+                          WebkitMaskRepeat: 'no-repeat',
+                          maskRepeat: 'no-repeat',
+                        }}
+                      />
+                    )}
+
+                    {(() => {
+                      // Force rerender when outlines are computed
+                      void maskCacheTick;
+                      const selected = layers.find((l) => l.id === selectedLayer && l.type === 'auto-extracted');
+                      const hovered = layers.find((l) => l.id === hoveredMaskLayerId && l.type === 'auto-extracted');
+                      const selectedOutline = selected ? maskCacheRef.current.get(selected.id)?.outlineDataUrl : undefined;
+                      const hoveredOutline = hovered ? maskCacheRef.current.get(hovered.id)?.outlineDataUrl : undefined;
 
                       return (
-                        <div
-                          key={`map-${layer.id}`}
-                          className="absolute inset-0 transition-all"
-                          style={{ zIndex: selectedLayer === layer.id ? 30 : 20 + index }}
-                          onClick={() => setSelectedLayer(layer.id)}
-                          onMouseEnter={() => setHoveredLayer(layer.id)}
-                          onMouseLeave={() => setHoveredLayer(null)}
-                        >
-                          <div
-                            className={`absolute inset-0 transition-all ${
-                              selectedLayer === layer.id ? 'ring-4 ring-yellow-400' : hoveredLayer === layer.id ? 'ring-2 ring-yellow-300' : ''
-                            }`}
-                            style={{
-                              backgroundColor: layerColors[index % layerColors.length],
-                              WebkitMaskImage: `url(${layer.maskUrl})`,
-                              maskImage: `url(${layer.maskUrl})`,
-                              WebkitMaskSize: '100% 100%',
-                              maskSize: '100% 100%',
-                              WebkitMaskRepeat: 'no-repeat',
-                              maskRepeat: 'no-repeat',
-                              opacity: selectedLayer === layer.id ? 0.6 : 0.4,
-                              cursor: 'pointer',
-                            }}
-                          />
-                          <div className="absolute top-2 left-2 bg-white/90 backdrop-blur-sm px-2 py-1 rounded text-xs font-medium text-slate-900 shadow-lg pointer-events-none">
-                            {layer.name}
-                          </div>
-                        </div>
+                        <>
+                          {hovered?.maskDataUrl && hovered.id !== selected?.id && (
+                            <>
+                              <div
+                                className="absolute inset-0"
+                                style={{
+                                  backgroundColor: 'rgba(59, 130, 246, 0.22)',
+                                  WebkitMaskImage: `url(${hovered.maskDataUrl})`,
+                                  maskImage: `url(${hovered.maskDataUrl})`,
+                                  WebkitMaskSize: '100% 100%',
+                                  maskSize: '100% 100%',
+                                  WebkitMaskRepeat: 'no-repeat',
+                                  maskRepeat: 'no-repeat',
+                                }}
+                              />
+                              {hoveredOutline && (
+                                <div
+                                  className="absolute inset-0"
+                                  style={{
+                                    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+                                    WebkitMaskImage: `url(${hoveredOutline})`,
+                                    maskImage: `url(${hoveredOutline})`,
+                                    WebkitMaskSize: '100% 100%',
+                                    maskSize: '100% 100%',
+                                    WebkitMaskRepeat: 'no-repeat',
+                                    maskRepeat: 'no-repeat',
+                                  }}
+                                />
+                              )}
+                            </>
+                          )}
+
+                          {selected?.maskDataUrl && (
+                            <>
+                              <div
+                                className="absolute inset-0"
+                                style={{
+                                  backgroundColor: 'rgba(234, 179, 8, 0.28)',
+                                  WebkitMaskImage: `url(${selected.maskDataUrl})`,
+                                  maskImage: `url(${selected.maskDataUrl})`,
+                                  WebkitMaskSize: '100% 100%',
+                                  maskSize: '100% 100%',
+                                  WebkitMaskRepeat: 'no-repeat',
+                                  maskRepeat: 'no-repeat',
+                                }}
+                              />
+                              {selectedOutline && (
+                                <div
+                                  className="absolute inset-0"
+                                  style={{
+                                    backgroundColor: 'rgba(234, 179, 8, 0.95)',
+                                    WebkitMaskImage: `url(${selectedOutline})`,
+                                    maskImage: `url(${selectedOutline})`,
+                                    WebkitMaskSize: '100% 100%',
+                                    maskSize: '100% 100%',
+                                    WebkitMaskRepeat: 'no-repeat',
+                                    maskRepeat: 'no-repeat',
+                                  }}
+                                />
+                              )}
+                            </>
+                          )}
+                        </>
                       );
-                    })}
+                    })()}
                   </div>
                 )}
                 
@@ -689,8 +1216,17 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
 
                 {showLayerMap && (
                   <div className="absolute bottom-4 left-4 right-4 bg-white/90 backdrop-blur-sm px-4 py-3 rounded-xl shadow-xl z-30">
-                    <p className="text-xs text-slate-600 mb-2">Color Layer Map Active</p>
-                    <p className="text-xs text-slate-500">Click on any colored region to select and edit that layer</p>
+                    {layers.some((l) => l.type === 'auto-extracted') ? (
+                      <>
+                        <p className="text-xs text-slate-600 mb-2">Color Layer Map Active</p>
+                        <p className="text-xs text-slate-500">Hover to preview, click to select a region</p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-xs text-slate-600 mb-2">Click the shirt</p>
+                        <p className="text-xs text-slate-500">First click selects the garment, then detects only its real colors</p>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -789,7 +1325,7 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
                       value={selectedLayerData.position?.x || 50}
                       onChange={(e) => {
                         const newPos = { ...selectedLayerData.position, x: Number(e.target.value) } as any;
-                        setLayers(layers.map(l => l.id === selectedLayer ? { ...l, position: newPos } : l));
+                        commitLayers(layersRef.current.map((l) => (l.id === selectedLayer ? { ...l, position: newPos } : l)));
                       }}
                       className="flex-1"
                     />
@@ -804,7 +1340,7 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
                       value={selectedLayerData.position?.y || 50}
                       onChange={(e) => {
                         const newPos = { ...selectedLayerData.position, y: Number(e.target.value) } as any;
-                        setLayers(layers.map(l => l.id === selectedLayer ? { ...l, position: newPos } : l));
+                        commitLayers(layersRef.current.map((l) => (l.id === selectedLayer ? { ...l, position: newPos } : l)));
                       }}
                       className="flex-1"
                     />
@@ -852,7 +1388,11 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
                     max="100"
                     value={(selectedLayerData.scale || 1) * 100}
                     onChange={(e) => {
-                      setLayers(layers.map(l => l.id === selectedLayer ? { ...l, scale: Number(e.target.value) / 100 } : l));
+                      commitLayers(
+                        layersRef.current.map((l) =>
+                          l.id === selectedLayer ? { ...l, scale: Number(e.target.value) / 100 } : l
+                        )
+                      );
                     }}
                     className="flex-1"
                   />
@@ -872,7 +1412,7 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
                   value={Math.round((selectedLayerData.opacity ?? 1) * 100)}
                   onChange={(e) => {
                     const nextOpacity = Number(e.target.value) / 100;
-                    setLayers(layers.map(l => l.id === selectedLayer ? { ...l, opacity: nextOpacity } : l));
+                    commitLayers(layersRef.current.map((l) => (l.id === selectedLayer ? { ...l, opacity: nextOpacity } : l)));
                   }}
                   className="flex-1"
                 />
@@ -884,6 +1424,20 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
           </div>
         )}
       </div>
+
+      <RightSidePanel
+        open={isMyDesignsOpen}
+        title="My Designs"
+        subtitle="Select a saved design to load into the editor."
+        onClose={() => setIsMyDesignsOpen(false)}
+      >
+        <RightDrawerMyDesigns
+          open
+          onClose={() => setIsMyDesignsOpen(false)}
+          selectedDesignId={selectedDesignId}
+          onSelectDesign={handleSelectSavedDesign}
+        />
+      </RightSidePanel>
     </div>
   );
 }

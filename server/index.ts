@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import dotenv from 'dotenv';
 
 const rootEnv = path.resolve(process.cwd(), '.env');
@@ -145,7 +146,7 @@ connectMongo()
   .then(() => {
     console.log('MongoDB connected successfully');
   })
-  .catch((err) => {
+  .catch((err: any) => {
     console.error('Failed to connect to MongoDB:', err.message);
     console.error('Make sure DATABASE_URL or MONGODB_URI is set correctly');
     process.exit(1);
@@ -155,9 +156,14 @@ const allowedStyles: StyleKey[] = ['realistic', '3d', 'lineart', 'watercolor', '
 const allowedViews = new Set<ViewKey>(['front', 'back', 'left', 'right', 'threeQuarter', 'top']);
 
 const pngDataUrlRegex = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/i;
+const imageDataUrlRegex = /^data:image\/(png|jpe?g);base64,[A-Za-z0-9+/=]+$/i;
 
 function isPngDataUrl(value: unknown) {
   return typeof value === 'string' && pngDataUrlRegex.test(value.trim());
+}
+
+function isImageDataUrl(value: unknown) {
+  return typeof value === 'string' && imageDataUrlRegex.test(value.trim());
 }
 
 function dataUrlSizeBytes(value: string) {
@@ -198,10 +204,32 @@ function validateDesignPayload(body: any) {
   const normalizePngInput = (
     input: any
   ): { mime: 'image/png'; dataUrl?: string; url?: string } | null => {
+    const normalizeApiUrlString = (value: string) => {
+      const trimmed = value.trim();
+      if (trimmed.startsWith('/api/')) return trimmed;
+      try {
+        const parsed = new URL(trimmed);
+        if (parsed.pathname.startsWith('/api/')) {
+          return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+        }
+      } catch {}
+      return trimmed;
+    };
+
     if (typeof input === 'string' && isPngDataUrl(input)) {
       return { mime: 'image/png', dataUrl: input };
     }
     if (input && typeof input === 'object') {
+      if (typeof input.imageDataUrl === 'string') {
+        const v = normalizeApiUrlString(input.imageDataUrl);
+        if (isPngDataUrl(v)) return { mime: 'image/png', dataUrl: v };
+        if (v.startsWith('/api/')) return { mime: 'image/png', url: v };
+      }
+      if (typeof input.src === 'string') {
+        const v = normalizeApiUrlString(input.src);
+        if (isPngDataUrl(v)) return { mime: 'image/png', dataUrl: v };
+        if (v.startsWith('/api/')) return { mime: 'image/png', url: v };
+      }
       if (typeof input.dataUrl === 'string' && isPngDataUrl(input.dataUrl)) {
         return { mime: 'image/png', dataUrl: input.dataUrl };
       }
@@ -209,8 +237,11 @@ function validateDesignPayload(body: any) {
         return { mime: 'image/png', url: input.url };
       }
     }
-    if (typeof input === 'string' && input.startsWith('/api/')) {
-      return { mime: 'image/png', url: input };
+    if (typeof input === 'string') {
+      const v = normalizeApiUrlString(input);
+      if (v.startsWith('/api/')) {
+        return { mime: 'image/png', url: v };
+      }
     }
     return null;
   };
@@ -230,7 +261,8 @@ function validateDesignPayload(body: any) {
 
   const normalizedImages = images.map((img: any) => {
     const view = img?.view;
-    const input = typeof img?.src === 'string' ? img.src : img?.dataUrl ?? img?.url;
+    const inputRaw = img?.dataUrl ?? img?.imageDataUrl ?? img?.src ?? img?.url;
+    const input = typeof inputRaw === 'string' ? inputRaw : '';
     const normalized = normalizePngInput(input);
     return { view, ...normalized };
   });
@@ -238,7 +270,7 @@ function validateDesignPayload(body: any) {
   const viewSet = new Set(views);
   if (
     !normalizedImages.every(
-      (img) =>
+      (img: any) =>
         typeof img.view === 'string' &&
         viewSet.has(img.view) &&
         (typeof img.dataUrl === 'string' || typeof img.url === 'string')
@@ -258,7 +290,12 @@ function validateDesignPayload(body: any) {
       userId,
       views,
       composite: normalizedComposite,
-      images: normalizedImages.map((img) => ({ view: img.view, mime: 'image/png' as const, dataUrl: img.dataUrl, url: img.url })),
+      images: normalizedImages.map((img: any) => ({
+        view: img.view,
+        mime: 'image/png' as const,
+        dataUrl: img.dataUrl,
+        url: img.url,
+      })),
     },
   };
 }
@@ -276,6 +313,389 @@ function dataUrlToBuffer(dataUrl: string) {
     mime: match[1],
     buffer: Buffer.from(match[2], 'base64'),
   };
+}
+
+function dataUrlToImageBuffer(dataUrl: string) {
+  const match = /^data:(image\/(png|jpe?g));base64,(.+)$/i.exec(dataUrl.trim());
+  if (!match) {
+    throw new Error('Invalid image data URL');
+  }
+  return {
+    mime: match[1].toLowerCase(),
+    buffer: Buffer.from(match[3], 'base64') as Buffer,
+  };
+}
+
+function clamp01(v: number) {
+  return Math.max(0, Math.min(1, v));
+}
+
+function rgbDistSq(a: [number, number, number], b: [number, number, number]) {
+  const dr = a[0] - b[0];
+  const dg = a[1] - b[1];
+  const db = a[2] - b[2];
+  return dr * dr + dg * dg + db * db;
+}
+
+function rgbToHex(r: number, g: number, b: number) {
+  const clamp = (x: number) => Math.max(0, Math.min(255, Math.round(x)));
+  return `#${clamp(r).toString(16).padStart(2, '0')}${clamp(g).toString(16).padStart(2, '0')}${clamp(b)
+    .toString(16)
+    .padStart(2, '0')}`.toUpperCase();
+}
+
+function seededRng(seed: number) {
+  let t = seed >>> 0;
+  return () => {
+    t += 0x6d2b79f5;
+    let x = t;
+    x = Math.imul(x ^ (x >>> 15), x | 1);
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+async function decodePngMaskToRaw(dataUrl: string, width: number, height: number) {
+  const { buffer } = dataUrlToBuffer(dataUrl);
+  const decoded = await sharp(buffer)
+    .ensureAlpha()
+    .resize({ width, height, fit: 'fill', kernel: sharp.kernel.nearest })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const channels = decoded.info.channels;
+  const out = Buffer.alloc(width * height);
+  for (let i = 0; i < width * height; i += 1) {
+    out[i] = decoded.data[i * channels];
+  }
+  return out;
+}
+
+async function fallbackObjectMaskFromPoint(options: { imageDataUrl: string; x: number; y: number }) {
+  const { buffer } = dataUrlToImageBuffer(options.imageDataUrl);
+  const decoded = await sharp(buffer)
+    .ensureAlpha()
+    .resize({ width: 512, height: 512, fit: 'inside' })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const width = decoded.info.width;
+  const height = decoded.info.height;
+  const channels = decoded.info.channels;
+  const data = decoded.data;
+
+  const px = Math.floor(clamp01(options.x) * (width - 1));
+  const py = Math.floor(clamp01(options.y) * (height - 1));
+  const seedIdx = (py * width + px) * channels;
+  const seed: [number, number, number] = [data[seedIdx], data[seedIdx + 1], data[seedIdx + 2]];
+
+  const visited = new Uint8Array(width * height);
+  const mask = new Uint8Array(width * height);
+  const q = new Int32Array(width * height);
+  let qh = 0;
+  let qt = 0;
+  const start = py * width + px;
+  q[qt++] = start;
+  visited[start] = 1;
+
+  const tolSq = 26 * 26;
+  const maxPixels = Math.floor(width * height * 0.45);
+
+  while (qh < qt && qt < maxPixels) {
+    const idx = q[qh++];
+    mask[idx] = 255;
+    const x = idx % width;
+    const y = Math.floor(idx / width);
+    const neighbors: Array<[number, number]> = [
+      [x + 1, y],
+      [x - 1, y],
+      [x, y + 1],
+      [x, y - 1],
+    ];
+    for (const [nx, ny] of neighbors) {
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+      const nIdx = ny * width + nx;
+      if (visited[nIdx]) continue;
+      visited[nIdx] = 1;
+      const off = nIdx * channels;
+      const rgb: [number, number, number] = [data[off], data[off + 1], data[off + 2]];
+      if (rgbDistSq(rgb, seed) <= tolSq) {
+        q[qt++] = nIdx;
+      }
+    }
+  }
+
+  const blurred = await sharp(Buffer.from(mask), { raw: { width, height, channels: 1 } }).blur(1.2).raw().toBuffer();
+  const thresh = Buffer.alloc(width * height);
+  for (let i = 0; i < width * height; i += 1) {
+    thresh[i] = blurred[i] >= 80 ? 255 : 0;
+  }
+  const png = await sharp(thresh, { raw: { width, height, channels: 1 } }).png().toBuffer();
+  return `data:image/png;base64,${png.toString('base64')}`;
+}
+
+async function fallbackSplitColorsInMask(options: {
+  imageDataUrl: string;
+  objectMaskDataUrl: string;
+  maxColors: number;
+  minAreaRatio: number;
+  seed: number;
+}) {
+  const { buffer } = dataUrlToImageBuffer(options.imageDataUrl);
+  const decoded = await sharp(buffer)
+    .ensureAlpha()
+    .resize({ width: 512, height: 512, fit: 'inside' })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const width = decoded.info.width;
+  const height = decoded.info.height;
+  const channels = decoded.info.channels;
+  const data = decoded.data;
+
+  const maskRaw = await decodePngMaskToRaw(options.objectMaskDataUrl, width, height);
+  const objectIndices: number[] = [];
+  for (let i = 0; i < width * height; i += 1) {
+    if (maskRaw[i] >= 128) objectIndices.push(i);
+  }
+  const objectArea = objectIndices.length;
+  if (!objectArea) throw new Error('Empty object mask.');
+
+  const pixels: Array<[number, number, number]> = objectIndices.map((i) => {
+    const off = i * channels;
+    return [data[off], data[off + 1], data[off + 2]];
+  });
+
+  const sampleStep = Math.max(1, Math.floor(pixels.length / 8000));
+  const sample: Array<[number, number, number]> = [];
+  for (let i = 0; i < pixels.length; i += sampleStep) sample.push(pixels[i]);
+
+  const mean = sample.reduce(
+    (acc, p) => [acc[0] + p[0], acc[1] + p[1], acc[2] + p[2]] as [number, number, number],
+    [0, 0, 0]
+  );
+  const meanRgb: [number, number, number] = [mean[0] / sample.length, mean[1] / sample.length, mean[2] / sample.length];
+  const variance = sample.reduce((acc, p) => acc + rgbDistSq(p, meanRgb), 0) / Math.max(1, sample.length);
+  if (variance < 30) {
+    const png = await sharp(maskRaw, { raw: { width, height, channels: 1 } }).png().toBuffer();
+    return [{ id: 'shirt-color-1', maskDataUrl: `data:image/png;base64,${png.toString('base64')}`, avgColor: rgbToHex(meanRgb[0], meanRgb[1], meanRgb[2]), areaPct: 1 }];
+  }
+
+  const rng = seededRng(options.seed || 42);
+  const runKmeans = (k: number) => {
+    const centroids: Array<[number, number, number]> = [];
+    for (let i = 0; i < k; i += 1) {
+      const pick = sample[Math.floor(rng() * sample.length)] || sample[0];
+      centroids.push([pick[0], pick[1], pick[2]]);
+    }
+    const iterations = 8;
+    for (let it = 0; it < iterations; it += 1) {
+      const sums = Array.from({ length: k }, () => [0, 0, 0, 0] as [number, number, number, number]);
+      for (const px of sample) {
+        let best = 0;
+        let bestDist = Number.POSITIVE_INFINITY;
+        for (let c = 0; c < k; c += 1) {
+          const dist = rgbDistSq(px, centroids[c]);
+          if (dist < bestDist) {
+            bestDist = dist;
+            best = c;
+          }
+        }
+        sums[best][0] += px[0];
+        sums[best][1] += px[1];
+        sums[best][2] += px[2];
+        sums[best][3] += 1;
+      }
+      for (let c = 0; c < k; c += 1) {
+        const count = sums[c][3] || 1;
+        centroids[c] = [sums[c][0] / count, sums[c][1] / count, sums[c][2] / count];
+      }
+    }
+    let sse = 0;
+    for (const px of sample) {
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (let c = 0; c < k; c += 1) bestDist = Math.min(bestDist, rgbDistSq(px, centroids[c]));
+      sse += bestDist;
+    }
+    return { centroids, sse };
+  };
+
+  const maxK = Math.min(Math.max(options.maxColors, 2), 10, sample.length);
+  const models: Array<{ centroids: Array<[number, number, number]>; sse: number }> = [];
+  const sseByK: number[] = [];
+  for (let k = 1; k <= maxK; k += 1) {
+    const m = runKmeans(k);
+    models.push(m);
+    sseByK.push(m.sse);
+  }
+
+  let chosenK = 1;
+  if (maxK >= 3) {
+    let bestCurv = -Infinity;
+    for (let k = 2; k <= maxK - 1; k += 1) {
+      const curv = sseByK[k - 2] - 2 * sseByK[k - 1] + sseByK[k];
+      if (curv > bestCurv) {
+        bestCurv = curv;
+        chosenK = k;
+      }
+    }
+  } else if (maxK === 2) {
+    const improv = (sseByK[0] - sseByK[1]) / Math.max(1, sseByK[0]);
+    chosenK = improv > 0.12 ? 2 : 1;
+  }
+
+  const centroids = models[chosenK - 1].centroids;
+  const labels = new Uint8Array(objectArea);
+  const areas = new Array<number>(centroids.length).fill(0);
+  for (let i = 0; i < objectArea; i += 1) {
+    const px = pixels[i];
+    let best = 0;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (let c = 0; c < centroids.length; c += 1) {
+      const dist = rgbDistSq(px, centroids[c]);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = c;
+      }
+    }
+    labels[i] = best;
+    areas[best] += 1;
+  }
+
+  const minArea = Math.max(1, Math.floor(objectArea * options.minAreaRatio));
+  const order = [...Array(centroids.length).keys()].sort((a, b) => areas[b] - areas[a]);
+  const out: Array<{ id: string; maskDataUrl: string; avgColor: string; areaPct: number }> = [];
+  for (const clusterIdx of order) {
+    const area = areas[clusterIdx];
+    if (area < minArea) continue;
+    const maskOut = Buffer.alloc(width * height);
+    for (let i = 0; i < objectArea; i += 1) {
+      if (labels[i] !== clusterIdx) continue;
+      maskOut[objectIndices[i]] = 255;
+    }
+    const png = await sharp(maskOut, { raw: { width, height, channels: 1 } }).png().toBuffer();
+    const c = centroids[clusterIdx];
+    out.push({
+      id: `shirt-color-${out.length + 1}`,
+      maskDataUrl: `data:image/png;base64,${png.toString('base64')}`,
+      avgColor: rgbToHex(c[0], c[1], c[2]),
+      areaPct: area / objectArea,
+    });
+  }
+  return out.length
+    ? out
+    : [{ id: 'shirt-color-1', maskDataUrl: `data:image/png;base64,${(await sharp(maskRaw, { raw: { width, height, channels: 1 } }).png().toBuffer()).toString('base64')}`, avgColor: rgbToHex(meanRgb[0], meanRgb[1], meanRgb[2]), areaPct: 1 }];
+}
+
+async function fallbackKmeansColorLayers(options: { imageDataUrl: string; numLayers: number; blur: number; seed: number }) {
+  const { buffer } = dataUrlToImageBuffer(options.imageDataUrl);
+  const decoded = await sharp(buffer)
+    .ensureAlpha()
+    .resize({ width: 512, height: 512, fit: 'inside' })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const width = decoded.info.width;
+  const height = decoded.info.height;
+  const channels = decoded.info.channels;
+  const data = decoded.data;
+
+  const pixels: Array<[number, number, number]> = [];
+  const step = Math.max(1, Math.floor((width * height) / 65000));
+  for (let i = 0; i < width * height; i += step) {
+    const off = i * channels;
+    pixels.push([data[off], data[off + 1], data[off + 2]]);
+  }
+  if (!pixels.length) throw new Error('No pixels available for fallback.');
+
+  const k = Math.min(Math.max(options.numLayers, 2), 8, pixels.length);
+  const rng = seededRng(options.seed || 42);
+  const centroids: Array<[number, number, number]> = [];
+  for (let i = 0; i < k; i += 1) {
+    const pick = pixels[Math.floor(rng() * pixels.length)] || pixels[0];
+    centroids.push([pick[0], pick[1], pick[2]]);
+  }
+
+  const iterations = 8;
+  for (let it = 0; it < iterations; it += 1) {
+    const sums = Array.from({ length: k }, () => [0, 0, 0, 0] as [number, number, number, number]);
+    for (const px of pixels) {
+      let best = 0;
+      let bestDist = Number.POSITIVE_INFINITY;
+      for (let c = 0; c < k; c += 1) {
+        const dist = rgbDistSq(px, centroids[c]);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = c;
+        }
+      }
+      sums[best][0] += px[0];
+      sums[best][1] += px[1];
+      sums[best][2] += px[2];
+      sums[best][3] += 1;
+    }
+    for (let c = 0; c < k; c += 1) {
+      const count = sums[c][3] || 1;
+      centroids[c] = [sums[c][0] / count, sums[c][1] / count, sums[c][2] / count];
+    }
+  }
+
+  const labels = new Uint8Array(width * height);
+  const areas = new Array<number>(k).fill(0);
+  for (let i = 0; i < width * height; i += 1) {
+    const off = i * channels;
+    const rgb: [number, number, number] = [data[off], data[off + 1], data[off + 2]];
+    let best = 0;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (let c = 0; c < k; c += 1) {
+      const dist = rgbDistSq(rgb, centroids[c]);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = c;
+      }
+    }
+    labels[i] = best;
+    areas[best] += 1;
+  }
+
+  const order = [...Array(k).keys()].sort((a, b) => areas[b] - areas[a]).filter((idx) => areas[idx] > 0);
+  const layers = await Promise.all(
+    order.map(async (clusterIdx, outIdx) => {
+      const maskRaw = Buffer.alloc(width * height);
+      for (let i = 0; i < labels.length; i += 1) {
+        maskRaw[i] = labels[i] === clusterIdx ? 255 : 0;
+      }
+
+      let maskForAlpha: Buffer = maskRaw;
+      if (options.blur > 0) {
+        maskForAlpha = await sharp(maskRaw, { raw: { width, height, channels: 1 } })
+          .blur(options.blur)
+          .raw()
+          .toBuffer();
+      }
+
+      const maskPngBuffer = await sharp(maskForAlpha, { raw: { width, height, channels: 1 } }).png().toBuffer();
+      const maskPng = `data:image/png;base64,${maskPngBuffer.toString('base64')}`;
+
+      const rgba = Buffer.alloc(width * height * 4);
+      for (let i = 0; i < width * height; i += 1) {
+        const srcIdx = i * channels;
+        const dstIdx = i * 4;
+        rgba[dstIdx] = data[srcIdx];
+        rgba[dstIdx + 1] = data[srcIdx + 1];
+        rgba[dstIdx + 2] = data[srcIdx + 2];
+        rgba[dstIdx + 3] = maskForAlpha[i];
+      }
+      const cutoutBuffer = await sharp(rgba, { raw: { width, height, channels: 4 } }).png().toBuffer();
+      const cutoutPng = `data:image/png;base64,${cutoutBuffer.toString('base64')}`;
+      const centroid = centroids[clusterIdx];
+      return {
+        id: randomUUID(),
+        label: `Layer ${outIdx + 1}`,
+        suggestedColor: rgbToHex(centroid[0], centroid[1], centroid[2]),
+        maskPng,
+        cutoutPng,
+        area: areas[clusterIdx],
+      };
+    })
+  );
+  return { width, height, layers };
 }
 
 function dataUrlToInlineData(dataUrl: string) {
@@ -567,21 +987,27 @@ app.get('/api/sam2/health', async (_req: Request, res: Response) => {
 app.post('/api/sam2/color-layers', async (req: Request, res: Response) => {
   try {
     const imageDataUrl = typeof req.body?.imageDataUrl === 'string' ? req.body.imageDataUrl.trim() : '';
-    const rawNumLayers = Number(req.body?.num_layers ?? 4);
+    const rawNumLayers = Number(req.body?.num_layers ?? req.body?.numLayers ?? 4);
     const numLayers = Number.isFinite(rawNumLayers) ? Math.min(Math.max(rawNumLayers, 2), 8) : 4;
+    const rawMinAreaRatio = Number(req.body?.min_area_ratio ?? req.body?.minAreaRatio ?? 0.01);
+    const minAreaRatio = Number.isFinite(rawMinAreaRatio) ? Math.min(Math.max(rawMinAreaRatio, 0), 0.5) : 0.01;
+    const rawBlur = Number(req.body?.blur ?? 1);
+    const blur = Number.isFinite(rawBlur) ? Math.min(Math.max(Math.round(rawBlur), 0), 9) : 1;
+    const rawSeed = Number(req.body?.seed ?? 42);
+    const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
 
-    if (!isPngDataUrl(imageDataUrl)) {
-      return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG data URL.' });
+    if (!isImageDataUrl(imageDataUrl)) {
+      return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
     }
     assertDataUrlSize(imageDataUrl);
 
     const response = await fetchWithTimeout(`${SAM2_SERVICE_URL}/segment/color-layers`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageDataUrl, num_layers: numLayers }),
+      body: JSON.stringify({ imageDataUrl, num_layers: numLayers, min_area_ratio: minAreaRatio, blur, seed }),
     }, 20000);
 
-    const payload = await response.json().catch(() => ({})) as { detail?: string; error?: string };
+    const payload = await response.json().catch(() => ({})) as any;
     if (!response.ok) {
       return res.status(502).json({
         ok: false,
@@ -589,21 +1015,54 @@ app.post('/api/sam2/color-layers', async (req: Request, res: Response) => {
       });
     }
 
-    res.json(payload);
+    res.json({
+      ok: true,
+      width: payload?.width,
+      height: payload?.height,
+      layers: Array.isArray(payload?.layers) ? payload.layers : [],
+      sam2: payload?.sam2,
+    });
   } catch (err: any) {
     console.error('SAM2 proxy error:', err);
-    const message = err?.name === 'AbortError'
-      ? 'SAM2 service timed out. Is the Python service running?'
-      : err?.message || 'Failed to reach SAM2 service.';
-    res.status(502).json({ ok: false, error: message });
+    try {
+      const imageDataUrl = typeof req.body?.imageDataUrl === 'string' ? req.body.imageDataUrl.trim() : '';
+      const rawNumLayers = Number(req.body?.num_layers ?? req.body?.numLayers ?? 4);
+      const numLayers = Number.isFinite(rawNumLayers) ? Math.min(Math.max(rawNumLayers, 2), 8) : 4;
+      const rawBlur = Number(req.body?.blur ?? 1);
+      const blur = Number.isFinite(rawBlur) ? Math.min(Math.max(Math.round(rawBlur), 0), 9) : 1;
+      const rawSeed = Number(req.body?.seed ?? 42);
+      const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
+
+      if (!isImageDataUrl(imageDataUrl)) {
+        return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
+      }
+      assertDataUrlSize(imageDataUrl);
+      const fallback = await fallbackKmeansColorLayers({ imageDataUrl, numLayers, blur, seed });
+      return res.json({
+        ok: true,
+        width: fallback.width,
+        height: fallback.height,
+        layers: fallback.layers,
+        sam2: { mode: 'node-kmeans', used: false },
+      });
+    } catch (fallbackErr: any) {
+      const message =
+        err?.name === 'AbortError'
+          ? 'SAM2 service timed out. Run `npm run dev:all` or start `sam2_service`.'
+          : String(err?.message || err) === 'fetch failed'
+            ? 'SAM2 service is offline. Run `npm run dev:all` or start `sam2_service`.'
+            : err?.message || 'Failed to reach SAM2 service.';
+      const details = fallbackErr?.message ? ` Fallback also failed: ${fallbackErr.message}` : '';
+      return res.status(502).json({ ok: false, error: `${message}${details}`.trim() });
+    }
   }
 });
 
 app.post('/api/sam2/auto', async (req: Request, res: Response) => {
   try {
     const imageDataUrl = typeof req.body?.imageDataUrl === 'string' ? req.body.imageDataUrl.trim() : '';
-    if (!isPngDataUrl(imageDataUrl)) {
-      return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG data URL.' });
+    if (!isImageDataUrl(imageDataUrl)) {
+      return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
     }
     assertDataUrlSize(imageDataUrl);
 
@@ -613,7 +1072,7 @@ app.post('/api/sam2/auto', async (req: Request, res: Response) => {
       body: JSON.stringify({ imageDataUrl }),
     }, 20000);
 
-    const payload = await response.json().catch(() => ({})) as { detail?: string; error?: string };
+    const payload = await response.json().catch(() => ({})) as any;
     if (!response.ok) {
       return res.status(502).json({
         ok: false,
@@ -621,13 +1080,133 @@ app.post('/api/sam2/auto', async (req: Request, res: Response) => {
       });
     }
 
-    res.json(payload);
+    res.json({ ok: true, masks: Array.isArray(payload?.masks) ? payload.masks : [] });
   } catch (err: any) {
     console.error('SAM2 auto proxy error:', err);
     const message = err?.name === 'AbortError'
       ? 'SAM2 service timed out. Is the Python service running?'
       : err?.message || 'Failed to reach SAM2 service.';
     res.status(502).json({ ok: false, error: message });
+  }
+});
+
+app.post('/api/sam2/object-from-point', async (req: Request, res: Response) => {
+  try {
+    const imageDataUrl = typeof req.body?.imageDataUrl === 'string' ? req.body.imageDataUrl.trim() : '';
+    const x = Number(req.body?.x);
+    const y = Number(req.body?.y);
+
+    if (!isImageDataUrl(imageDataUrl)) {
+      return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
+    }
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) {
+      return res.status(400).json({ ok: false, error: 'x and y must be normalized coordinates (0..1).' });
+    }
+    assertDataUrlSize(imageDataUrl);
+
+    const response = await fetchWithTimeout(
+      `${SAM2_SERVICE_URL}/segment/object-from-point`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageDataUrl, x, y }),
+      },
+      20000
+    );
+
+    const payload = await response.json().catch(() => ({})) as any;
+    if (!response.ok) {
+      return res.status(502).json({ ok: false, error: payload?.detail || payload?.error || 'Object selection failed.' });
+    }
+    return res.json({ ok: true, objectMaskDataUrl: payload?.objectMaskDataUrl });
+  } catch (err: any) {
+    console.error('SAM2 object-from-point proxy error:', err);
+    try {
+      const imageDataUrl = typeof req.body?.imageDataUrl === 'string' ? req.body.imageDataUrl.trim() : '';
+      const x = Number(req.body?.x);
+      const y = Number(req.body?.y);
+      if (!isImageDataUrl(imageDataUrl) || !Number.isFinite(x) || !Number.isFinite(y)) {
+        return res.status(400).json({ ok: false, error: 'Invalid request.' });
+      }
+      assertDataUrlSize(imageDataUrl);
+      const objectMaskDataUrl = await fallbackObjectMaskFromPoint({ imageDataUrl, x, y });
+      return res.json({ ok: true, objectMaskDataUrl, sam2: { mode: 'node-region-grow', used: false } });
+    } catch (fallbackErr: any) {
+      const message =
+        err?.name === 'AbortError'
+          ? 'SAM2 service timed out. Run `npm run dev:all` or start `sam2_service`.'
+          : String(err?.message || err) === 'fetch failed'
+            ? 'SAM2 service is offline. Run `npm run dev:all` or start `sam2_service`.'
+            : err?.message || 'Failed to reach SAM2 service.';
+      const details = fallbackErr?.message ? ` Fallback also failed: ${fallbackErr.message}` : '';
+      return res.status(502).json({ ok: false, error: `${message}${details}`.trim() });
+    }
+  }
+});
+
+app.post('/api/sam2/split-colors-in-mask', async (req: Request, res: Response) => {
+  try {
+    const imageDataUrl = typeof req.body?.imageDataUrl === 'string' ? req.body.imageDataUrl.trim() : '';
+    const objectMaskDataUrl = typeof req.body?.objectMaskDataUrl === 'string' ? req.body.objectMaskDataUrl.trim() : '';
+    const rawMaxColors = Number(req.body?.max_colors ?? req.body?.maxColors ?? 6);
+    const maxColors = Number.isFinite(rawMaxColors) ? Math.min(Math.max(Math.round(rawMaxColors), 2), 10) : 6;
+    const rawMinAreaRatio = Number(req.body?.min_area_ratio ?? req.body?.minAreaRatio ?? 0.02);
+    const minAreaRatio = Number.isFinite(rawMinAreaRatio) ? Math.min(Math.max(rawMinAreaRatio, 0), 0.5) : 0.02;
+    const rawSeed = Number(req.body?.seed ?? 42);
+    const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
+
+    if (!isImageDataUrl(imageDataUrl)) {
+      return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
+    }
+    if (!isPngDataUrl(objectMaskDataUrl)) {
+      return res.status(400).json({ ok: false, error: 'objectMaskDataUrl must be a PNG data URL.' });
+    }
+    assertDataUrlSize(imageDataUrl);
+    assertDataUrlSize(objectMaskDataUrl);
+
+    const response = await fetchWithTimeout(
+      `${SAM2_SERVICE_URL}/segment/split-colors-in-mask`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageDataUrl, objectMaskDataUrl, max_colors: maxColors, min_area_ratio: minAreaRatio, seed }),
+      },
+      30000
+    );
+    const payload = await response.json().catch(() => ({})) as any;
+    if (!response.ok) {
+      return res.status(502).json({ ok: false, error: payload?.detail || payload?.error || 'Color splitting failed.' });
+    }
+    return res.json({ ok: true, layers: Array.isArray(payload?.layers) ? payload.layers : [] });
+  } catch (err: any) {
+    console.error('SAM2 split-colors-in-mask proxy error:', err);
+    try {
+      const imageDataUrl = typeof req.body?.imageDataUrl === 'string' ? req.body.imageDataUrl.trim() : '';
+      const objectMaskDataUrl = typeof req.body?.objectMaskDataUrl === 'string' ? req.body.objectMaskDataUrl.trim() : '';
+      const rawMaxColors = Number(req.body?.max_colors ?? req.body?.maxColors ?? 6);
+      const maxColors = Number.isFinite(rawMaxColors) ? Math.min(Math.max(Math.round(rawMaxColors), 2), 10) : 6;
+      const rawMinAreaRatio = Number(req.body?.min_area_ratio ?? req.body?.minAreaRatio ?? 0.02);
+      const minAreaRatio = Number.isFinite(rawMinAreaRatio) ? Math.min(Math.max(rawMinAreaRatio, 0), 0.5) : 0.02;
+      const rawSeed = Number(req.body?.seed ?? 42);
+      const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
+
+      if (!isImageDataUrl(imageDataUrl) || !isPngDataUrl(objectMaskDataUrl)) {
+        return res.status(400).json({ ok: false, error: 'Invalid request.' });
+      }
+      assertDataUrlSize(imageDataUrl);
+      assertDataUrlSize(objectMaskDataUrl);
+      const layers = await fallbackSplitColorsInMask({ imageDataUrl, objectMaskDataUrl, maxColors, minAreaRatio, seed });
+      return res.json({ ok: true, layers, sam2: { mode: 'node-kmeans', used: false } });
+    } catch (fallbackErr: any) {
+      const message =
+        err?.name === 'AbortError'
+          ? 'SAM2 service timed out. Run `npm run dev:all` or start `sam2_service`.'
+          : String(err?.message || err) === 'fetch failed'
+            ? 'SAM2 service is offline. Run `npm run dev:all` or start `sam2_service`.'
+            : err?.message || 'Failed to reach SAM2 service.';
+      const details = fallbackErr?.message ? ` Fallback also failed: ${fallbackErr.message}` : '';
+      return res.status(502).json({ ok: false, error: `${message}${details}`.trim() });
+    }
   }
 });
 
@@ -739,7 +1318,7 @@ app.post('/api/designs', async (req, res) => {
     };
 
     const compositeDataUrl = await resolvePngInputToDataUrl(validatedData.composite);
-    const imageDataUrls = await Promise.all(validatedData.images.map((img) => resolvePngInputToDataUrl(img)));
+    const imageDataUrls = await Promise.all(validatedData.images.map((img: any) => resolvePngInputToDataUrl(img)));
 
     const compositeFileId = await uploadDataUrlToGridFS(compositeDataUrl, `composite-${Date.now()}.png`);
     const imageFileIds = await Promise.all(

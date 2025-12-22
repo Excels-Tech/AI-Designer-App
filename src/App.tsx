@@ -6,6 +6,8 @@ import { DesignEditor } from './components/DesignEditor';
 import { ProductMockup } from './components/ProductMockup';
 import { VideoCreator } from './components/VideoCreator';
 import { MyDesigns } from './components/MyDesigns';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { Toaster } from './components/ui/sonner';
 
 export type Screen = 
   | 'dashboard' 
@@ -72,8 +74,9 @@ export default function App() {
         }}
       />
       <main className="flex-1 overflow-auto">
-        {renderContent()}
+        <ErrorBoundary>{renderContent()}</ErrorBoundary>
       </main>
+      <Toaster richColors closeButton />
     </div>
   );
 }

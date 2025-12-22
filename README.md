@@ -21,18 +21,19 @@ This is a code bundle for AI Designer App UI. The original project is available 
 
 ## Development
 
-Start the SAM2 service first (see "SAM2 Service (Local)" below), then run the app.
-
 `npm run dev` starts both the Vite client (http://localhost:3000) and the Node/Express API (http://localhost:4000) with a proxy at `/api`.
 
-To run everything including the SAM2 service:
+To run everything (client + server + SAM2 microservice):
 ```bash
 npm run dev:all
 ```
 
 ## SAM2 Service (Local)
 
-The color layer detection uses a local FastAPI service backed by SAM2.
+The editor's color layer detection uses a local FastAPI service (`sam2_service`). It works in two modes:
+
+- **SAM2 mode** (best): enabled only when you provide `SAM2_CONFIG` + `SAM2_CHECKPOINT`.
+- **Fallback mode** (works out of the box): if SAM2 isn't configured, the service uses a lightweight KMeans-based color clustering fallback.
 
 1. `cd sam2_service`
 2. `python -m venv .venv`
@@ -50,10 +51,26 @@ The color layer detection uses a local FastAPI service backed by SAM2.
    python -m uvicorn app:app --host 0.0.0.0 --port 8008
    ```
 
+### SAM2 weights (optional)
+
+This repo does not download SAM2 weights automatically. To enable SAM2 mode:
+
+1. Download the SAM2 config + checkpoint files separately.
+2. Set environment variables to point to your local files:
+   ```bash
+   # example (PowerShell)
+   $env:SAM2_CONFIG="C:\\path\\to\\sam2_config.yaml"
+   $env:SAM2_CHECKPOINT="C:\\path\\to\\sam2_checkpoint.pt"
+   ```
+
+You can store these files anywhere locally (for example `sam2_service/weights/`) as long as the env vars point to the correct paths.
+
 ## Environment
 
 - `GEMINI_API_KEY` - Google Gemini API key used server-side only. The key is never exposed to the client bundle.
 - `SAM2_SERVICE_URL` - Base URL for the SAM2 FastAPI service (default `http://127.0.0.1:8008`).
+- `SAM2_CONFIG` - (optional) Path to SAM2 config file for the Python service.
+- `SAM2_CHECKPOINT` - (optional) Path to SAM2 checkpoint weights for the Python service.
 
 ## Key Features Added
 
