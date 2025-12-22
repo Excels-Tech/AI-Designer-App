@@ -147,6 +147,33 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const controlButtonBase =
     'inline-flex items-center gap-2 px-4 py-3 rounded-2xl border-2 bg-white transition-all text-sm text-slate-800 whitespace-nowrap hover:border-purple-300 hover:shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-200';
 
+  const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
+    const bytes = new Uint8Array(buffer);
+    const chunkSize = 0x8000;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+  };
+
+  const ensurePngDataUrl = async (src: string) => {
+    if (!src) throw new Error('Missing image source.');
+    if (/^data:image\/png;base64,/i.test(src.trim())) return src.trim();
+
+    const res = src.startsWith('/api/') ? await authFetch(src) : await fetch(src);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Failed to load image for saving.');
+    }
+    const blob = await res.blob();
+    if (blob.type && blob.type !== 'image/png') {
+      throw new Error('Only PNG images can be saved to My Designs.');
+    }
+    const base64 = arrayBufferToBase64(await blob.arrayBuffer());
+    return `data:image/png;base64,${base64}`;
+  };
+
   const [prompt, setPrompt] = useState('');
   const [style, setStyle] = useState<StyleKey>('realistic');
   const [resolution, setResolution] = useState<number>(1024);
@@ -244,6 +271,11 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     setSaveMessage(null);
 
     try {
+      setStatusMessage('Preparing PNGs for saving...');
+      const viewsToSave = (result.images || []).map((img) => img.view);
+      const compositeDataUrl = await ensurePngDataUrl(result.composite);
+      const imageDataUrls = await Promise.all(result.images.map((img) => ensurePngDataUrl(img.src)));
+
       const payload = {
         name: finalName.slice(0, 60),
         title: finalName.slice(0, 60),
@@ -251,9 +283,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         userId: uid,
         style,
         resolution,
-        views: selectedViews,
-        composite: result.composite,
-        images: result.images.map((img) => ({ view: img.view, src: img.src })),
+        views: viewsToSave,
+        composite: compositeDataUrl,
+        images: result.images.map((img, idx) => ({ view: img.view, src: imageDataUrls[idx] })),
       };
 
       const response = await authFetch('/api/designs', {

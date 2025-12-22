@@ -195,6 +195,26 @@ function validateDesignPayload(body: any) {
   const images = Array.isArray(body?.images) ? body.images : [];
   const userId = typeof body?.userId === 'string' ? body.userId.trim() : '';
 
+  const normalizePngInput = (
+    input: any
+  ): { mime: 'image/png'; dataUrl?: string; url?: string } | null => {
+    if (typeof input === 'string' && isPngDataUrl(input)) {
+      return { mime: 'image/png', dataUrl: input };
+    }
+    if (input && typeof input === 'object') {
+      if (typeof input.dataUrl === 'string' && isPngDataUrl(input.dataUrl)) {
+        return { mime: 'image/png', dataUrl: input.dataUrl };
+      }
+      if (typeof input.url === 'string' && input.url.startsWith('/api/')) {
+        return { mime: 'image/png', url: input.url };
+      }
+    }
+    if (typeof input === 'string' && input.startsWith('/api/')) {
+      return { mime: 'image/png', url: input };
+    }
+    return null;
+  };
+
   if (!prompt) return { ok: false, error: 'Prompt is required.' };
   if (!name || name.length > 60) return { ok: false, error: 'Name is required (max 60 chars).' };
   if (!userId) return { ok: false, error: 'Missing user id.' };
@@ -204,18 +224,26 @@ function validateDesignPayload(body: any) {
   if (new Set(views).size !== views.length) return { ok: false, error: 'Views must be unique.' };
   if (!views.every((v: string) => allowedViews.has(v as ViewKey))) return { ok: false, error: 'Invalid view value.' };
   if (views.length > 6) return { ok: false, error: 'Maximum 6 views allowed.' };
-  if (!isPngDataUrl(composite) && typeof composite !== 'object') {
-    return { ok: false, error: 'Composite must be a PNG data URL.' };
-  }
+  const normalizedComposite = normalizePngInput(composite);
+  if (!normalizedComposite) return { ok: false, error: 'Composite must be a PNG data URL.' };
   if (images.length !== views.length) return { ok: false, error: 'Images must match number of views.' };
 
-  const normalizedImages = images.map((img: { view: string; mime: 'image/png'; dataUrl: string }) => ({
-    view: img.view,
-    mime: 'image/png' as const,
-    dataUrl: img.dataUrl,
-  }));
+  const normalizedImages = images.map((img: any) => {
+    const view = img?.view;
+    const input = typeof img?.src === 'string' ? img.src : img?.dataUrl ?? img?.url;
+    const normalized = normalizePngInput(input);
+    return { view, ...normalized };
+  });
 
-  if (!normalizedImages.every((img: { view: string; mime: 'image/png'; dataUrl: string }) => typeof img.view === 'string' && isPngDataUrl(img.dataUrl))) {
+  const viewSet = new Set(views);
+  if (
+    !normalizedImages.every(
+      (img) =>
+        typeof img.view === 'string' &&
+        viewSet.has(img.view) &&
+        (typeof img.dataUrl === 'string' || typeof img.url === 'string')
+    )
+  ) {
     return { ok: false, error: 'Each image must include a view and PNG data URL.' };
   }
 
@@ -229,8 +257,8 @@ function validateDesignPayload(body: any) {
       resolution,
       userId,
       views,
-      composite: { mime: 'image/png' as const, dataUrl: composite },
-      images: normalizedImages.map((img: { view: string; mime: 'image/png'; dataUrl: string }) => ({ view: img.view, mime: 'image/png' as const, dataUrl: img.dataUrl })),
+      composite: normalizedComposite,
+      images: normalizedImages.map((img) => ({ view: img.view, mime: 'image/png' as const, dataUrl: img.dataUrl, url: img.url })),
     },
   };
 }
@@ -663,10 +691,61 @@ app.post('/api/designs', async (req, res) => {
     if (!validation.ok) {
       return res.status(400).json({ error: validation.error });
     }
+
     const validatedData = validation.data!;
-    const compositeFileId = await uploadDataUrlToGridFS(validatedData.composite.dataUrl!, `composite-${Date.now()}.png`);
+    const resolveInternalUrl = (url: string) => {
+      if (!url.startsWith('/api/')) return url;
+      const protoHeader = (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0]?.trim();
+      const proto = protoHeader || req.protocol || 'http';
+      const host = req.get('host') || 'localhost';
+      return `${proto}://${host}${url}`;
+    };
+
+    const fetchPngDataUrl = async (url: string) => {
+      const resolved = resolveInternalUrl(url);
+      const response = await fetchWithTimeout(
+        resolved,
+        {
+          headers: {
+            'x-user-id': userId,
+          },
+        },
+        15000
+      );
+      if (!response.ok) {
+        throw new Error('Failed to fetch image for saving.');
+      }
+      const contentType = (response.headers.get('content-type') || '').toLowerCase();
+      if (contentType && !contentType.includes('image/png')) {
+        throw new Error('Only PNG images can be saved.');
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      if (buffer.length > MAX_IMAGE_BYTES) {
+        throw new Error('Image payload too large (max 12MB).');
+      }
+      return `data:image/png;base64,${buffer.toString('base64')}`;
+    };
+
+    const resolvePngInputToDataUrl = async (input: { dataUrl?: string; url?: string }) => {
+      if (typeof input.dataUrl === 'string' && isPngDataUrl(input.dataUrl)) {
+        assertDataUrlSize(input.dataUrl);
+        return input.dataUrl;
+      }
+      if (typeof input.url === 'string' && input.url) {
+        return await fetchPngDataUrl(input.url);
+      }
+      throw new Error('Image must be a PNG data URL.');
+    };
+
+    const compositeDataUrl = await resolvePngInputToDataUrl(validatedData.composite);
+    const imageDataUrls = await Promise.all(validatedData.images.map((img) => resolvePngInputToDataUrl(img)));
+
+    const compositeFileId = await uploadDataUrlToGridFS(compositeDataUrl, `composite-${Date.now()}.png`);
     const imageFileIds = await Promise.all(
-      validatedData.images.map((img: { view: string; mime: 'image/png'; dataUrl: string }, idx: number) => uploadDataUrlToGridFS(img.dataUrl!, `${img.view || idx}-${Date.now()}.png`))
+      imageDataUrls.map((dataUrl, idx) =>
+        uploadDataUrlToGridFS(dataUrl, `${validatedData.images[idx]?.view || idx}-${Date.now()}.png`)
+      )
     );
 
     const doc = await Design.create({
@@ -871,7 +950,10 @@ app.get('/api/video/status/:id', (req, res) => {
 });
 
 app.get('/api/video/download/:id', (req, res) => {
-  const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
+  const userId =
+    ((req.headers['x-user-id'] as string | undefined)?.trim() ||
+      (typeof req.query.uid === 'string' ? req.query.uid.trim() : '')) ??
+    '';
   if (!userId) return res.status(401).json({ error: 'Missing user id' });
 
   const { id } = req.params;
