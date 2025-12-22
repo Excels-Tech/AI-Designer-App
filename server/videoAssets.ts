@@ -30,6 +30,23 @@ function extensionForMime(mime: string) {
   return 'jpg';
 }
 
+function mimeForExtension(ext: string) {
+  if (ext === 'png') return 'image/png';
+  if (ext === 'webp') return 'image/webp';
+  return 'image/jpeg';
+}
+
+function findAssetOnDisk(id: string) {
+  const candidates = ['png', 'jpg', 'webp'];
+  for (const ext of candidates) {
+    const filePath = path.join(ASSET_DIR, `${id}.${ext}`);
+    if (!fsSync.existsSync(filePath)) continue;
+    const stat = fsSync.statSync(filePath);
+    return { path: filePath, size: stat.size, mime: mimeForExtension(ext), createdAt: stat.ctimeMs || Date.now() };
+  }
+  return undefined;
+}
+
 export async function saveUploadedAsset(file: Express.Multer.File, ownerId: string) {
   await ensureAssetDir();
   const id = randomUUID();
@@ -55,9 +72,31 @@ export async function saveUploadedAsset(file: Express.Multer.File, ownerId: stri
 }
 
 export function getAssetInfo(id: string, ownerId?: string) {
-  const info = assetStore.get(id);
-  if (!info) return undefined;
-  if (ownerId && info.ownerId !== ownerId) return undefined;
+  let info = assetStore.get(id);
+  if (!info) {
+    const found = findAssetOnDisk(id);
+    if (!found) return undefined;
+    const now = Date.now();
+    info = {
+      id,
+      ownerId: ownerId || 'unknown',
+      path: found.path,
+      mime: found.mime,
+      size: found.size,
+      createdAt: found.createdAt,
+      lastUsedAt: now,
+    };
+    assetStore.set(id, info);
+  }
+
+  if (ownerId) {
+    if (info.ownerId === 'unknown') {
+      info.ownerId = ownerId;
+    } else if (info.ownerId !== ownerId) {
+      return undefined;
+    }
+  }
+
   if (!fsSync.existsSync(info.path)) {
     assetStore.delete(id);
     return undefined;

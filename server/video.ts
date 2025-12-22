@@ -268,11 +268,13 @@ const resolveImageToFile = async (
   userId?: string,
   baseUrl?: string
 ) => {
-  if (assetId) {
+  const assetIdLooksLikeUrl = typeof assetId === 'string' && (assetId.startsWith('/') || /^https?:\/\//i.test(assetId));
+  if (assetId && !assetIdLooksLikeUrl) {
     const asset = getAssetInfo(assetId, userId);
-    if (!asset) throw new Error('Uploaded asset not found.');
-    touchAsset(assetId);
-    return asset.path;
+    if (asset) {
+      touchAsset(assetId);
+      return asset.path;
+    }
   }
 
   if (/^data:/i.test(imageSrc)) {

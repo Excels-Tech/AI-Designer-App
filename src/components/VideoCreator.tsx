@@ -952,7 +952,7 @@ export function VideoCreator({ designUrl }: VideoCreatorProps) {
                   initialDesignId={selectedDesignId}
                   onClose={() => setIsAssetPickerOpen(false)}
                   onAdd={(items) => {
-                    addSlides(items.map((item) => ({ url: item.url, label: item.label, assetId: item.url })));
+                    addSlides(items.map((item) => ({ url: item.url, label: item.label })));
                     setIsAssetPickerOpen(false);
                   }}
                 />
