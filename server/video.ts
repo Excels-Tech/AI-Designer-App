@@ -73,6 +73,26 @@ const ALLOWED_FPS = new Set([12, 24, 30, 60]);
 
 const isValidHexColor = (value: unknown) => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value.trim());
 
+const getFfmpegBin = () => (ffmpegPath as string | undefined) || 'ffmpeg';
+
+let drawtextAvailablePromise: Promise<boolean> | null = null;
+const isDrawtextAvailable = async () => {
+  if (drawtextAvailablePromise) return drawtextAvailablePromise;
+  drawtextAvailablePromise = new Promise((resolve) => {
+    const proc = spawn(getFfmpegBin(), ['-hide_banner', '-filters'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    proc.stdout.on('data', (data) => {
+      out += data.toString();
+    });
+    proc.on('error', () => resolve(false));
+    proc.on('close', (code) => {
+      if (code !== 0) return resolve(false);
+      resolve(/\bdrawtext\b/i.test(out));
+    });
+  });
+  return drawtextAvailablePromise;
+};
+
 const ffmpegColor = (value: unknown) => {
   if (!value) return 'white';
   if (!isValidHexColor(value)) {
@@ -295,7 +315,8 @@ const buildSlideFilter = (
   slide: SlideInput,
   width: number,
   height: number,
-  fps: number
+  fps: number,
+  enableDrawtext: boolean
 ) => {
   const filters: string[] = [];
   const fontSize = Math.max(18, Math.min(140, Math.round(slide.fontSizePx * (height / 720))));
@@ -346,7 +367,7 @@ const buildSlideFilter = (
     }
   }
 
-  if (slide.overlayText) {
+  if (slide.overlayText && enableDrawtext) {
     const color = ffmpegColor(slide.overlayColorHex);
     filters.push(
       `drawtext=fontfile='${fontFile}':text='${escapeDrawtext(
@@ -367,7 +388,7 @@ const buildSlideFilter = (
 
 const runFfmpeg = (args: string[]) =>
   new Promise<void>((resolve, reject) => {
-    const bin = ffmpegPath || 'ffmpeg';
+    const bin = getFfmpegBin();
     const proc = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     proc.stderr.on('data', (data) => {
@@ -379,6 +400,9 @@ const runFfmpeg = (args: string[]) =>
       else reject(new Error(stderr || 'ffmpeg failed.'));
     });
   });
+
+const isDrawtextMissingError = (message: string) =>
+  /No such filter:\s*'drawtext'|Filter not found/i.test(message);
 
 const validateProject = (project: VideoProjectInput) => {
   if (!project || !Array.isArray(project.slides) || project.slides.length === 0) {
@@ -477,6 +501,7 @@ export const createVideoJob = async (
 
     try {
       const { width, height } = QUALITY_MAP[project.quality];
+      const drawtextAvailable = await isDrawtextAvailable();
       const inputPaths = await Promise.all(
         project.slides.map((slide, index) =>
           resolveImageToFile(slide.imageSrc, slide.assetId, tempDir, index, userId, baseUrl)
@@ -487,41 +512,57 @@ export const createVideoJob = async (
       for (let i = 0; i < project.slides.length; i += 1) {
         const slide = project.slides[i];
         const segmentPath = path.join(tempDir, `segment-${i}.mp4`);
-        const filter = buildSlideFilter(slide, width, height, project.fps);
-        const args = [
-          '-y',
-          '-loop',
-          '1',
-          '-t',
-          slide.durationSec.toFixed(2),
-          '-i',
-          inputPaths[i],
-          '-f',
-          'lavfi',
-          '-t',
-          slide.durationSec.toFixed(2),
-          '-i',
-          'anullsrc=channel_layout=stereo:sample_rate=44100',
-          '-vf',
-          filter,
-          '-r',
-          String(project.fps),
-          '-c:v',
-          'libx264',
-          '-preset',
-          'veryfast',
-          '-crf',
-          '20',
-          '-pix_fmt',
-          'yuv420p',
-          '-c:a',
-          'aac',
-          '-b:a',
-          '128k',
-          '-shortest',
-          segmentPath,
-        ];
-        await runFfmpeg(args);
+
+        const runSegment = async (filter: string) => {
+          const args = [
+            '-y',
+            '-loop',
+            '1',
+            '-t',
+            slide.durationSec.toFixed(2),
+            '-i',
+            inputPaths[i],
+            '-f',
+            'lavfi',
+            '-t',
+            slide.durationSec.toFixed(2),
+            '-i',
+            'anullsrc=channel_layout=stereo:sample_rate=44100',
+            '-vf',
+            filter,
+            '-r',
+            String(project.fps),
+            '-c:v',
+            'libx264',
+            '-preset',
+            'veryfast',
+            '-crf',
+            '20',
+            '-pix_fmt',
+            'yuv420p',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '128k',
+            '-shortest',
+            segmentPath,
+          ];
+          await runFfmpeg(args);
+        };
+
+        const filterWithText = buildSlideFilter(slide, width, height, project.fps, drawtextAvailable);
+        try {
+          await runSegment(filterWithText);
+        } catch (err: any) {
+          const message = String(err?.message || '');
+          if (slide.overlayText && isDrawtextMissingError(message)) {
+            const filterNoText = buildSlideFilter({ ...slide, overlayText: '' }, width, height, project.fps, false);
+            await runSegment(filterNoText);
+          } else {
+            throw err;
+          }
+        }
+
         segmentPaths.push(segmentPath);
         job.progress = Math.round(((i + 1) / (project.slides.length + 1)) * 90);
         job.updatedAt = Date.now();
