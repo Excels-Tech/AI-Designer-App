@@ -299,6 +299,16 @@ const normalizeDurations = (slides: Slide[]) => {
   return slides.map((slide) => ({ ...slide, durationSec: per }));
 };
 
+const isUploadableLocalUrl = (src: string) => /^(data:|blob:)/i.test(src.trim());
+
+async function localUrlToFile(src: string, fileBaseName: string): Promise<File> {
+  const res = await fetch(src);
+  const blob = await res.blob();
+  const type = blob.type || 'image/png';
+  const ext = type === 'image/png' ? 'png' : type === 'image/webp' ? 'webp' : 'jpg';
+  return new File([blob], `${fileBaseName}.${ext}`, { type });
+}
+
 export function VideoCreator({ designUrl }: VideoCreatorProps) {
   const [project, setProject] = useState<VideoProject>({
     id: crypto.randomUUID(),
@@ -633,11 +643,6 @@ export function VideoCreator({ designUrl }: VideoCreatorProps) {
       setError('Add at least one slide to render.');
       return;
     }
-    const invalid = project.slides.find((slide) => !slide.assetId && /^data:/i.test(slide.imageSrc));
-    if (invalid) {
-      setError('Slides must be uploads or design assets (no data URLs).');
-      return;
-    }
     if (renderState.videoUrl) {
       URL.revokeObjectURL(renderState.videoUrl);
     }
@@ -645,16 +650,53 @@ export function VideoCreator({ designUrl }: VideoCreatorProps) {
     setExportedDurationSec(null);
     setRenderState({ status: 'rendering' });
     try {
+      let slidesForRender = project.slides;
+
+      // If any slides are local-only URLs (data/blob), upload them to /api/video/upload so the server renderer can fetch them.
+      const localSlides = slidesForRender.filter((slide) => !slide.assetId && isUploadableLocalUrl(slide.imageSrc));
+      if (localSlides.length) {
+        const files = await Promise.all(
+          localSlides.map((slide, index) => localUrlToFile(slide.imageSrc, `slide-${slide.id}-${index}`))
+        );
+        const formData = new FormData();
+        files.forEach((file) => formData.append('files', file));
+        const uploadRes = await authFetch('/api/video/upload', { method: 'POST', body: formData });
+        const uploadData = await uploadRes.json().catch(() => ({}));
+        if (!uploadRes.ok) {
+          throw new Error(uploadData.error || 'Upload failed.');
+        }
+        const assets = Array.isArray(uploadData.assets) ? uploadData.assets : [];
+        if (assets.length !== localSlides.length) {
+          throw new Error('Upload failed.');
+        }
+
+        const slideIdToAsset = new Map<string, { assetId: string; url: string }>();
+        localSlides.forEach((slide, index) => {
+          const asset = assets[index];
+          if (!asset?.assetId || !asset?.url) return;
+          slideIdToAsset.set(slide.id, { assetId: String(asset.assetId), url: String(asset.url) });
+        });
+
+        const nextSlides = slidesForRender.map((slide) => {
+          const asset = slideIdToAsset.get(slide.id);
+          if (!asset) return slide;
+          return { ...slide, assetId: asset.assetId, imageSrc: withUid(asset.url) };
+        });
+
+        slidesForRender = nextSlides;
+        setProject((prev) => ({ ...prev, slides: nextSlides }));
+      }
+
       const dims =
         exportCanvasDimensions.width > 0 && exportCanvasDimensions.height > 0
           ? exportCanvasDimensions
-          : pickMostCommonDimensions(await getAllImageDimensions(project.slides));
+          : pickMostCommonDimensions(await getAllImageDimensions(slidesForRender));
 
       const payload: VideoProject = {
         ...project,
         width: dims?.width,
         height: dims?.height,
-        slides: project.slides.map((slide) => ({
+        slides: slidesForRender.map((slide) => ({
           id: slide.id,
           imageSrc: slide.imageSrc,
           assetId: slide.assetId,
