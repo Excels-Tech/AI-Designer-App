@@ -1257,8 +1257,8 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
           </div>
 
           {isRightPanelOpen && (
-            <aside className="hidden lg:flex w-[380px] shrink-0 max-h-[calc(100vh-160px)] overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-xl flex-col">
-              <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-200">
+            <aside className="hidden lg:block w-[380px] shrink-0 max-h-[calc(100vh-140px)] overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+              <div className="sticky top-0 bg-white flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-200">
                 <div className="min-w-0">
                   <p className="text-slate-900 font-medium truncate">{rightPanelTitle}</p>
                   <p className="text-xs text-slate-500 mt-1">{rightPanelSubtitle}</p>
@@ -1272,7 +1272,7 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
                   <X className="h-4 w-4" />
                 </button>
               </div>
-              <div className="flex-1 min-h-0 overflow-hidden">{rightPanelBody}</div>
+              <div className="px-0">{rightPanelBody}</div>
             </aside>
           )}
         </div>
