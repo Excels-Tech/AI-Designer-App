@@ -497,6 +497,9 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
       width: `min(100%, ${maxPreviewWidthPx}px)`,
       maxHeight: previewMaxHeight,
     };
+    if (exportCanvasDimensions.width > 0 && exportCanvasDimensions.height > 0) {
+      base.aspectRatio = `${exportCanvasDimensions.width} / ${exportCanvasDimensions.height}`;
+    }
     return base;
   }, [exportCanvasDimensions.height, exportCanvasDimensions.width]);
 

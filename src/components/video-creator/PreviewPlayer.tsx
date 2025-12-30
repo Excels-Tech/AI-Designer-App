@@ -117,20 +117,23 @@ export function PreviewPlayer({
       width: `min(100%, 900px)`,
     } satisfies CSSProperties);
   const maxHeightClassName = 'max-h-[calc(100vh-260px)]';
+  const mediaClassName = `w-full h-full object-contain block`;
 
   if (videoUrl) {
     return (
       <div className={shellClassName}>
         <div className="w-full flex justify-center">
           <div
-            className={`inline-flex rounded-xl overflow-hidden border border-slate-200 bg-white shadow-sm ${maxHeightClassName} max-w-full`}
+            className={`inline-flex items-center justify-center rounded-xl overflow-hidden border border-slate-200 bg-white shadow-sm ${maxHeightClassName} max-w-full`}
             style={previewFrameStyle}
           >
-            <div ref={containerRef} className="relative">
+            <div ref={containerRef} className="relative flex items-center justify-center w-full h-full">
               <video
                 src={videoUrl}
                 controls
-                className={`max-w-full ${maxHeightClassName} object-contain block`}
+                playsInline
+                className={mediaClassName}
+                style={{ maxHeight: '100%', maxWidth: '100%' }}
               />
             </div>
           </div>
@@ -150,7 +153,7 @@ export function PreviewPlayer({
       <div className={shellClassName}>
         <div className="w-full flex justify-center">
           <div
-            className={`inline-flex rounded-xl overflow-hidden border border-dashed border-slate-200 bg-transparent text-sm text-slate-500 items-center justify-center ${maxHeightClassName} max-w-full`}
+            className={`inline-flex items-center justify-center rounded-xl overflow-hidden border border-dashed border-slate-200 bg-transparent text-sm text-slate-500 ${maxHeightClassName} max-w-full`}
             style={{ ...previewFrameStyle, padding: 24 }}
           >
             <span className="whitespace-nowrap">Add slides to preview your video.</span>
@@ -246,15 +249,16 @@ export function PreviewPlayer({
       `}</style>
       <div className="w-full flex justify-center">
         <div
-          className={`inline-flex rounded-xl overflow-hidden border border-slate-200 bg-white shadow-sm ${maxHeightClassName} max-w-full`}
+          className={`inline-flex items-center justify-center rounded-xl overflow-hidden border border-slate-200 bg-white shadow-sm ${maxHeightClassName} max-w-full`}
           style={previewFrameStyle}
         >
-          <div ref={containerRef} className="relative">
+          <div ref={containerRef} className="relative flex items-center justify-center w-full h-full">
             <div key={`${currentSlide.id}:${motionNonce}`} style={motionStyle}>
               <img
                 src={currentSlide.imageSrc}
                 alt="Preview"
-                className={`max-w-full ${maxHeightClassName} object-contain block`}
+                className={mediaClassName}
+                style={{ maxHeight: '100%', maxWidth: '100%' }}
               />
             </div>
 
