@@ -116,8 +116,8 @@ export function PreviewPlayer({
     ({
       width: `min(100%, 900px)`,
     } satisfies CSSProperties);
-  const maxHeightClassName = 'max-h-[calc(100vh-260px)]';
-  const mediaClassName = `w-full h-full object-contain block`;
+  const maxHeightClassName = 'max-h-[60vh]';
+  const mediaClassName = `max-w-full ${maxHeightClassName} object-contain block`;
 
   if (videoUrl) {
     return (
@@ -127,7 +127,7 @@ export function PreviewPlayer({
             className={`inline-flex items-center justify-center rounded-xl overflow-hidden border border-slate-200 bg-white shadow-sm ${maxHeightClassName} max-w-full`}
             style={previewFrameStyle}
           >
-            <div ref={containerRef} className="relative flex items-center justify-center w-full h-full">
+            <div ref={containerRef} className="relative flex items-center justify-center">
               <video
                 src={videoUrl}
                 controls
@@ -252,7 +252,7 @@ export function PreviewPlayer({
           className={`inline-flex items-center justify-center rounded-xl overflow-hidden border border-slate-200 bg-white shadow-sm ${maxHeightClassName} max-w-full`}
           style={previewFrameStyle}
         >
-          <div ref={containerRef} className="relative flex items-center justify-center w-full h-full">
+          <div ref={containerRef} className="relative flex items-center justify-center">
             <div key={`${currentSlide.id}:${motionNonce}`} style={motionStyle}>
               <img
                 src={currentSlide.imageSrc}

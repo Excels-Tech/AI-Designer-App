@@ -492,17 +492,13 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
     currentSlide?.assetId && selectedDesignId && currentSlide.assetId === selectedDesignId ? designScale : 1;
   const hasPreviewContent = project.slides.length > 0;
   const maxPreviewWidthPx = 900;
-  const previewMaxHeight = 'calc(100vh - 260px)';
   const previewFrameStyle = useMemo(() => {
     const base: CSSProperties = {
-      width: `min(100%, ${maxPreviewWidthPx}px)`,
-      maxHeight: previewMaxHeight,
+      maxWidth: maxPreviewWidthPx,
+      maxHeight: '60vh',
     };
-    if (exportCanvasDimensions.width > 0 && exportCanvasDimensions.height > 0) {
-      base.aspectRatio = `${exportCanvasDimensions.width} / ${exportCanvasDimensions.height}`;
-    }
     return base;
-  }, [exportCanvasDimensions.height, exportCanvasDimensions.width]);
+  }, []);
 
   const handleSlideSelect = (id: string) => {
     setSelectedSlideId(id);
@@ -1110,8 +1106,7 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
           </MenuDropdown>
         </div>
 
-        <div className="flex gap-6 items-start w-full">
-          <div className="flex-1 min-w-0 space-y-6">
+        <div className="space-y-6">
         {renderState.status === 'rendering' && (
           <div className="flex items-center gap-4 rounded-2xl border border-slate-200 bg-white px-4 py-3">
             <div className="text-sm text-slate-700">
@@ -1254,46 +1249,12 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
           </div>
         </div>
 
-          </div>
-
-          {isRightPanelOpen && (
-            <aside className="hidden lg:block w-[380px] shrink-0 max-h-[calc(100vh-140px)] overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-              <div className="sticky top-0 bg-white flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-200">
-                <div className="min-w-0">
-                  <p className="text-slate-900 font-medium truncate">{rightPanelTitle}</p>
-                  <p className="text-xs text-slate-500 mt-1">{rightPanelSubtitle}</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={closePanel}
-                  className="rounded-xl border border-slate-200 p-2 text-slate-700 hover:bg-slate-100"
-                  aria-label="Close panel"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-              <div className="px-0">{rightPanelBody}</div>
-            </aside>
-          )}
         </div>
       </div>
 
-      {isRightPanelOpen && (
-        <div className="lg:hidden fixed inset-0 z-50 bg-slate-900/40 p-4">
-          <div className="absolute inset-0" onClick={closePanel} aria-hidden="true" />
-          <div className="relative ml-auto h-full w-full max-w-[420px]">
-            <RightSidePanel
-              open
-              title={rightPanelTitle}
-              subtitle={rightPanelSubtitle}
-              onClose={closePanel}
-              className="h-full w-full"
-            >
-              {rightPanelBody}
-            </RightSidePanel>
-          </div>
-        </div>
-      )}
+      <RightSidePanel open={isRightPanelOpen} title={rightPanelTitle} subtitle={rightPanelSubtitle} onClose={closePanel}>
+        {rightPanelBody}
+      </RightSidePanel>
     </div>
   );
 }
