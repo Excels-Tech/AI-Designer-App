@@ -150,6 +150,9 @@ const framingPromptModifier = (mode: FramingMode) => {
   return 'Keep the full product visible. Do not zoom in. Maintain the same framing, same camera distance, and same size as original. Keep subject centered and fully in frame.';
 };
 
+const WHITE_BACKGROUND_PROMPT =
+  'Background: pure white (#FFFFFF), seamless, flat white backdrop. No gray studio box, no gradients, no shadows, no reflections, no vignette.';
+
 const readFileAsDataUrl = async (file: File) => {
   return await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -222,6 +225,97 @@ function trimCanvasToContent(
   if (!tctx) return canvas;
   tctx.drawImage(canvas, left, top, trimW, trimH, 0, 0, trimW, trimH);
   return trimmed;
+}
+
+function normalizeCanvasBackgroundToWhite(
+  canvas: HTMLCanvasElement,
+  {
+    sampleBorderPx = 12,
+    bgDistanceThreshold = 36,
+    neutralChannelThreshold = 18,
+    minBrightness = 140,
+  }: {
+    sampleBorderPx?: number;
+    bgDistanceThreshold?: number;
+    neutralChannelThreshold?: number;
+    minBrightness?: number;
+  } = {}
+): HTMLCanvasElement {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return canvas;
+
+  const { width, height } = canvas;
+  if (!width || !height) return canvas;
+
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+
+  const border = Math.max(1, Math.min(sampleBorderPx, Math.floor(Math.min(width, height) / 6)));
+
+  let sumR = 0;
+  let sumG = 0;
+  let sumB = 0;
+  let count = 0;
+
+  const sample = (x: number, y: number) => {
+    const idx = (y * width + x) * 4;
+    const a = data[idx + 3];
+    if (a === 0) return;
+    sumR += data[idx];
+    sumG += data[idx + 1];
+    sumB += data[idx + 2];
+    count += 1;
+  };
+
+  const step = Math.max(1, Math.floor(border / 2));
+  for (let x = 0; x < width; x += step) {
+    for (let y = 0; y < border; y += step) sample(x, y);
+    for (let y = height - border; y < height; y += step) sample(x, y);
+  }
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < border; x += step) sample(x, y);
+    for (let x = width - border; x < width; x += step) sample(x, y);
+  }
+
+  const bgR = count ? sumR / count : 255;
+  const bgG = count ? sumG / count : 255;
+  const bgB = count ? sumB / count : 255;
+  const bgMax = Math.max(bgR, bgG, bgB);
+  const bgMin = Math.min(bgR, bgG, bgB);
+  const bgIsNeutral = bgMax - bgMin <= neutralChannelThreshold;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const a = data[i + 3];
+    if (a === 0) {
+      data[i] = 255;
+      data[i + 1] = 255;
+      data[i + 2] = 255;
+      data[i + 3] = 255;
+      continue;
+    }
+
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const isNeutral = max - min <= neutralChannelThreshold;
+    const brightnessOk = (r + g + b) / 3 >= minBrightness;
+
+    if (!bgIsNeutral || !isNeutral || !brightnessOk) continue;
+
+    const dist = Math.sqrt((r - bgR) ** 2 + (g - bgG) ** 2 + (b - bgB) ** 2);
+    if (dist <= bgDistanceThreshold) {
+      data[i] = 255;
+      data[i + 1] = 255;
+      data[i + 2] = 255;
+      data[i + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+  return canvas;
 }
 
 async function composeCompositeFromTiles(tiles: GeneratedImage[], resolution: number): Promise<string> {
@@ -465,6 +559,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, 0, 0, width, height);
 
+      // Normalize light neutral backgrounds to pure white.
+      normalizeCanvasBackgroundToWhite(canvas);
+
       // Try trimming away empty background while being careful about white garments.
       let trimmedCanvas = trimCanvasToContent(canvas, { treatNearWhiteAsEmpty: true });
       const trimmedArea = trimmedCanvas.width * trimmedCanvas.height;
@@ -486,6 +583,49 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       outCtx.drawImage(trimmedCanvas, 0, 0);
 
       return out.toDataURL('image/png');
+    } finally {
+      if (objectUrlToRevoke) URL.revokeObjectURL(objectUrlToRevoke);
+    }
+  };
+
+  const ensureWhiteBackgroundPngDataUrl = async (src: string) => {
+    if (!src) throw new Error('Missing image source.');
+
+    const trimmedSrc = src.trim();
+    const isDataUrl = /^data:image\//i.test(trimmedSrc);
+
+    let objectUrlToRevoke: string | null = null;
+    try {
+      let img: HTMLImageElement;
+      if (isDataUrl) {
+        img = await loadImageElement(trimmedSrc);
+      } else {
+        const res = trimmedSrc.startsWith('/api/') ? await authFetch(trimmedSrc) : await fetch(trimmedSrc);
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Failed to load image for processing.');
+        }
+        const blob = await res.blob();
+        objectUrlToRevoke = URL.createObjectURL(blob);
+        img = await loadImageElement(objectUrlToRevoke);
+      }
+
+      const width = img.naturalWidth || img.width;
+      const height = img.naturalHeight || img.height;
+      if (!width || !height) throw new Error('Invalid image dimensions.');
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Canvas not supported.');
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, width, height);
+      normalizeCanvasBackgroundToWhite(canvas);
+
+      return canvas.toDataURL('image/png');
     } finally {
       if (objectUrlToRevoke) URL.revokeObjectURL(objectUrlToRevoke);
     }
@@ -668,7 +808,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 
     try {
       if (hasUploadedImage) {
-        const promptForModel = appendPromptModifier(trimmedPrompt, framingPromptModifier(framingMode));
+        const promptForModel = appendPromptModifier(
+          appendPromptModifier(trimmedPrompt, framingPromptModifier(framingMode)),
+          WHITE_BACKGROUND_PROMPT
+        );
         const originalImageDataUrl =
           uploadedImageDataUrl || (uploadedImageFile ? await readFileAsDataUrl(uploadedImageFile) : '');
         if (!originalImageDataUrl) throw new Error('Missing uploaded image.');
@@ -698,7 +841,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 
         const payload: SingleEditResponse = await response.json();
         if (!payload?.imageDataUrl) throw new Error('Edit failed.');
-        setEditedImageDataUrl(payload.imageDataUrl);
+        setEditedImageDataUrl(await ensureWhiteBackgroundPngDataUrl(payload.imageDataUrl));
         setStatusMessage('Image edited successfully.');
       } else {
         // New generator behavior:
@@ -728,6 +871,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             `Style: ${styleLabel}.`,
             `View order: ${viewsForStyles.map((v) => viewLabel(v)).join(' -> ')}.`,
             'No collages; one view per image; keep the same product/design.',
+            WHITE_BACKGROUND_PROMPT,
           ].join('\n');
 
           const response = await authFetch('/api/generate-views', {
@@ -747,6 +891,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           }
 
           const payload: GenerateResponse = await response.json();
+          const normalizedComposite = await ensureWhiteBackgroundPngDataUrl(payload.composite);
           const trimmedImages = await Promise.all(
             (payload.images ?? []).map(async (img) => ({
               ...img,
@@ -758,15 +903,15 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             styleLabel,
             styleKey: style,
             views: viewsForStyles,
-            composite: payload.composite,
+            composite: normalizedComposite,
             images: trimmedImages,
           };
           nextVariants.push(newVariant);
           setVariants((prev) => [...prev, newVariant]);
 
-          if (!emittedPrimary && payload.composite) {
+          if (!emittedPrimary && normalizedComposite) {
             emittedPrimary = true;
-            onGenerate?.(payload.composite);
+            onGenerate?.(normalizedComposite);
           }
         }
 
@@ -788,6 +933,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             `Style: ${modelStyleLabel}.`,
             `View order: ${modelViews.map((v) => viewLabel(v)).join(' -> ')}.`,
             'No collages; one view per image; keep the same product/design.',
+            WHITE_BACKGROUND_PROMPT,
           ].join('\n');
 
           const response = await authFetch('/api/generate-views', {
@@ -807,6 +953,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           }
 
           const payload: GenerateResponse = await response.json();
+          const normalizedComposite = await ensureWhiteBackgroundPngDataUrl(payload.composite);
           const trimmedImages = await Promise.all(
             (payload.images ?? []).map(async (img) => ({
               ...img,
@@ -820,15 +967,15 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             modelLabel,
             modelKey,
             views: modelViews,
-            composite: payload.composite,
+            composite: normalizedComposite,
             images: trimmedImages,
           };
           nextVariants.push(newVariant);
           setVariants((prev) => [...prev, newVariant]);
 
-          if (!emittedPrimary && payload.composite) {
+          if (!emittedPrimary && normalizedComposite) {
             emittedPrimary = true;
-            onGenerate?.(payload.composite);
+            onGenerate?.(normalizedComposite);
           }
         }
 
@@ -974,7 +1121,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       setStatusMessage('Preparing PNGs for saving...');
       const savedIds: string[] = [];
 
-      for (const variant of variantsToSave) {
+        for (const variant of variantsToSave) {
         const styleLabel = variant.styleLabel;
         const modelLabel = variant.modelLabel ?? '';
         const suffix =
@@ -982,8 +1129,8 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         const nameWithSuffix = `${finalName}${suffix}`.slice(0, 60);
 
         const viewsToSave = (variant.images || []).map((img) => img.view);
-        const compositeDataUrl = await ensurePngDataUrl(variant.composite);
-        const imageDataUrls = await Promise.all(variant.images.map((img) => ensurePngDataUrl(img.src)));
+        const compositeDataUrl = await ensureWhiteBackgroundPngDataUrl(variant.composite);
+        const imageDataUrls = await Promise.all(variant.images.map((img) => ensureTrimmedPngDataUrl(img.src)));
 
         const payload = {
           name: nameWithSuffix,
@@ -1492,8 +1639,8 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	              <div className="mt-4 grid grid-cols-2 gap-4 w-full">
 	                {hasEditedViews || hasSingleEditResult ? (
 	                  editedPrimaryImage ? (
-	                    <div className="col-span-2 w-full aspect-[4/3] rounded-xl overflow-hidden bg-slate-50 border border-slate-200 flex items-center justify-center">
-	                      <img src={editedPrimaryImage} alt="Preview" className="w-full h-full object-contain" />
+	                    <div className="col-span-2 w-full aspect-[4/3] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center">
+	                      <img src={editedPrimaryImage} alt="Preview" className="w-full h-full object-contain bg-white" />
 	                    </div>
 	                  ) : null
 	                ) : variants.length > 1 ? (
@@ -1514,9 +1661,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	                          {variant.images.map((image) => (
 	                            <div
 	                              key={`${variant.id}-${image.view}`}
-	                              className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-slate-50 border border-slate-200 flex items-center justify-center"
+	                              className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center"
 	                            >
-	                              <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain" />
+	                              <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain bg-white" />
 	                            </div>
 	                          ))}
 	                        </div>
@@ -1527,9 +1674,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	                  ((variants[0]?.images ?? result?.images) ?? []).map((image) => (
 	                    <div
 	                      key={image.view}
-	                      className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-slate-50 border border-slate-200 flex items-center justify-center"
+	                      className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center"
 	                    >
-	                      <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain" />
+	                      <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain bg-white" />
 	                    </div>
 	                  ))
 	                )}
@@ -1543,14 +1690,14 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                   {editedViews.map((item) => (
                     <div
                       key={`${item.view}-${item.style ?? ''}`}
-                      className="w-full max-w-[420px] rounded-2xl border border-slate-200 overflow-hidden bg-slate-50 shadow-sm"
+                      className="w-full max-w-[420px] rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm"
                     >
                       <div className="bg-white p-2">
                         {item.imageDataUrl ? (
                           <img
                             src={item.imageDataUrl}
                             alt={viewLabel(item.view)}
-                            className="w-full h-auto object-contain rounded-xl shadow-md"
+                            className="w-full h-auto object-contain bg-white rounded-xl shadow-md"
                           />
                         ) : (
                           <div className="p-4 text-center">
@@ -1593,7 +1740,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             )}
 
             {(variants.length > 0 || result) && (
-            <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4 flex flex-col md:flex-row gap-3 md:items-end md:justify-between">
+            <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-4 flex flex-col md:flex-row gap-3 md:items-end md:justify-between">
               <div className="flex-1">
                 <label className="block text-sm text-slate-700 mb-2">Design name</label>
                 <input
