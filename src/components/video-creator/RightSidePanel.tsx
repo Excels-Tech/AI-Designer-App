@@ -7,24 +7,16 @@ type RightSidePanelProps = {
   subtitle?: string;
   onClose: () => void;
   headerLeft?: ReactNode;
+  className?: string;
   children: ReactNode;
 };
 
-export function RightSidePanel({ open, title, subtitle, onClose, headerLeft, children }: RightSidePanelProps) {
+export function RightSidePanel({ open, title, subtitle, onClose, headerLeft, className, children }: RightSidePanelProps) {
   if (!open) return null;
 
   return (
     <aside
-      // Use inline positioning so the panel never falls back to in-flow layout.
-      style={{
-        position: 'fixed',
-        right: '24px',
-        top: '112px',
-        bottom: '24px',
-        width: 'min(420px, calc(100vw - 2rem))',
-        zIndex: 1000,
-      }}
-      className="bg-white border border-slate-200 rounded-3xl shadow-2xl shadow-slate-900/10 flex flex-col"
+      className={`bg-white border border-slate-200 rounded-3xl shadow-2xl shadow-slate-900/10 flex flex-col ${className ?? ''}`}
       aria-label={title}
     >
       <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-200">

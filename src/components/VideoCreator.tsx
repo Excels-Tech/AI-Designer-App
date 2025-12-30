@@ -1278,11 +1278,22 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
         </div>
       </div>
 
-      <div className="lg:hidden">
-        <RightSidePanel open={isRightPanelOpen} title={rightPanelTitle} subtitle={rightPanelSubtitle} onClose={closePanel}>
-          {rightPanelBody}
-        </RightSidePanel>
-      </div>
+      {isRightPanelOpen && (
+        <div className="lg:hidden fixed inset-0 z-50 bg-slate-900/40 p-4">
+          <div className="absolute inset-0" onClick={closePanel} aria-hidden="true" />
+          <div className="relative ml-auto h-full w-full max-w-[420px]">
+            <RightSidePanel
+              open
+              title={rightPanelTitle}
+              subtitle={rightPanelSubtitle}
+              onClose={closePanel}
+              className="h-full w-full"
+            >
+              {rightPanelBody}
+            </RightSidePanel>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
