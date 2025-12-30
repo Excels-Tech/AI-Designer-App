@@ -168,6 +168,62 @@ async function loadImageElement(src: string): Promise<HTMLImageElement> {
   });
 }
 
+function trimCanvasToContent(
+  canvas: HTMLCanvasElement,
+  {
+    treatNearWhiteAsEmpty = true,
+    nearWhiteThreshold = 245,
+  }: { treatNearWhiteAsEmpty?: boolean; nearWhiteThreshold?: number } = {}
+): HTMLCanvasElement {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return canvas;
+
+  const { width, height } = canvas;
+  if (!width || !height) return canvas;
+
+  const data = ctx.getImageData(0, 0, width, height).data;
+
+  let top = height;
+  let bottom = -1;
+  let left = width;
+  let right = -1;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = (y * width + x) * 4;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      const a = data[idx + 3];
+
+      const isNearWhite = r > nearWhiteThreshold && g > nearWhiteThreshold && b > nearWhiteThreshold;
+      const isEmpty = a === 0 || (treatNearWhiteAsEmpty && isNearWhite);
+      if (isEmpty) continue;
+
+      if (x < left) left = x;
+      if (x > right) right = x;
+      if (y < top) top = y;
+      if (y > bottom) bottom = y;
+    }
+  }
+
+  if (right < left || bottom < top) return canvas;
+
+  const trimW = right - left + 1;
+  const trimH = bottom - top + 1;
+  if (trimW <= 0 || trimH <= 0) return canvas;
+  if (trimW === width && trimH === height) return canvas;
+
+  const trimmed = document.createElement('canvas');
+  trimmed.width = trimW;
+  trimmed.height = trimH;
+
+  const tctx = trimmed.getContext('2d');
+  if (!tctx) return canvas;
+  tctx.drawImage(canvas, left, top, trimW, trimH, 0, 0, trimW, trimH);
+  return trimmed;
+}
+
 async function composeCompositeFromTiles(tiles: GeneratedImage[], resolution: number): Promise<string> {
   const columns = 2;
   const rows = 2;
@@ -370,6 +426,69 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     }
     const base64 = arrayBufferToBase64(await blob.arrayBuffer());
     return `data:image/png;base64,${base64}`;
+  };
+
+  const ensureTrimmedPngDataUrl = async (src: string) => {
+    if (!src) throw new Error('Missing image source.');
+
+    const trimmedSrc = src.trim();
+    const isDataUrl = /^data:image\//i.test(trimmedSrc);
+
+    let objectUrlToRevoke: string | null = null;
+    try {
+      let img: HTMLImageElement;
+      if (isDataUrl) {
+        img = await loadImageElement(trimmedSrc);
+      } else {
+        const res = trimmedSrc.startsWith('/api/') ? await authFetch(trimmedSrc) : await fetch(trimmedSrc);
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Failed to load image for cropping.');
+        }
+        const blob = await res.blob();
+        objectUrlToRevoke = URL.createObjectURL(blob);
+        img = await loadImageElement(objectUrlToRevoke);
+      }
+
+      const width = img.naturalWidth || img.width;
+      const height = img.naturalHeight || img.height;
+      if (!width || !height) throw new Error('Invalid image dimensions.');
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Canvas not supported.');
+
+      // Force a white background so previews/downloads never show gray/transparent backgrounds.
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, width, height);
+
+      // Try trimming away empty background while being careful about white garments.
+      let trimmedCanvas = trimCanvasToContent(canvas, { treatNearWhiteAsEmpty: true });
+      const trimmedArea = trimmedCanvas.width * trimmedCanvas.height;
+      const fullArea = canvas.width * canvas.height;
+
+      // If trimming removed "too much" (common with white products), fall back to alpha-only trimming.
+      if (trimmedArea > 0 && fullArea > 0 && trimmedArea / fullArea < 0.15) {
+        trimmedCanvas = trimCanvasToContent(canvas, { treatNearWhiteAsEmpty: false });
+      }
+
+      // Ensure final export is solid white background PNG.
+      const out = document.createElement('canvas');
+      out.width = trimmedCanvas.width;
+      out.height = trimmedCanvas.height;
+      const outCtx = out.getContext('2d');
+      if (!outCtx) throw new Error('Canvas not supported.');
+      outCtx.fillStyle = '#ffffff';
+      outCtx.fillRect(0, 0, out.width, out.height);
+      outCtx.drawImage(trimmedCanvas, 0, 0);
+
+      return out.toDataURL('image/png');
+    } finally {
+      if (objectUrlToRevoke) URL.revokeObjectURL(objectUrlToRevoke);
+    }
   };
 
   const [prompt, setPrompt] = useState('');
@@ -628,13 +747,19 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           }
 
           const payload: GenerateResponse = await response.json();
+          const trimmedImages = await Promise.all(
+            (payload.images ?? []).map(async (img) => ({
+              ...img,
+              src: await ensureTrimmedPngDataUrl(img.src),
+            }))
+          );
           const newVariant: GeneratedVariant = {
             id: crypto.randomUUID(),
             styleLabel,
             styleKey: style,
             views: viewsForStyles,
             composite: payload.composite,
-            images: payload.images,
+            images: trimmedImages,
           };
           nextVariants.push(newVariant);
           setVariants((prev) => [...prev, newVariant]);
@@ -682,6 +807,12 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           }
 
           const payload: GenerateResponse = await response.json();
+          const trimmedImages = await Promise.all(
+            (payload.images ?? []).map(async (img) => ({
+              ...img,
+              src: await ensureTrimmedPngDataUrl(img.src),
+            }))
+          );
           const newVariant: GeneratedVariant = {
             id: crypto.randomUUID(),
             styleLabel: modelStyleLabel,
@@ -690,7 +821,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             modelKey,
             views: modelViews,
             composite: payload.composite,
-            images: payload.images,
+            images: trimmedImages,
           };
           nextVariants.push(newVariant);
           setVariants((prev) => [...prev, newVariant]);
@@ -1530,10 +1661,14 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                           return (
                             <div
                               key={`${variant.id}-${image.view}`}
-                              className="rounded-2xl border border-slate-200 overflow-hidden bg-slate-50 shadow-sm"
+                              className="rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm"
                             >
                               <div className="aspect-square bg-white">
-                                <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain" />
+                                <img
+                                  src={image.src}
+                                  alt={viewLabel(image.view)}
+                                  className="w-full h-full object-contain bg-white"
+                                />
                               </div>
                               <div className="p-3 flex items-center justify-between">
                                 <div>
@@ -1564,10 +1699,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                   {result.images.map((image) => (
                     <div
                       key={image.view}
-                      className="rounded-2xl border border-slate-200 overflow-hidden bg-slate-50 shadow-sm"
+                      className="rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm"
                     >
                       <div className="aspect-square bg-white">
-                        <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain" />
+                        <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain bg-white" />
                       </div>
                       <div className="p-3 flex items-center justify-between">
                         <div>
