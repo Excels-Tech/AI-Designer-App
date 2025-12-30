@@ -318,6 +318,104 @@ function normalizeCanvasBackgroundToWhite(
   return canvas;
 }
 
+function getContentBounds(
+  canvas: HTMLCanvasElement,
+  {
+    treatNearWhiteAsEmpty = true,
+    nearWhiteThreshold = 245,
+  }: { treatNearWhiteAsEmpty?: boolean; nearWhiteThreshold?: number } = {}
+): { left: number; top: number; right: number; bottom: number } | null {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  const { width, height } = canvas;
+  if (!width || !height) return null;
+
+  const data = ctx.getImageData(0, 0, width, height).data;
+
+  let top = height;
+  let bottom = -1;
+  let left = width;
+  let right = -1;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = (y * width + x) * 4;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      const a = data[idx + 3];
+
+      const isNearWhite = r > nearWhiteThreshold && g > nearWhiteThreshold && b > nearWhiteThreshold;
+      const isEmpty = a === 0 || (treatNearWhiteAsEmpty && isNearWhite);
+      if (isEmpty) continue;
+
+      if (x < left) left = x;
+      if (x > right) right = x;
+      if (y < top) top = y;
+      if (y > bottom) bottom = y;
+    }
+  }
+
+  if (right < left || bottom < top) return null;
+  return { left, top, right, bottom };
+}
+
+function cropCanvasToContent(
+  canvas: HTMLCanvasElement,
+  {
+    targetFillRatio = 0.85,
+    paddingPercent = 0.1,
+  }: { targetFillRatio?: number; paddingPercent?: number } = {}
+): HTMLCanvasElement {
+  const bounds =
+    getContentBounds(canvas, { treatNearWhiteAsEmpty: true }) ??
+    getContentBounds(canvas, { treatNearWhiteAsEmpty: false });
+  if (!bounds) return canvas;
+
+  const { width, height } = canvas;
+  const contentW = bounds.right - bounds.left + 1;
+  const contentH = bounds.bottom - bounds.top + 1;
+  if (contentW <= 0 || contentH <= 0) return canvas;
+
+  const padPx = Math.max(contentW, contentH) * paddingPercent;
+  const desiredW = Math.max(contentW / targetFillRatio, contentW + padPx * 2);
+  const desiredH = Math.max(contentH / targetFillRatio, contentH + padPx * 2);
+
+  const centerX = (bounds.left + bounds.right) / 2;
+  const centerY = (bounds.top + bounds.bottom) / 2;
+
+  let x = Math.floor(centerX - desiredW / 2);
+  let y = Math.floor(centerY - desiredH / 2);
+  let w = Math.ceil(desiredW);
+  let h = Math.ceil(desiredH);
+
+  if (w > width) {
+    w = width;
+    x = 0;
+  } else {
+    x = Math.max(0, Math.min(width - w, x));
+  }
+
+  if (h > height) {
+    h = height;
+    y = 0;
+  } else {
+    y = Math.max(0, Math.min(height - h, y));
+  }
+
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, w);
+  out.height = Math.max(1, h);
+  const outCtx = out.getContext('2d');
+  if (!outCtx) return canvas;
+
+  outCtx.fillStyle = '#ffffff';
+  outCtx.fillRect(0, 0, out.width, out.height);
+  outCtx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
+  return out;
+}
+
 async function composeCompositeFromTiles(tiles: GeneratedImage[], resolution: number): Promise<string> {
   const columns = 2;
   const rows = 2;
@@ -562,25 +660,26 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       // Normalize light neutral backgrounds to pure white.
       normalizeCanvasBackgroundToWhite(canvas);
 
-      // Try trimming away empty background while being careful about white garments.
-      let trimmedCanvas = trimCanvasToContent(canvas, { treatNearWhiteAsEmpty: true });
-      const trimmedArea = trimmedCanvas.width * trimmedCanvas.height;
-      const fullArea = canvas.width * canvas.height;
+      // Crop tightly so the object fills the frame consistently across views.
+      // (Helps tiny back views by removing excess background.)
+      let croppedCanvas = cropCanvasToContent(canvas, { targetFillRatio: 0.85, paddingPercent: 0.1 });
 
-      // If trimming removed "too much" (common with white products), fall back to alpha-only trimming.
-      if (trimmedArea > 0 && fullArea > 0 && trimmedArea / fullArea < 0.15) {
-        trimmedCanvas = trimCanvasToContent(canvas, { treatNearWhiteAsEmpty: false });
+      // If cropping got too aggressive (common with white garments), fall back to a safer trim pass.
+      const croppedArea = croppedCanvas.width * croppedCanvas.height;
+      const fullArea = canvas.width * canvas.height;
+      if (croppedArea > 0 && fullArea > 0 && croppedArea / fullArea < 0.15) {
+        croppedCanvas = trimCanvasToContent(canvas, { treatNearWhiteAsEmpty: false });
       }
 
       // Ensure final export is solid white background PNG.
       const out = document.createElement('canvas');
-      out.width = trimmedCanvas.width;
-      out.height = trimmedCanvas.height;
+      out.width = croppedCanvas.width;
+      out.height = croppedCanvas.height;
       const outCtx = out.getContext('2d');
       if (!outCtx) throw new Error('Canvas not supported.');
       outCtx.fillStyle = '#ffffff';
       outCtx.fillRect(0, 0, out.width, out.height);
-      outCtx.drawImage(trimmedCanvas, 0, 0);
+      outCtx.drawImage(croppedCanvas, 0, 0);
 
       return out.toDataURL('image/png');
     } finally {
@@ -1639,8 +1738,12 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	              <div className="mt-4 grid grid-cols-2 gap-4 w-full">
 	                {hasEditedViews || hasSingleEditResult ? (
 	                  editedPrimaryImage ? (
-	                    <div className="col-span-2 w-full aspect-[4/3] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center">
-	                      <img src={editedPrimaryImage} alt="Preview" className="w-full h-full object-contain bg-white" />
+	                    <div className="col-span-2 w-full h-[320px] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center">
+	                      <img
+	                        src={editedPrimaryImage}
+	                        alt="Preview"
+	                        className="w-full h-full object-contain bg-white scale-[1.15]"
+	                      />
 	                    </div>
 	                  ) : null
 	                ) : variants.length > 1 ? (
@@ -1661,9 +1764,13 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	                          {variant.images.map((image) => (
 	                            <div
 	                              key={`${variant.id}-${image.view}`}
-	                              className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center"
+	                              className="w-full h-[260px] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center"
 	                            >
-	                              <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain bg-white" />
+	                              <img
+	                                src={image.src}
+	                                alt={viewLabel(image.view)}
+	                                className="w-full h-full object-contain bg-white scale-[1.15]"
+	                              />
 	                            </div>
 	                          ))}
 	                        </div>
@@ -1674,9 +1781,13 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	                  ((variants[0]?.images ?? result?.images) ?? []).map((image) => (
 	                    <div
 	                      key={image.view}
-	                      className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center"
+	                      className="w-full h-[260px] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center"
 	                    >
-	                      <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain bg-white" />
+	                      <img
+	                        src={image.src}
+	                        alt={viewLabel(image.view)}
+	                        className="w-full h-full object-contain bg-white scale-[1.15]"
+	                      />
 	                    </div>
 	                  ))
 	                )}
@@ -1697,7 +1808,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                           <img
                             src={item.imageDataUrl}
                             alt={viewLabel(item.view)}
-                            className="w-full h-auto object-contain bg-white rounded-xl shadow-md"
+                            className="w-full h-auto object-contain bg-white rounded-xl shadow-md scale-[1.05]"
                           />
                         ) : (
                           <div className="p-4 text-center">
@@ -1810,11 +1921,11 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                               key={`${variant.id}-${image.view}`}
                               className="rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm"
                             >
-                              <div className="aspect-square bg-white">
+                              <div className="w-full h-[260px] flex items-center justify-center bg-white overflow-hidden">
                                 <img
                                   src={image.src}
                                   alt={viewLabel(image.view)}
-                                  className="w-full h-full object-contain bg-white"
+                                  className="w-full h-full object-contain bg-white scale-[1.15]"
                                 />
                               </div>
                               <div className="p-3 flex items-center justify-between">
@@ -1848,8 +1959,12 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                       key={image.view}
                       className="rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm"
                     >
-                      <div className="aspect-square bg-white">
-                        <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain bg-white" />
+                      <div className="w-full h-[260px] flex items-center justify-center bg-white overflow-hidden">
+                        <img
+                          src={image.src}
+                          alt={viewLabel(image.view)}
+                          className="w-full h-full object-contain bg-white scale-[1.15]"
+                        />
                       </div>
                       <div className="p-3 flex items-center justify-between">
                         <div>
