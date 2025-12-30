@@ -23,6 +23,7 @@ import { RightDrawerMyDesigns } from './video-creator/RightDrawerMyDesigns';
 import type { DesignCardItem } from './video-creator/DesignsGrid';
 import { RightSidePanel } from './video-creator/RightSidePanel';
 import { AssetPicker } from './video-creator/AssetPicker';
+import { TOOLBAR_PILL_BTN } from './ui/toolbarStyles';
 
 interface VideoCreatorProps {
   designUrl: string | null;
@@ -245,9 +246,7 @@ function VideoToolbarButton({
       type="button"
       onClick={onClick}
       aria-expanded={typeof isOpen === 'boolean' ? isOpen : undefined}
-      className={`${className ?? ''} inline-flex h-[56px] items-center rounded-2xl border-2 bg-white px-4 text-sm leading-none text-slate-800 whitespace-nowrap transition-all hover:border-purple-300 hover:shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-200 ${
-        isOpen ? 'border-purple-300 bg-purple-50' : 'border-slate-200'
-      }`}
+      className={`${className ?? ''} ${TOOLBAR_PILL_BTN} ${isOpen ? 'border-purple-300 bg-purple-50' : ''}`}
     >
       <span className="flex items-center w-full justify-between gap-3 min-w-0">
         <span className="flex items-center gap-2 min-w-0">

@@ -22,6 +22,7 @@ import {
 import clsx from 'clsx';
 import { toast } from 'sonner';
 import { authFetch, getUserId } from '../utils/auth';
+import { TOOLBAR_ICON_BTN, TOOLBAR_PILL_BTN } from './ui/toolbarStyles';
 
 type ModelStyleKey = 'modelMale' | 'modelFemale' | 'modelKid';
 type ArtStyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor';
@@ -327,8 +328,8 @@ function ToolbarDropdownButton({
       aria-expanded={isOpen}
       disabled={disabled}
       className={clsx(
-        'flex flex-row items-center w-auto h-[56px] px-4 rounded-2xl border-2 bg-white text-sm text-slate-800 whitespace-nowrap transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-200 disabled:opacity-60 disabled:cursor-not-allowed hover:border-purple-300 hover:shadow-sm',
-        isOpen ? 'border-purple-300 bg-purple-50' : 'border-slate-200',
+        TOOLBAR_PILL_BTN,
+        isOpen ? 'border-purple-300 bg-purple-50' : '',
         className
       )}
     >
@@ -976,11 +977,11 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                     if (uploadInputRef.current) uploadInputRef.current.value = '';
                     uploadInputRef.current?.click();
                   }}
-                  className="w-9 h-9 rounded-full border border-slate-200 hover:bg-slate-100 flex items-center justify-center text-slate-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-200"
+                  className={TOOLBAR_ICON_BTN}
                   aria-label={isEditMode ? 'Replace image' : 'Upload image'}
                   title={isEditMode ? 'Replace image' : 'Upload image'}
                 >
-                  <Plus className="w-4 h-4" />
+                  <Plus className="w-6 h-6" />
                 </button>
 
                 {isEditMode && (
