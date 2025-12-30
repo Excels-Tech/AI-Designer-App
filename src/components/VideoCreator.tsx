@@ -308,7 +308,7 @@ async function localUrlToFile(src: string, fileBaseName: string): Promise<File> 
   return new File([blob], `${fileBaseName}.${ext}`, { type });
 }
 
-export function VideoCreator({ designUrl }: VideoCreatorProps) {
+export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
   const [project, setProject] = useState<VideoProject>({
     id: crypto.randomUUID(),
     quality: '1080p',
@@ -366,14 +366,7 @@ export function VideoCreator({ designUrl }: VideoCreatorProps) {
     [project.slides]
   );
 
-  useEffect(() => {
-    if (project.slides.length === 0 && designUrl) {
-      const slideSrc = isApiFileUrl(designUrl) ? toVideoFilesUrl(designUrl) : designUrl;
-      const slide = createSlide(withUid(slideSrc), 'Design Preview', undefined, motionMode);
-      setProject((prev) => ({ ...prev, slides: [slide] }));
-      setSelectedSlideId(slide.id);
-    }
-  }, [designUrl, motionMode, project.slides.length]);
+  // Preview starts empty. Slides appear only after the user uploads images or selects a design.
 
   useEffect(() => {
     if (project.slides.length === 0) {
@@ -496,6 +489,7 @@ export function VideoCreator({ designUrl }: VideoCreatorProps) {
   const currentSlide = project.slides[currentSlideIndex] || null;
   const previewImageScale =
     currentSlide?.assetId && selectedDesignId && currentSlide.assetId === selectedDesignId ? designScale : 1;
+  const hasPreviewContent = project.slides.length > 0;
   const maxPreviewWidthPx = 900;
   const previewFrameStyle = useMemo(() => {
     if (exportCanvasDimensions.width > 0 && exportCanvasDimensions.height > 0) {
@@ -1109,57 +1103,65 @@ export function VideoCreator({ designUrl }: VideoCreatorProps) {
           </div>
         )}
 
-	        <div className="w-full max-w-[980px] mr-auto">
-	          <div className="w-full rounded-3xl border border-slate-200 bg-white shadow-xl overflow-hidden">
-	            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
-		              <div className="flex items-center gap-2 text-sm text-slate-700">
-		                <Video className="h-5 w-5 text-slate-600" />
-		                Preview
-		              </div>
-		              <span className="text-xs text-slate-500">
-		                Slide {currentSlideIndex + 1 || 0} of {project.slides.length}
-		              </span>
-		            </div>
-		
-		            <div className="relative">
-		              <div className="px-6 py-5">
-	                <PreviewPlayer
-	                  slides={project.slides}
-	                  onSlideUpdate={(id, updates) => {
-	                    if (id !== selectedSlideId) return;
-	                    updateSlide(updates);
-	                  }}
-		                  currentTime={currentTime}
-		                  isPlaying={isPlaying}
-		                  videoUrl={renderState.status === 'done' ? renderState.videoUrl : null}
-		                  imageScale={previewImageScale}
-		                  frameStyle={previewFrameStyle}
-		                  onPlayToggle={setIsPlaying}
-		                  onSeek={(time) => {
-	                    const clamped = Math.min(Math.max(0, time), totalDuration);
-	                    setCurrentTime(clamped);
-	                    if (clamped >= totalDuration) setIsPlaying(false);
-                    let acc = 0;
-                    let nextSelectedId = project.slides[project.slides.length - 1]?.id ?? null;
-                    for (let i = 0; i < project.slides.length; i += 1) {
-                      const slide = project.slides[i];
-                      acc += slide.durationSec;
-                      if (clamped < acc) {
-                        nextSelectedId = slide.id;
-                        break;
-                      }
-                    }
-                    if (nextSelectedId && nextSelectedId !== selectedSlideId) {
-                      setSelectedSlideId(nextSelectedId);
-                    }
-                  }}
-                  onSlideChange={(index) => {
-                    const slide = project.slides[index];
-                    if (slide && slide.id !== selectedSlideId) {
-                      setSelectedSlideId(slide.id);
-                    }
-                  }}
-                />
+ 	        <div className="w-full max-w-[980px] mr-auto">
+ 	          <div className="w-full rounded-3xl border border-slate-200 bg-white shadow-xl overflow-hidden">
+ 	            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+ 		              <div className="flex items-center gap-2 text-sm text-slate-700">
+ 		                <Video className="h-5 w-5 text-slate-600" />
+ 		                Preview
+ 		              </div>
+		              {hasPreviewContent && (
+		                <span className="text-xs text-slate-500">
+		                  Slide {currentSlideIndex + 1 || 0} of {project.slides.length}
+		                </span>
+		              )}
+ 		            </div>
+ 		
+ 		            <div className="relative">
+ 		              <div className="px-6 py-5">
+		                {hasPreviewContent ? (
+		                  <PreviewPlayer
+		                    slides={project.slides}
+		                    onSlideUpdate={(id, updates) => {
+		                      if (id !== selectedSlideId) return;
+		                      updateSlide(updates);
+		                    }}
+		                    currentTime={currentTime}
+		                    isPlaying={isPlaying}
+		                    videoUrl={renderState.status === 'done' ? renderState.videoUrl : null}
+		                    imageScale={previewImageScale}
+		                    frameStyle={previewFrameStyle}
+		                    onPlayToggle={setIsPlaying}
+		                    onSeek={(time) => {
+		                      const clamped = Math.min(Math.max(0, time), totalDuration);
+		                      setCurrentTime(clamped);
+		                      if (clamped >= totalDuration) setIsPlaying(false);
+		                      let acc = 0;
+		                      let nextSelectedId = project.slides[project.slides.length - 1]?.id ?? null;
+		                      for (let i = 0; i < project.slides.length; i += 1) {
+		                        const slide = project.slides[i];
+		                        acc += slide.durationSec;
+		                        if (clamped < acc) {
+		                          nextSelectedId = slide.id;
+		                          break;
+		                        }
+		                      }
+		                      if (nextSelectedId && nextSelectedId !== selectedSlideId) {
+		                        setSelectedSlideId(nextSelectedId);
+		                      }
+		                    }}
+		                    onSlideChange={(index) => {
+		                      const slide = project.slides[index];
+		                      if (slide && slide.id !== selectedSlideId) {
+		                        setSelectedSlideId(slide.id);
+		                      }
+		                    }}
+		                  />
+		                ) : (
+		                  <div className="flex items-center justify-center h-[420px] rounded-2xl border border-dashed border-slate-300 text-slate-400 text-sm">
+		                    Select a design or upload an image to preview
+		                  </div>
+		                )}
               </div>
             </div>
           </div>
