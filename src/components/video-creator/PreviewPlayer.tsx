@@ -109,31 +109,28 @@ export function PreviewPlayer({
   }, [currentIndex, onSlideChange, slides.length]);
 
   const progressLabel = `${currentTime.toFixed(1)}s / ${totalDuration.toFixed(1)}s`;
-  const shellClassName = `flex flex-col w-full h-full max-h-full gap-4 min-h-0 ${className ?? ''}`;
+  const shellClassName = `flex flex-col w-full gap-4 min-h-0 ${className ?? ''}`;
   const timelineClassName = 'w-full';
   const previewFrameStyle: CSSProperties =
     frameStyle ??
     ({
       width: `min(100%, 900px)`,
     } satisfies CSSProperties);
-  const hasBoundedFrameHeight =
-    typeof previewFrameStyle.height === 'number' ||
-    typeof previewFrameStyle.height === 'string' ||
-    typeof previewFrameStyle.maxHeight === 'number' ||
-    typeof previewFrameStyle.maxHeight === 'string' ||
-    typeof previewFrameStyle.aspectRatio === 'number' ||
-    typeof previewFrameStyle.aspectRatio === 'string';
+  const maxHeightClassName = 'max-h-[calc(100vh-260px)]';
 
   if (videoUrl) {
     return (
       <div className={shellClassName}>
-        <div className="w-full flex-1 min-h-0 flex justify-center">
-          <div className="inline-block rounded-xl overflow-hidden border border-slate-200 bg-transparent max-h-full" style={previewFrameStyle}>
-            <div ref={containerRef} className="relative" style={hasBoundedFrameHeight ? { width: '100%', height: '100%' } : undefined}>
+        <div className="w-full flex justify-center">
+          <div
+            className={`inline-flex rounded-xl overflow-hidden border border-slate-200 bg-white shadow-sm ${maxHeightClassName} max-w-full`}
+            style={previewFrameStyle}
+          >
+            <div ref={containerRef} className="relative">
               <video
                 src={videoUrl}
                 controls
-                className={hasBoundedFrameHeight ? 'w-full h-full object-contain block' : 'w-full h-auto object-contain block'}
+                className={`max-w-full ${maxHeightClassName} object-contain block`}
               />
             </div>
           </div>
@@ -151,10 +148,10 @@ export function PreviewPlayer({
   if (!currentSlide) {
     return (
       <div className={shellClassName}>
-        <div className="w-full flex-1 min-h-0 flex justify-center">
+        <div className="w-full flex justify-center">
           <div
-            className="inline-flex rounded-xl overflow-hidden border border-dashed border-slate-200 bg-transparent text-sm text-slate-500 items-center justify-center"
-            style={hasBoundedFrameHeight ? previewFrameStyle : { ...previewFrameStyle, padding: 24 }}
+            className={`inline-flex rounded-xl overflow-hidden border border-dashed border-slate-200 bg-transparent text-sm text-slate-500 items-center justify-center ${maxHeightClassName} max-w-full`}
+            style={{ ...previewFrameStyle, padding: 24 }}
           >
             <span className="whitespace-nowrap">Add slides to preview your video.</span>
           </div>
@@ -247,26 +244,19 @@ export function PreviewPlayer({
         @keyframes vcZoom { from { transform: scale(var(--vc-zoom-start)); } to { transform: scale(var(--vc-zoom-end)); } }
         @keyframes vcRotate { from { opacity: 0; transform: rotate(-1deg) scale(var(--vc-scale)); } to { opacity: 1; transform: rotate(0deg) scale(var(--vc-scale)); } }
       `}</style>
-      <div className="w-full flex-1 min-h-0 flex justify-center">
-        <div className="inline-block rounded-xl overflow-hidden border border-slate-200 bg-transparent max-h-full" style={previewFrameStyle}>
-          <div ref={containerRef} className="relative" style={hasBoundedFrameHeight ? { width: '100%', height: '100%' } : undefined}>
-            {hasBoundedFrameHeight ? (
-              <div key={`${currentSlide.id}:${motionNonce}`} className="absolute inset-0" style={motionStyle}>
-                <img
-                  src={currentSlide.imageSrc}
-                  alt="Preview"
-                  className={hasBoundedFrameHeight ? 'w-full h-full object-contain block' : 'w-full h-auto object-contain block'}
-                />
-              </div>
-            ) : (
-              <div key={`${currentSlide.id}:${motionNonce}`} style={motionStyle}>
-                <img
-                  src={currentSlide.imageSrc}
-                  alt="Preview"
-                  className={hasBoundedFrameHeight ? 'w-full h-full object-contain block' : 'w-full h-auto object-contain block'}
-                />
-              </div>
-            )}
+      <div className="w-full flex justify-center">
+        <div
+          className={`inline-flex rounded-xl overflow-hidden border border-slate-200 bg-white shadow-sm ${maxHeightClassName} max-w-full`}
+          style={previewFrameStyle}
+        >
+          <div ref={containerRef} className="relative">
+            <div key={`${currentSlide.id}:${motionNonce}`} style={motionStyle}>
+              <img
+                src={currentSlide.imageSrc}
+                alt="Preview"
+                className={`max-w-full ${maxHeightClassName} object-contain block`}
+              />
+            </div>
 
         {currentSlide.overlayText && (
           <div
