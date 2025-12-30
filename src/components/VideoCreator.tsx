@@ -494,6 +494,10 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
   const maxPreviewWidthPx = 900;
   const previewFrameStyle = useMemo(() => {
     const base: CSSProperties = {
+      // Keep a consistent preview frame size across slides (composite + cropped views).
+      // Square frame, constrained by viewport height and available width.
+      width: 'min(100%, 60vh, 520px)',
+      height: 'min(60vh, 520px)',
       maxWidth: maxPreviewWidthPx,
     };
     return base;
