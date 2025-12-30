@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -491,13 +491,16 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
     currentSlide?.assetId && selectedDesignId && currentSlide.assetId === selectedDesignId ? designScale : 1;
   const hasPreviewContent = project.slides.length > 0;
   const maxPreviewWidthPx = 900;
+  const previewMaxHeight = 'calc(100vh - 420px)';
   const previewFrameStyle = useMemo(() => {
+    const base: CSSProperties = {
+      width: `min(100%, ${maxPreviewWidthPx}px)`,
+      maxHeight: previewMaxHeight,
+    };
     if (exportCanvasDimensions.width > 0 && exportCanvasDimensions.height > 0) {
-      const scaledWidth = Math.min(exportCanvasDimensions.width, maxPreviewWidthPx);
-      const scaledHeight = (scaledWidth * exportCanvasDimensions.height) / exportCanvasDimensions.width;
-      return { width: scaledWidth, height: scaledHeight };
+      base.aspectRatio = `${exportCanvasDimensions.width} / ${exportCanvasDimensions.height}`;
     }
-    return { width: `min(100%, ${maxPreviewWidthPx}px)` };
+    return base;
   }, [exportCanvasDimensions.height, exportCanvasDimensions.width]);
 
   const handleSlideSelect = (id: string) => {
@@ -1117,8 +1120,8 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
 		              )}
  		            </div>
  		
- 		            <div className="relative">
- 		              <div className="px-6 py-5">
+  		            <div className="relative">
+  		              <div className="px-6 py-5 h-[calc(100vh-260px)] max-h-[calc(100vh-260px)] overflow-hidden">
 		                {hasPreviewContent ? (
 		                  <PreviewPlayer
 		                    slides={project.slides}
@@ -1131,6 +1134,7 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
 		                    videoUrl={renderState.status === 'done' ? renderState.videoUrl : null}
 		                    imageScale={previewImageScale}
 		                    frameStyle={previewFrameStyle}
+		                    className="h-full max-h-full"
 		                    onPlayToggle={setIsPlaying}
 		                    onSeek={(time) => {
 		                      const clamped = Math.min(Math.max(0, time), totalDuration);
@@ -1158,7 +1162,7 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
 		                    }}
 		                  />
 		                ) : (
-		                  <div className="flex items-center justify-center h-[420px] rounded-2xl border border-dashed border-slate-300 text-slate-400 text-sm">
+		                  <div className="flex items-center justify-center h-full rounded-2xl border border-dashed border-slate-300 text-slate-400 text-sm overflow-hidden">
 		                    Select a design or upload an image to preview
 		                  </div>
 		                )}
