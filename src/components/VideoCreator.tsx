@@ -12,6 +12,7 @@ import {
   SlidersHorizontal,
   Upload,
   Video,
+  X,
   type LucideIcon,
 } from 'lucide-react';
 import { authFetch, getUserId, resolveApiAssetUrl } from '../utils/auth';
@@ -767,6 +768,86 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
     }
   };
 
+  const rightPanelTitle = rightPanelView === 'myDesigns' ? 'My Designs' : 'Text Editor';
+  const rightPanelSubtitle =
+    rightPanelView === 'myDesigns'
+      ? 'Select a saved design to apply to the canvas.'
+      : 'Edit the text overlay on the selected slide.';
+  const rightPanelBody: ReactNode =
+    rightPanelView === 'myDesigns' ? (
+      <RightDrawerMyDesigns
+        open
+        onClose={closePanel}
+        selectedDesignId={selectedDesignId}
+        onSelectDesign={handleSelectDesign}
+      />
+    ) : (
+      <div className="h-full flex flex-col">
+        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              setIsAssetPickerOpen(false);
+              setRightPanelView('myDesigns');
+            }}
+            className="text-sm text-purple-700 hover:underline"
+          >
+            Change design
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setIsAssetPickerOpen(true)}
+            className="text-sm text-slate-700 hover:text-slate-900"
+          >
+            Select cropped images
+          </button>
+        </div>
+
+        <div className="px-5 py-4 border-b border-slate-200 space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-slate-800">Scale</p>
+            <p className="text-xs text-slate-500">{Math.round(designScale * 100)}%</p>
+          </div>
+          <input
+            type="range"
+            min={0.5}
+            max={1.5}
+            step={0.01}
+            value={designScale}
+            disabled={!selectedDesignId}
+            onChange={(e) => setDesignScale(Number(e.target.value))}
+            className="w-full disabled:opacity-50"
+          />
+        </div>
+
+        <div className="flex-1 min-h-0 overflow-hidden">
+          {isAssetPickerOpen ? (
+            <AssetPicker
+              open
+              variant="panel"
+              appearance="embedded"
+              maxSelect={Math.max(1, MAX_SLIDES - project.slides.length)}
+              initialDesignId={selectedDesignId}
+              onClose={() => setIsAssetPickerOpen(false)}
+              onAdd={(items) => {
+                addSlides(items.map((item) => ({ url: item.url, label: item.label })));
+                setIsAssetPickerOpen(false);
+              }}
+            />
+          ) : selectedDesignId ? (
+            <div className="p-5 overflow-y-auto h-full">
+              <SlideEditor slide={currentSlide} onUpdate={updateSlide} />
+            </div>
+          ) : (
+            <div className="h-full text-sm text-slate-500 flex items-center justify-center text-center p-5">
+              Select a design to start editing.
+            </div>
+          )}
+        </div>
+      </div>
+    );
+
   return (
     <div className="relative min-h-screen p-8 bg-gradient-to-br from-slate-50 to-slate-100">
       <div className="max-w-7xl mx-auto space-y-6">
@@ -1029,6 +1110,8 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
           </MenuDropdown>
         </div>
 
+        <div className="flex gap-6 items-start w-full">
+          <div className="flex-1 min-w-0 space-y-6">
         {renderState.status === 'rendering' && (
           <div className="flex items-center gap-4 rounded-2xl border border-slate-200 bg-white px-4 py-3">
             <div className="text-sm text-slate-700">
@@ -1170,92 +1253,36 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
             </div>
           </div>
         </div>
+
+          </div>
+
+          {isRightPanelOpen && (
+            <aside className="hidden lg:flex w-[380px] shrink-0 max-h-[calc(100vh-160px)] overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-xl flex-col">
+              <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-200">
+                <div className="min-w-0">
+                  <p className="text-slate-900 font-medium truncate">{rightPanelTitle}</p>
+                  <p className="text-xs text-slate-500 mt-1">{rightPanelSubtitle}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closePanel}
+                  className="rounded-xl border border-slate-200 p-2 text-slate-700 hover:bg-slate-100"
+                  aria-label="Close panel"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="flex-1 min-h-0 overflow-hidden">{rightPanelBody}</div>
+            </aside>
+          )}
+        </div>
       </div>
 
-      <RightSidePanel
-        open={isRightPanelOpen}
-        title={rightPanelView === 'myDesigns' ? 'My Designs' : 'Text Editor'}
-        subtitle={
-          rightPanelView === 'myDesigns'
-            ? 'Select a saved design to apply to the canvas.'
-            : 'Edit the text overlay on the selected slide.'
-        }
-        onClose={closePanel}
-      >
-        {rightPanelView === 'myDesigns' ? (
-          <RightDrawerMyDesigns
-            open
-            onClose={closePanel}
-            selectedDesignId={selectedDesignId}
-            onSelectDesign={handleSelectDesign}
-          />
-        ) : (
-          <div className="h-full flex flex-col">
-            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
-              <button
-                type="button"
-                onClick={() => {
-                  setIsAssetPickerOpen(false);
-                  setRightPanelView('myDesigns');
-                }}
-                className="text-sm text-purple-700 hover:underline"
-              >
-                Change design
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setIsAssetPickerOpen(true)}
-                className="text-sm text-slate-700 hover:text-slate-900"
-              >
-                Select cropped images
-              </button>
-            </div>
-
-            <div className="px-5 py-4 border-b border-slate-200 space-y-2">
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-slate-800">Scale</p>
-                <p className="text-xs text-slate-500">{Math.round(designScale * 100)}%</p>
-              </div>
-              <input
-                type="range"
-                min={0.5}
-                max={1.5}
-                step={0.01}
-                value={designScale}
-                disabled={!selectedDesignId}
-                onChange={(e) => setDesignScale(Number(e.target.value))}
-                className="w-full disabled:opacity-50"
-              />
-            </div>
-
-            <div className="flex-1 min-h-0 overflow-hidden">
-              {isAssetPickerOpen ? (
-                <AssetPicker
-                  open
-                  variant="panel"
-                  appearance="embedded"
-                  maxSelect={Math.max(1, MAX_SLIDES - project.slides.length)}
-                  initialDesignId={selectedDesignId}
-                  onClose={() => setIsAssetPickerOpen(false)}
-                  onAdd={(items) => {
-                    addSlides(items.map((item) => ({ url: item.url, label: item.label })));
-                    setIsAssetPickerOpen(false);
-                  }}
-                />
-              ) : selectedDesignId ? (
-                <div className="p-5 overflow-y-auto h-full">
-                  <SlideEditor slide={currentSlide} onUpdate={updateSlide} />
-                </div>
-              ) : (
-                <div className="h-full text-sm text-slate-500 flex items-center justify-center text-center p-5">
-                  Select a design to start editing.
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </RightSidePanel>
+      <div className="lg:hidden">
+        <RightSidePanel open={isRightPanelOpen} title={rightPanelTitle} subtitle={rightPanelSubtitle} onClose={closePanel}>
+          {rightPanelBody}
+        </RightSidePanel>
+      </div>
     </div>
   );
 }
