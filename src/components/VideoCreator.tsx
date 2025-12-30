@@ -517,11 +517,30 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
     setIsAssetPickerOpen(false);
     setDesignScale(1);
 
-    const slide = createSlide(withUid(item.thumbnail), item.title, item.id, motionMode);
-    setProject((prev) => ({ ...prev, slides: normalizeDurations([slide, ...prev.slides]).slice(0, MAX_SLIDES) }));
-    setSelectedSlideId(slide.id);
-    setCurrentTime(0);
-    setIsPlaying(false);
+    void (async () => {
+      let slideSrc = withUid(item.thumbnail);
+      try {
+        const res = await authFetch(`/api/designs/${item.id}`);
+        if (res.ok) {
+          const data = await res.json().catch(() => ({}));
+          const url = data?.composite?.url;
+          const dataUrl = data?.composite?.dataUrl;
+          if (typeof url === 'string' && url) {
+            slideSrc = withUid(toVideoFilesUrl(url));
+          } else if (typeof dataUrl === 'string' && dataUrl) {
+            slideSrc = dataUrl;
+          }
+        }
+      } catch {
+        // Fall back to thumbnail.
+      }
+
+      const slide = createSlide(slideSrc, item.title, item.id, motionMode);
+      setProject((prev) => ({ ...prev, slides: normalizeDurations([slide, ...prev.slides]).slice(0, MAX_SLIDES) }));
+      setSelectedSlideId(slide.id);
+      setCurrentTime(0);
+      setIsPlaying(false);
+    })();
   };
 
   const closePanel = () => {
