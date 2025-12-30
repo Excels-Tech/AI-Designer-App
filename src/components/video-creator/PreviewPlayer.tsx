@@ -133,7 +133,6 @@ export function PreviewPlayer({
                 controls
                 playsInline
                 className={mediaClassName}
-                style={{ maxHeight: '100%', maxWidth: '100%' }}
               />
             </div>
           </div>
@@ -258,7 +257,6 @@ export function PreviewPlayer({
                 src={currentSlide.imageSrc}
                 alt="Preview"
                 className={mediaClassName}
-                style={{ maxHeight: '100%', maxWidth: '100%' }}
               />
             </div>
 
