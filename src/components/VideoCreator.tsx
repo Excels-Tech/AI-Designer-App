@@ -489,7 +489,7 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
   const currentSlideIndex = project.slides.findIndex((slide) => slide.id === selectedSlideId);
   const currentSlide = project.slides[currentSlideIndex] || null;
   const previewImageScale =
-    currentSlide?.assetId && selectedDesignId && currentSlide.assetId === selectedDesignId ? designScale : 1;
+    currentSlide?.assetId && selectedDesignId && currentSlide.assetId === selectedDesignId ? Math.min(1, designScale) : 1;
   const hasPreviewContent = project.slides.length > 0;
   const maxPreviewWidthPx = 900;
   const previewFrameStyle = useMemo(() => {
@@ -827,6 +827,7 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
               initialDesignId={selectedDesignId}
               onClose={() => setIsAssetPickerOpen(false)}
               onAdd={(items) => {
+                setDesignScale(1);
                 addSlides(items.map((item) => ({ url: item.url, label: item.label })));
                 setIsAssetPickerOpen(false);
               }}
