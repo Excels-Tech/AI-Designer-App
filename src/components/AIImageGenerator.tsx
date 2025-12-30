@@ -44,6 +44,17 @@ interface GenerateResponse {
   designId?: string;
 }
 
+type GeneratedVariant = {
+  id: string;
+  styleLabel: string;
+  styleKey?: ArtStyleKey;
+  modelLabel?: string;
+  modelKey?: ModelStyleKey;
+  views: ViewKey[];
+  composite: string;
+  images: GeneratedImage[];
+};
+
 interface SingleEditResponse {
   imageDataUrl: string;
 }
@@ -98,6 +109,15 @@ const viewOptions: { id: ViewKey; label: string }[] = [
 ];
 
 const viewLabel = (view: ViewKey) => viewOptions.find((v) => v.id === view)?.label ?? view;
+
+const VIEW_ORDER: ViewKey[] = ['front', 'back', 'left', 'right', 'threeQuarter', 'top'];
+
+export function normalizeViews(selectedViews: ViewKey[]): ViewKey[] {
+  const normalized = new Set<ViewKey>(selectedViews);
+  normalized.add('front');
+  normalized.add('back');
+  return VIEW_ORDER.filter((v) => normalized.has(v));
+}
 
 const modelOptionLabel = (style: ModelStyleKey) => {
   const match = modelOptions.find((opt) => opt.id === style);
@@ -353,13 +373,14 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 
   const [prompt, setPrompt] = useState('');
   const [selectedStyles, setSelectedStyles] = useState<ArtStyleKey[]>(['3d']);
-  const [modelStyle, setModelStyle] = useState<ModelStyleKey | null>(null);
+  const [selectedModels, setSelectedModels] = useState<ModelStyleKey[]>([]);
   const [resolution, setResolution] = useState<number>(1024);
-  const [selectedViews, setSelectedViews] = useState<ViewKey[]>(['front', 'back', 'left', 'right']);
+  const [selectedViews, setSelectedViews] = useState<ViewKey[]>(['front', 'back']);
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<GenerateResponse | null>(null);
+  const [variants, setVariants] = useState<GeneratedVariant[]>([]);
   const [editedImageDataUrl, setEditedImageDataUrl] = useState<string | null>(null);
   const [editedViews, setEditedViews] = useState<
     Array<{ view: ViewKey; style?: string; imageDataUrl?: string; error?: string }> | null
@@ -372,6 +393,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [savedDesignIds, setSavedDesignIds] = useState<string[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
   const [designName, setDesignName] = useState('');
   const [hasResultFlag, setHasResultFlag] = useState(false);
@@ -382,7 +404,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     setUserId(getUserId());
   }, []);
 
-  const hasResult = Boolean(editedImageDataUrl) || hasResultFlag || Boolean(result?.composite && result?.images?.length);
+  const hasResult =
+    Boolean(editedImageDataUrl) ||
+    hasResultFlag ||
+    variants.length > 0;
   const hasEditedViews = Boolean(editedViews?.length);
   const hasAnyResult = hasEditedViews || hasResult;
   const editedPrimaryImage = useMemo(() => {
@@ -392,7 +417,8 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const previewCompact = Boolean(uploadedImageDataUrl) && (hasEditedViews || Boolean(editedImageDataUrl));
 
   const selectedViewsLabel = 'View Angles';
-  const effectiveStyle: StyleKey = modelStyle ?? selectedStyles[0] ?? 'realistic';
+  // Legacy variable retained to avoid touching older generation branches below.
+  const effectiveStyle: ArtStyleKey = selectedStyles[0] ?? 'realistic';
   const selectedStyleLabels = useMemo(
     () => selectedStyles.map((style) => styleOptions.find((opt) => opt.id === style)?.label ?? style),
     [selectedStyles]
@@ -405,22 +431,45 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const isEditMode = Boolean(uploadedImageDataUrl || uploadedImageFile);
   const hasSingleEditResult = isEditMode && Boolean(editedImageDataUrl) && !hasEditedViews;
   const modelPreferenceLabel = useMemo(() => {
-    if (!modelStyle) return 'None';
-    return modelOptions.find((opt) => opt.id === modelStyle)?.label ?? 'None';
-  }, [modelStyle]);
+    if (!selectedModels.length) return 'None';
+    return selectedModels.map((id) => modelOptions.find((opt) => opt.id === id)?.label ?? id).join(' + ');
+  }, [selectedModels]);
   const globalModelValue = useMemo<'male' | 'female' | 'kid' | 'none'>(() => {
-    if (modelStyle === 'modelMale') return 'male';
-    if (modelStyle === 'modelFemale') return 'female';
-    if (modelStyle === 'modelKid') return 'kid';
+    const first = selectedModels[0];
+    if (first === 'modelMale') return 'male';
+    if (first === 'modelFemale') return 'female';
+    if (first === 'modelKid') return 'kid';
     return 'none';
-  }, [modelStyle]);
+  }, [selectedModels]);
   const globalResolutionValue = useMemo(() => `${resolution}x${resolution}`, [resolution]);
 
+  useEffect(() => {
+    setSelectedViews((prev) => normalizeViews(prev));
+  }, []);
+
   const toggleView = (viewId: ViewKey) => {
-    setSelectedViews((prev) =>
-      prev.includes(viewId) ? prev.filter((id) => id !== viewId) : [...prev, viewId]
-    );
+    setSelectedViews((prev) => {
+      const next = prev.includes(viewId) ? prev.filter((id) => id !== viewId) : [...prev, viewId];
+      return normalizeViews(next);
+    });
   };
+
+  const toggleModel = (modelId: ModelStyleKey) => {
+    setSelectedModels((prev) => {
+      const isActive = prev.includes(modelId);
+      if (isActive) return prev.filter((m) => m !== modelId);
+      if (prev.length >= 2) {
+        toast('You can select maximum 2 models');
+        return prev;
+      }
+      return [...prev, modelId];
+    });
+  };
+
+  useEffect(() => {
+    if (!selectedModels.length) return;
+    setSelectedViews((prev) => normalizeViews(prev));
+  }, [selectedModels]);
 
   const clearUploadedImage = () => {
     setUploadedImageDataUrl(null);
@@ -430,6 +479,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     setEditedImageDataUrl(null);
     setEditedViews(null);
     setResult(null);
+    setVariants([]);
     setHasResultFlag(false);
     setStatusMessage('');
     setError(null);
@@ -480,10 +530,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       return;
     }
 
-    if (!hasUploadedImage && selectedViews.length === 0) {
-      setError('Select at least one view.');
-      return;
-    }
+    const normalizedViews = normalizeViews(selectedViews);
 
     setIsGenerating(true);
     setStatusMessage(hasUploadedImage ? 'Sending image to Gemini...' : 'Sending prompt to Gemini...');
@@ -491,10 +538,12 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     setSaveMessage(null);
     setSaveError(null);
     setSavedDesignId(null);
+    setSavedDesignIds([]);
     setDesignName('');
     setEditedImageDataUrl(null);
     setEditedViews(null);
     setResult(null);
+    setVariants([]);
     setHasResultFlag(false);
 
     try {
@@ -513,6 +562,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           resolution,
         };
 
+        if (selectedModels.length > 1) toast('Edit mode supports one model; using the first selected.');
         if (globalModelValue !== 'none') body.model = globalModelValue;
 
         const response = await authFetch('/api/image/edit', {
@@ -531,6 +581,129 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         setEditedImageDataUrl(payload.imageDataUrl);
         setStatusMessage('Image edited successfully.');
       } else {
+        // New generator behavior:
+        // - Always enforce at least front/back.
+        // - If multiple styles selected, generate one full output per style.
+        // - If multiple models selected and >= 4 views selected, split views across models (front/back preserved for first model).
+        // - Output count = styles × models (models defaults to "none").
+        const styles = selectedStyles.length ? selectedStyles : (['realistic'] as ArtStyleKey[]);
+        const viewsForStyles = normalizeViews(selectedViews);
+        const modelKey = selectedModels.length ? selectedModels[0] : null;
+        if (selectedModels.length > 1) toast('Model output supports one model; using the first selected.');
+
+        const totalRequests = styles.length + (modelKey ? 1 : 0);
+        let requestIndex = 0;
+
+        const nextVariants: GeneratedVariant[] = [];
+        let emittedPrimary = false;
+
+        // 1) Style outputs generate without model.
+        for (const style of styles) {
+          requestIndex += 1;
+          const styleLabel = styleOptions.find((opt) => opt.id === style)?.label ?? style;
+          setStatusMessage(`Generating ${styleLabel} (${requestIndex}/${totalRequests})...`);
+
+          const promptForViews = [
+            trimmedPrompt,
+            `Style: ${styleLabel}.`,
+            `View order: ${viewsForStyles.map((v) => viewLabel(v)).join(' -> ')}.`,
+            'No collages; one view per image; keep the same product/design.',
+          ].join('\n');
+
+          const response = await authFetch('/api/generate-views', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              prompt: promptForViews,
+              style,
+              views: viewsForStyles,
+              resolution,
+            }),
+          });
+
+          if (!response.ok) {
+            const payload = await response.json().catch(() => ({}));
+            throw new Error(payload.error || 'Generation failed.');
+          }
+
+          const payload: GenerateResponse = await response.json();
+          const newVariant: GeneratedVariant = {
+            id: crypto.randomUUID(),
+            styleLabel,
+            styleKey: style,
+            views: viewsForStyles,
+            composite: payload.composite,
+            images: payload.images,
+          };
+          nextVariants.push(newVariant);
+          setVariants((prev) => [...prev, newVariant]);
+
+          if (!emittedPrimary && payload.composite) {
+            emittedPrimary = true;
+            onGenerate?.(payload.composite);
+          }
+        }
+
+        // 2) If a model is selected, add one extra model-only output (forced Realistic + front/back).
+        if (modelKey) {
+          requestIndex += 1;
+          const modelOpt = modelOptions.find((opt) => opt.id === modelKey);
+          const modelLabel = modelOpt?.label ?? modelKey;
+          const modelHelper = modelOpt?.helper ?? '';
+          const modelViews: ViewKey[] = ['front', 'back'];
+          const modelStyle: ArtStyleKey = 'realistic';
+          const modelStyleLabel = styleOptions.find((opt) => opt.id === modelStyle)?.label ?? 'Realistic';
+
+          setStatusMessage(`Generating ${modelLabel} (${modelStyleLabel}) (${requestIndex}/${totalRequests})...`);
+
+          const promptWithModel = modelHelper ? appendPromptModifier(trimmedPrompt, modelHelper) : trimmedPrompt;
+          const promptForViews = [
+            promptWithModel,
+            `Style: ${modelStyleLabel}.`,
+            `View order: ${modelViews.map((v) => viewLabel(v)).join(' -> ')}.`,
+            'No collages; one view per image; keep the same product/design.',
+          ].join('\n');
+
+          const response = await authFetch('/api/generate-views', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              prompt: promptForViews,
+              style: modelStyle,
+              views: modelViews,
+              resolution,
+            }),
+          });
+
+          if (!response.ok) {
+            const payload = await response.json().catch(() => ({}));
+            throw new Error(payload.error || 'Generation failed.');
+          }
+
+          const payload: GenerateResponse = await response.json();
+          const newVariant: GeneratedVariant = {
+            id: crypto.randomUUID(),
+            styleLabel: modelStyleLabel,
+            styleKey: modelStyle,
+            modelLabel,
+            modelKey,
+            views: modelViews,
+            composite: payload.composite,
+            images: payload.images,
+          };
+          nextVariants.push(newVariant);
+          setVariants((prev) => [...prev, newVariant]);
+
+          if (!emittedPrimary && payload.composite) {
+            emittedPrimary = true;
+            onGenerate?.(payload.composite);
+          }
+        }
+
+        setHasResultFlag(nextVariants.length > 0);
+        setStatusMessage(`Generated ${nextVariants.length} output${nextVariants.length === 1 ? '' : 's'}.`);
+
+        /* Legacy generation path (disabled):
         if (!modelStyle && selectedViews.length === 4 && selectedStyles.length === 2) {
           const [style1, style2] = selectedStyles;
           const [label1, label2] = selectedStyleLabels;
@@ -625,10 +798,12 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           setStatusMessage('Composite generated and cropped automatically.');
           onGenerate?.(payload.composite);
         }
+        */
       }
     } catch (err: any) {
       setError(err?.message || 'Something went wrong while generating images.');
       setResult(null);
+      setVariants([]);
       setEditedImageDataUrl(null);
       setEditedViews(null);
     } finally {
@@ -637,7 +812,22 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   };
 
   const handleSaveDesign = async () => {
-    if (!result) return;
+    const variantsToSave = variants.length
+      ? variants
+      : result
+        ? [
+            {
+              id: 'single',
+              styleLabel: styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? String(effectiveStyle),
+              styleKey: effectiveStyle,
+              views: result.images.map((i) => i.view),
+              composite: result.composite,
+              images: result.images,
+            } as GeneratedVariant,
+          ]
+        : [];
+
+    if (!variantsToSave.length) return;
     const uid = userId || getUserId();
     const finalName = designName.trim();
     if (!finalName) {
@@ -650,36 +840,49 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 
     try {
       setStatusMessage('Preparing PNGs for saving...');
-      const viewsToSave = (result.images || []).map((img) => img.view);
-      const compositeDataUrl = await ensurePngDataUrl(result.composite);
-      const imageDataUrls = await Promise.all(result.images.map((img) => ensurePngDataUrl(img.src)));
+      const savedIds: string[] = [];
 
-      const payload = {
-          name: finalName.slice(0, 60),
-          title: finalName.slice(0, 60),
+      for (const variant of variantsToSave) {
+        const styleLabel = variant.styleLabel;
+        const modelLabel = variant.modelLabel ?? '';
+        const suffix =
+          variantsToSave.length > 1 ? ` - ${[modelLabel, styleLabel].filter(Boolean).join(' - ')}` : '';
+        const nameWithSuffix = `${finalName}${suffix}`.slice(0, 60);
+
+        const viewsToSave = (variant.images || []).map((img) => img.view);
+        const compositeDataUrl = await ensurePngDataUrl(variant.composite);
+        const imageDataUrls = await Promise.all(variant.images.map((img) => ensurePngDataUrl(img.src)));
+
+        const payload = {
+          name: nameWithSuffix,
+          title: nameWithSuffix,
           prompt: prompt.trim(),
           userId: uid,
-          style: effectiveStyle,
+          style: variant.styleKey ?? effectiveStyle,
           resolution,
           views: viewsToSave,
           composite: compositeDataUrl,
-          images: result.images.map((img, idx) => ({ view: img.view, dataUrl: imageDataUrls[idx] })),
+          images: variant.images.map((img, idx) => ({ view: img.view, dataUrl: imageDataUrls[idx] })),
         };
 
-      const response = await authFetch('/api/designs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+        const response = await authFetch('/api/designs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
 
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || 'Failed to save design.');
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || 'Failed to save design.');
+        }
+
+        const data = await response.json();
+        if (data?.id) savedIds.push(String(data.id));
       }
 
-      const data = await response.json();
-      setSavedDesignId(data.id);
-      setSaveMessage('Saved to My Designs.');
+      setSavedDesignId(savedIds[0] ?? null);
+      setSavedDesignIds(savedIds);
+      setSaveMessage(`Saved ${savedIds.length} design${savedIds.length === 1 ? '' : 's'} to My Designs.`);
     } catch (err: any) {
       setSaveError(err?.message || 'Failed to save design.');
     } finally {
@@ -688,8 +891,24 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   };
 
   const handleDownloadAll = () => {
-    if (!result) return;
-    if (savedDesignId) {
+    const variantsToDownload = variants.length
+      ? variants
+      : result
+        ? [
+            {
+              id: 'single',
+              styleLabel: styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? String(effectiveStyle),
+              styleKey: effectiveStyle,
+              views: result.images.map((i) => i.view),
+              composite: result.composite,
+              images: result.images,
+            } as GeneratedVariant,
+          ]
+        : [];
+
+    if (!variantsToDownload.length) return;
+
+    if (savedDesignId && savedDesignIds.length <= 1) {
       const uid = userId || getUserId();
       authFetch(`/api/designs/${savedDesignId}/download.zip`, {
         method: 'GET',
@@ -710,12 +929,15 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         .catch((err) => setSaveError(err?.message || 'Failed to download.'));
       return;
     }
-    // Fallback for unsaved designs: download individual PNGs
-    result.images.forEach((image) => {
-      const link = document.createElement('a');
-      link.href = image.src;
-      link.download = `${image.view}.png`;
-      link.click();
+    // Fallback for unsaved or multi-save: download individual PNGs
+    variantsToDownload.forEach((variant) => {
+      const prefix = [variant.modelLabel, variant.styleLabel].filter(Boolean).join('-').replace(/\s+/g, '_') || 'design';
+      variant.images.forEach((image) => {
+        const link = document.createElement('a');
+        link.href = image.src;
+        link.download = `${image.view}-${prefix}.png`;
+        link.click();
+      });
     });
   };
 
@@ -805,16 +1027,31 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
               >
                 <div className="p-1.5">
                   <div className="flex flex-col gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedModels([])}
+                      className={clsx(
+                        'w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left',
+                        selectedModels.length === 0
+                          ? 'bg-purple-50 text-slate-900 border-purple-300'
+                          : 'bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50'
+                      )}
+                    >
+                      <span className="inline-flex items-center gap-2 min-w-0">
+                        <Users className="w-4 h-4 text-slate-600 flex-none" />
+                        <span className="truncate text-sm">None</span>
+                      </span>
+                      {selectedModels.length === 0 && <Check className="w-4 h-4 text-purple-600 flex-none" />}
+                    </button>
                     {modelOptions.map((opt) => {
-                      const active = modelStyle === opt.id;
+                      const active = selectedModels.includes(opt.id);
                       const Icon = opt.icon;
                       return (
                         <button
                           key={opt.id}
                           type="button"
                           onClick={() => {
-                            setModelStyle(opt.id);
-                            setOpenMenu(null);
+                            toggleModel(opt.id);
                           }}
                           className={clsx(
                             'w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left',
@@ -948,9 +1185,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	                      <p className="mt-2 text-[12px] text-slate-500">
 	                        {selectedStyles.length === 1
 	                          ? 'All views will use this style'
-	                          : selectedViews.length === 4
-	                          ? '2 views per style'
-	                          : 'Up to 2 styles selected'}
+	                          : 'Generates one full output per selected style'}
 	                      </p>
 	                    </div>
 
@@ -1081,7 +1316,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	              <div className="flex items-center justify-between">
 	                <div>
 	                  <h3 className="text-sm font-semibold">
-	                    {hasEditedViews || hasSingleEditResult ? 'Edited Preview' : 'Composite Preview'}
+                    {hasEditedViews || hasSingleEditResult ? 'Edited Preview' : 'Composite Preview'}
                   </h3>
                   <p className="text-xs text-slate-500">
                     {hasEditedViews || hasSingleEditResult
@@ -1129,8 +1364,35 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	                      <img src={editedPrimaryImage} alt="Preview" className="w-full h-full object-contain" />
 	                    </div>
 	                  ) : null
+	                ) : variants.length > 1 ? (
+	                  <div className="col-span-2 space-y-4">
+	                    {variants.map((variant) => (
+	                      <div key={variant.id} className="rounded-2xl border border-slate-200 bg-white p-4">
+	                        <div className="flex flex-wrap items-center gap-2">
+	                          {variant.modelLabel && (
+	                            <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
+	                              Model: {variant.modelLabel}
+	                            </span>
+	                          )}
+	                          <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
+	                            Style: {variant.styleLabel}
+	                          </span>
+	                        </div>
+	                        <div className="mt-3 grid grid-cols-2 gap-4">
+	                          {variant.images.map((image) => (
+	                            <div
+	                              key={`${variant.id}-${image.view}`}
+	                              className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-slate-50 border border-slate-200 flex items-center justify-center"
+	                            >
+	                              <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain" />
+	                            </div>
+	                          ))}
+	                        </div>
+	                      </div>
+	                    ))}
+	                  </div>
 	                ) : (
-	                  (result?.images ?? []).map((image) => (
+	                  ((variants[0]?.images ?? result?.images) ?? []).map((image) => (
 	                    <div
 	                      key={image.view}
 	                      className="w-full aspect-[4/3] rounded-xl overflow-hidden bg-slate-50 border border-slate-200 flex items-center justify-center"
@@ -1198,7 +1460,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
               </div>
             )}
 
-            {result && (
+            {(variants.length > 0 || result) && (
             <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4 flex flex-col md:flex-row gap-3 md:items-end md:justify-between">
               <div className="flex-1">
                 <label className="block text-sm text-slate-700 mb-2">Design name</label>
@@ -1233,7 +1495,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             </div>
             )}
 
-            {result && (saveMessage || saveError) && (
+            {(variants.length > 0 || result) && (saveMessage || saveError) && (
               <div
                 className={clsx(
                   'rounded-xl border px-4 py-3 text-sm',
@@ -1244,38 +1506,89 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
               </div>
             )}
 
-            {result && (
+            {(variants.length > 0 || result) && (
             <div>
               <p className="text-slate-900 font-medium mb-3">Cropped Views</p>
-              <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
-                {result.images.map((image) => (
-                  <div
-                    key={image.view}
-                    className="rounded-2xl border border-slate-200 overflow-hidden bg-slate-50 shadow-sm"
-                  >
-                    <div className="aspect-square bg-white">
-                      <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain" />
-                    </div>
-                    <div className="p-3 flex items-center justify-between">
-                      <div>
-                        <p className="text-sm text-slate-900">{viewLabel(image.view)}</p>
-                        <p className="text-xs text-slate-500">Auto-cropped from composite</p>
+              {variants.length > 0 ? (
+                <div className="space-y-6">
+                  {variants.map((variant) => (
+                    <div key={variant.id}>
+                      <div className="flex flex-wrap gap-2 mb-3">
+                        {variant.modelLabel && (
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
+                            Model: {variant.modelLabel}
+                          </span>
+                        )}
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
+                          Style: {variant.styleLabel}
+                        </span>
                       </div>
-                      <button
-                        onClick={() => {
-                          const link = document.createElement('a');
-                          link.href = image.src;
-                          link.download = `${image.view}.png`;
-                          link.click();
-                        }}
-                        className="text-purple-600 text-xs hover:underline"
-                      >
-                        Download
-                      </button>
+                      <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
+                        {variant.images.map((image) => {
+                          const suffix = [variant.modelLabel, variant.styleLabel].filter(Boolean).join('-').replace(/\s+/g, '_');
+                          return (
+                            <div
+                              key={`${variant.id}-${image.view}`}
+                              className="rounded-2xl border border-slate-200 overflow-hidden bg-slate-50 shadow-sm"
+                            >
+                              <div className="aspect-square bg-white">
+                                <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain" />
+                              </div>
+                              <div className="p-3 flex items-center justify-between">
+                                <div>
+                                  <p className="text-sm text-slate-900">{viewLabel(image.view)}</p>
+                                  <p className="text-xs text-slate-500">Auto-cropped from composite</p>
+                                </div>
+                                <button
+                                  onClick={() => {
+                                    const link = document.createElement('a');
+                                    link.href = image.src;
+                                    link.download = suffix ? `${image.view}-${suffix}.png` : `${image.view}.png`;
+                                    link.click();
+                                  }}
+                                  className="text-purple-600 text-xs hover:underline"
+                                >
+                                  Download
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              ) : result ? (
+                <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
+                  {result.images.map((image) => (
+                    <div
+                      key={image.view}
+                      className="rounded-2xl border border-slate-200 overflow-hidden bg-slate-50 shadow-sm"
+                    >
+                      <div className="aspect-square bg-white">
+                        <img src={image.src} alt={viewLabel(image.view)} className="w-full h-full object-contain" />
+                      </div>
+                      <div className="p-3 flex items-center justify-between">
+                        <div>
+                          <p className="text-sm text-slate-900">{viewLabel(image.view)}</p>
+                          <p className="text-xs text-slate-500">Auto-cropped from composite</p>
+                        </div>
+                        <button
+                          onClick={() => {
+                            const link = document.createElement('a');
+                            link.href = image.src;
+                            link.download = `${image.view}.png`;
+                            link.click();
+                          }}
+                          className="text-purple-600 text-xs hover:underline"
+                        >
+                          Download
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
             )}
           </div>
