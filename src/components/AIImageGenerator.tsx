@@ -153,6 +153,9 @@ const framingPromptModifier = (mode: FramingMode) => {
 const WHITE_BACKGROUND_PROMPT =
   'Background: pure white (#FFFFFF), seamless, flat white backdrop. No gray studio box, no gradients, no shadows, no reflections, no vignette.';
 
+const THREE_D_NO_MANNEQUIN_PROMPT =
+  'Product-only 3D render of the uniform/apparel. Uniform only, floating apparel / ghost mannequin style. No mannequin, no statue, no person, no human, no body, no character, no dummy, no stand.';
+
 const readFileAsDataUrl = async (file: File) => {
   return await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -169,6 +172,122 @@ async function loadImageElement(src: string): Promise<HTMLImageElement> {
     img.onerror = () => reject(new Error('Failed to load generated image.'));
     img.src = src;
   });
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+async function computePreviewScaleFromImageSrc(
+  src: string,
+  {
+    targetFillRatio = 0.85,
+    nearWhiteThreshold = 250,
+    maxScale = 1.8,
+  }: { targetFillRatio?: number; nearWhiteThreshold?: number; maxScale?: number } = {}
+): Promise<number> {
+  if (!src) return 1;
+
+  const trimmed = src.trim();
+  const isDataUrl = /^data:image\//i.test(trimmed);
+  let objectUrlToRevoke: string | null = null;
+
+  try {
+    let img: HTMLImageElement;
+    if (isDataUrl) {
+      img = await loadImageElement(trimmed);
+    } else {
+      const res = await fetch(trimmed);
+      if (!res.ok) return 1;
+      const blob = await res.blob();
+      objectUrlToRevoke = URL.createObjectURL(blob);
+      img = await loadImageElement(objectUrlToRevoke);
+    }
+
+    const width = img.naturalWidth || img.width;
+    const height = img.naturalHeight || img.height;
+    if (!width || !height) return 1;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return 1;
+
+    ctx.drawImage(img, 0, 0, width, height);
+    const data = ctx.getImageData(0, 0, width, height).data;
+
+    let top = height;
+    let bottom = -1;
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const idx = (y * width + x) * 4;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        const a = data[idx + 3];
+
+        const isEmpty = a === 0 || (r >= nearWhiteThreshold && g >= nearWhiteThreshold && b >= nearWhiteThreshold);
+        if (isEmpty) continue;
+
+        if (y < top) top = y;
+        if (y > bottom) bottom = y;
+      }
+    }
+
+    if (bottom < top) return 1;
+
+    const bboxHeight = bottom - top + 1;
+    const fillRatio = bboxHeight / height;
+    if (!Number.isFinite(fillRatio) || fillRatio <= 0) return 1;
+
+    const scale = clamp(targetFillRatio / fillRatio, 1, maxScale);
+    return scale;
+  } catch {
+    return 1;
+  } finally {
+    if (objectUrlToRevoke) URL.revokeObjectURL(objectUrlToRevoke);
+  }
+}
+
+function AutoScaledPreviewImage({
+  src,
+  alt,
+  className,
+  style,
+}: {
+  src: string;
+  alt: string;
+  className?: string;
+  style?: React.CSSProperties;
+}) {
+  const [scale, setScale] = useState(1);
+
+  useEffect(() => {
+    let cancelled = false;
+    setScale(1);
+    void (async () => {
+      const next = await computePreviewScaleFromImageSrc(src);
+      if (!cancelled) setScale(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      className={className}
+      style={{
+        transform: scale > 1 ? `scale(${scale})` : undefined,
+        transformOrigin: 'center',
+        ...style,
+      }}
+    />
+  );
 }
 
 function trimCanvasToContent(
@@ -970,8 +1089,11 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             `Style: ${styleLabel}.`,
             `View order: ${viewsForStyles.map((v) => viewLabel(v)).join(' -> ')}.`,
             'No collages; one view per image; keep the same product/design.',
+            style === '3d' ? THREE_D_NO_MANNEQUIN_PROMPT : null,
             WHITE_BACKGROUND_PROMPT,
-          ].join('\n');
+          ]
+            .filter(Boolean)
+            .join('\n');
 
           const response = await authFetch('/api/generate-views', {
             method: 'POST',
@@ -1739,11 +1861,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	                {hasEditedViews || hasSingleEditResult ? (
 	                  editedPrimaryImage ? (
 	                    <div className="col-span-2 w-full h-[320px] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center">
-	                      <img
-	                        src={editedPrimaryImage}
-	                        alt="Preview"
-	                        className="w-full h-full object-contain bg-white scale-[1.15]"
-	                      />
+	                      <AutoScaledPreviewImage src={editedPrimaryImage} alt="Preview" className="w-full h-full object-contain bg-white" />
 	                    </div>
 	                  ) : null
 	                ) : variants.length > 1 ? (
@@ -1766,10 +1884,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	                              key={`${variant.id}-${image.view}`}
 	                              className="w-full h-[260px] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center"
 	                            >
-	                              <img
+	                              <AutoScaledPreviewImage
 	                                src={image.src}
 	                                alt={viewLabel(image.view)}
-	                                className="w-full h-full object-contain bg-white scale-[1.15]"
+	                                className="w-full h-full object-contain bg-white"
 	                              />
 	                            </div>
 	                          ))}
@@ -1783,10 +1901,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	                      key={image.view}
 	                      className="w-full h-[260px] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center"
 	                    >
-	                      <img
+	                      <AutoScaledPreviewImage
 	                        src={image.src}
 	                        alt={viewLabel(image.view)}
-	                        className="w-full h-full object-contain bg-white scale-[1.15]"
+	                        className="w-full h-full object-contain bg-white"
 	                      />
 	                    </div>
 	                  ))
@@ -1922,10 +2040,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                               className="rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm"
                             >
                               <div className="w-full h-[260px] flex items-center justify-center bg-white overflow-hidden">
-                                <img
+                                <AutoScaledPreviewImage
                                   src={image.src}
                                   alt={viewLabel(image.view)}
-                                  className="w-full h-full object-contain bg-white scale-[1.15]"
+                                  className="w-full h-full object-contain bg-white"
                                 />
                               </div>
                               <div className="p-3 flex items-center justify-between">
@@ -1960,10 +2078,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                       className="rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm"
                     >
                       <div className="w-full h-[260px] flex items-center justify-center bg-white overflow-hidden">
-                        <img
+                        <AutoScaledPreviewImage
                           src={image.src}
                           alt={viewLabel(image.view)}
-                          className="w-full h-full object-contain bg-white scale-[1.15]"
+                          className="w-full h-full object-contain bg-white"
                         />
                       </div>
                       <div className="p-3 flex items-center justify-between">
