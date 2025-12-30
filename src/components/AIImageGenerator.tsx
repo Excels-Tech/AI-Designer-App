@@ -156,6 +156,9 @@ const WHITE_BACKGROUND_PROMPT =
 const THREE_D_NO_MANNEQUIN_PROMPT =
   'Product-only 3D render of the uniform/apparel. Uniform only, floating apparel / ghost mannequin style. No mannequin, no statue, no person, no human, no body, no character, no dummy, no stand.';
 
+const MODEL_NO_MANNEQUIN_PROMPT =
+  'Human model wearing the uniform. No mannequin, no statue, no dummy, no stand. Keep the same uniform design, colors, and patterns.';
+
 const readFileAsDataUrl = async (file: File) => {
   return await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -197,7 +200,7 @@ async function computePreviewScaleFromImageSrc(
     if (isDataUrl) {
       img = await loadImageElement(trimmed);
     } else {
-      const res = await fetch(trimmed);
+      const res = trimmed.startsWith('/api/') ? await authFetch(trimmed) : await fetch(trimmed);
       if (!res.ok) return 1;
       const blob = await res.blob();
       objectUrlToRevoke = URL.createObjectURL(blob);
@@ -878,6 +881,56 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const [openMenu, setOpenMenu] = useState<'model' | 'resolution' | 'style' | 'views' | 'framing' | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
+  type GenerationPlanItem = {
+    kind: 'style' | 'model';
+    style: ArtStyleKey;
+    styleLabel: string;
+    modelKey?: ModelStyleKey;
+    modelLabel?: string;
+    views: ViewKey[];
+  };
+
+  function getViewsForGeneration(selected: ViewKey[]): ViewKey[] {
+    // Business rule: only generate side views when user explicitly selects the standard 4 views.
+    const normalized = normalizeViews(selected);
+    const hasFourStandard = (['front', 'back', 'left', 'right'] as const).every((v) => normalized.includes(v));
+    return hasFourStandard ? (['front', 'back', 'left', 'right'] as ViewKey[]) : (['front', 'back'] as ViewKey[]);
+  }
+
+  function buildGenerationPlan({
+    selectedStyles: stylesInput,
+    selectedViews: viewsInput,
+    selectedModel,
+  }: {
+    selectedStyles: ArtStyleKey[];
+    selectedViews: ViewKey[];
+    selectedModel: ModelStyleKey | null;
+  }): GenerationPlanItem[] {
+    const styles = stylesInput.length ? stylesInput : (['realistic'] as ArtStyleKey[]);
+    const views = getViewsForGeneration(viewsInput);
+
+    const items: GenerationPlanItem[] = styles.map((style) => ({
+      kind: 'style',
+      style,
+      styleLabel: styleOptions.find((opt) => opt.id === style)?.label ?? style,
+      views,
+    }));
+
+    if (selectedModel) {
+      const modelOpt = modelOptions.find((opt) => opt.id === selectedModel);
+      items.push({
+        kind: 'model',
+        style: styles[0] ?? 'realistic',
+        styleLabel: styleOptions.find((opt) => opt.id === (styles[0] ?? 'realistic'))?.label ?? (styles[0] ?? 'realistic'),
+        modelKey: selectedModel,
+        modelLabel: modelOpt?.label ?? selectedModel,
+        views: ['front', 'back'],
+      });
+    }
+
+    return items;
+  }
+
   useEffect(() => {
     setUserId(getUserId());
   }, []);
@@ -1062,46 +1115,51 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         setEditedImageDataUrl(await ensureWhiteBackgroundPngDataUrl(payload.imageDataUrl));
         setStatusMessage('Image edited successfully.');
       } else {
-        // New generator behavior:
-        // - Always enforce at least front/back.
-        // - If multiple styles selected, generate one full output per style.
-        // - If multiple models selected and >= 4 views selected, split views across models (front/back preserved for first model).
-        // - Output count = styles × models (models defaults to "none").
-        const styles = selectedStyles.length ? selectedStyles : (['realistic'] as ArtStyleKey[]);
-        const viewsForStyles = normalizeViews(selectedViews);
         const modelKey = selectedModels.length ? selectedModels[0] : null;
         if (selectedModels.length > 1) toast('Model output supports one model; using the first selected.');
 
-        const totalRequests = styles.length + (modelKey ? 1 : 0);
-        let requestIndex = 0;
+        const plan = buildGenerationPlan({
+          selectedStyles: selectedStyles.length ? selectedStyles : (['realistic'] as ArtStyleKey[]),
+          selectedViews: normalizedViews,
+          selectedModel: modelKey,
+        });
 
+        let requestIndex = 0;
+        const totalRequests = plan.length;
         const nextVariants: GeneratedVariant[] = [];
         let emittedPrimary = false;
 
-        // 1) Style outputs generate without model.
-        for (const style of styles) {
+        for (const item of plan) {
           requestIndex += 1;
-          const styleLabel = styleOptions.find((opt) => opt.id === style)?.label ?? style;
-          setStatusMessage(`Generating ${styleLabel} (${requestIndex}/${totalRequests})...`);
 
-          const promptForViews = [
+          const groupLabel =
+            item.kind === 'model' ? `Model ${item.modelLabel ?? ''} (${item.styleLabel})`.trim() : item.styleLabel;
+          setStatusMessage(`Generating ${groupLabel} (${requestIndex}/${totalRequests})...`);
+
+          const baseLines = [
             trimmedPrompt,
-            `Style: ${styleLabel}.`,
-            `View order: ${viewsForStyles.map((v) => viewLabel(v)).join(' -> ')}.`,
+            `Style: ${item.styleLabel}.`,
+            `View order: ${item.views.map((v) => viewLabel(v)).join(' -> ')}.`,
             'No collages; one view per image; keep the same product/design.',
-            style === '3d' ? THREE_D_NO_MANNEQUIN_PROMPT : null,
-            WHITE_BACKGROUND_PROMPT,
-          ]
-            .filter(Boolean)
-            .join('\n');
+          ];
+
+          const extraLines: Array<string | null> = [];
+          if (item.kind === 'style' && item.style === '3d') extraLines.push(THREE_D_NO_MANNEQUIN_PROMPT);
+          if (item.kind === 'model') {
+            extraLines.push(MODEL_NO_MANNEQUIN_PROMPT);
+            extraLines.push(`Model: ${item.modelLabel ?? 'Model'} wearing the same uniform design.`);
+          }
+          extraLines.push(WHITE_BACKGROUND_PROMPT);
+
+          const promptForViews = [...baseLines, ...extraLines].filter(Boolean).join('\n');
 
           const response = await authFetch('/api/generate-views', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               prompt: promptForViews,
-              style,
-              views: viewsForStyles,
+              style: item.style,
+              views: item.views,
               resolution,
             }),
           });
@@ -1119,78 +1177,17 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
               src: await ensureTrimmedPngDataUrl(img.src),
             }))
           );
+
           const newVariant: GeneratedVariant = {
             id: crypto.randomUUID(),
-            styleLabel,
-            styleKey: style,
-            views: viewsForStyles,
+            styleLabel: item.styleLabel,
+            styleKey: item.style,
+            ...(item.kind === 'model' ? { modelLabel: item.modelLabel, modelKey: item.modelKey } : null),
+            views: item.views,
             composite: normalizedComposite,
             images: trimmedImages,
           };
-          nextVariants.push(newVariant);
-          setVariants((prev) => [...prev, newVariant]);
 
-          if (!emittedPrimary && normalizedComposite) {
-            emittedPrimary = true;
-            onGenerate?.(normalizedComposite);
-          }
-        }
-
-        // 2) If a model is selected, add one extra model-only output (forced Realistic + front/back).
-        if (modelKey) {
-          requestIndex += 1;
-          const modelOpt = modelOptions.find((opt) => opt.id === modelKey);
-          const modelLabel = modelOpt?.label ?? modelKey;
-          const modelHelper = modelOpt?.helper ?? '';
-          const modelViews: ViewKey[] = ['front', 'back'];
-          const modelStyle: ArtStyleKey = 'realistic';
-          const modelStyleLabel = styleOptions.find((opt) => opt.id === modelStyle)?.label ?? 'Realistic';
-
-          setStatusMessage(`Generating ${modelLabel} (${modelStyleLabel}) (${requestIndex}/${totalRequests})...`);
-
-          const promptWithModel = modelHelper ? appendPromptModifier(trimmedPrompt, modelHelper) : trimmedPrompt;
-          const promptForViews = [
-            promptWithModel,
-            `Style: ${modelStyleLabel}.`,
-            `View order: ${modelViews.map((v) => viewLabel(v)).join(' -> ')}.`,
-            'No collages; one view per image; keep the same product/design.',
-            WHITE_BACKGROUND_PROMPT,
-          ].join('\n');
-
-          const response = await authFetch('/api/generate-views', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              prompt: promptForViews,
-              style: modelStyle,
-              views: modelViews,
-              resolution,
-            }),
-          });
-
-          if (!response.ok) {
-            const payload = await response.json().catch(() => ({}));
-            throw new Error(payload.error || 'Generation failed.');
-          }
-
-          const payload: GenerateResponse = await response.json();
-          const normalizedComposite = await ensureWhiteBackgroundPngDataUrl(payload.composite);
-          const trimmedImages = await Promise.all(
-            (payload.images ?? []).map(async (img) => ({
-              ...img,
-              src: await ensureTrimmedPngDataUrl(img.src),
-            }))
-          );
-          const newVariant: GeneratedVariant = {
-            id: crypto.randomUUID(),
-            styleLabel: modelStyleLabel,
-            styleKey: modelStyle,
-            modelLabel,
-            modelKey,
-            views: modelViews,
-            composite: normalizedComposite,
-            images: trimmedImages,
-          };
           nextVariants.push(newVariant);
           setVariants((prev) => [...prev, newVariant]);
 
