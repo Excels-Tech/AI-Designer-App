@@ -124,7 +124,7 @@ export function PreviewPlayer({
       <div className={shellClassName}>
         <div className="w-full flex justify-center">
           <div
-            className={`inline-flex items-center justify-center rounded-xl overflow-hidden border border-slate-200 bg-white shadow-sm ${maxHeightClassName} max-w-full`}
+            className="inline-flex items-center justify-center rounded-xl overflow-hidden border border-slate-200 bg-white shadow-sm max-w-full"
             style={previewFrameStyle}
           >
             <div ref={containerRef} className="relative flex items-center justify-center">
@@ -248,7 +248,7 @@ export function PreviewPlayer({
       `}</style>
       <div className="w-full flex justify-center">
         <div
-          className={`inline-flex items-center justify-center rounded-xl overflow-hidden border border-slate-200 bg-white shadow-sm ${maxHeightClassName} max-w-full`}
+          className="inline-flex items-center justify-center rounded-xl overflow-hidden border border-slate-200 bg-white shadow-sm max-w-full"
           style={previewFrameStyle}
         >
           <div ref={containerRef} className="relative flex items-center justify-center">

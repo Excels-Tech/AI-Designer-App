@@ -495,7 +495,6 @@ export function VideoCreator({ designUrl: _designUrl }: VideoCreatorProps) {
   const previewFrameStyle = useMemo(() => {
     const base: CSSProperties = {
       maxWidth: maxPreviewWidthPx,
-      maxHeight: '60vh',
     };
     return base;
   }, []);
