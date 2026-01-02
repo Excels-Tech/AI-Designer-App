@@ -33,7 +33,9 @@ import os from 'node:os';
 import { getAssetInfo, saveUploadedAsset, startAssetCleanup } from './videoAssets';
 
 type StyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor' | 'modelMale' | 'modelFemale' | 'modelKid';
-type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'top';
+type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'closeUp' | 'top';
+type MannequinModelKey = 'male' | 'female';
+type UniformViewKey = 'front' | 'back' | 'left' | 'right';
 
 interface GenerateRequestBody {
   prompt?: string;
@@ -44,12 +46,66 @@ interface GenerateRequestBody {
   title?: string;
 }
 
+interface GenerateBaseRequestBody {
+  prompt?: string;
+  style?: StyleKey;
+  resolution?: number;
+  referenceImageBase64?: string;
+  referenceImageMimeType?: string;
+}
+
+interface GenerateViewsFromBaseRequestBody {
+  baseImageBase64?: string;
+  views?: ViewKey[];
+  style?: StyleKey;
+  resolution?: number;
+  prompt?: string;
+}
+
+interface GenerateUniformRequestBody {
+  prompt?: string;
+  resolution?: number;
+}
+
+interface ConvertStyleRequestBody {
+  images?: Array<{ view: ViewKey; imageBase64: string }>;
+  views?: ViewKey[];
+  // Backwards compatible (legacy two-view payload)
+  imageFrontBase64?: string;
+  imageBackBase64?: string;
+  styleKey?: string;
+}
+
+interface ConvertModelRequestBody {
+  images?: Array<{ view: ViewKey; imageBase64: string }>;
+  // Backwards compatible (legacy two-view payload)
+  imageFrontBase64?: string;
+  imageBackBase64?: string;
+  modelKey?: MannequinModelKey;
+  style?: string;
+  // Backwards compatible (older client)
+  sourceStyle?: string;
+}
+
 function sanitizeKey(v?: string) {
   return (v ?? '')
     .trim()
     .replace(/\r?\n/g, '')
     .replace(/^"(.*)"$/, '$1')
     .replace(/^'(.*)'$/, '$1');
+}
+
+function inlineDataFromAnyImageBase64(input: { base64: string; mimeType?: string }) {
+  const trimmed = (input.base64 || '').trim();
+  if (!trimmed) return null;
+
+  const dataUrlMatch = /^data:([^;]+);base64,(.+)$/i.exec(trimmed);
+  if (dataUrlMatch?.[1] && dataUrlMatch?.[2]) {
+    return { mimeType: String(dataUrlMatch[1]), data: String(dataUrlMatch[2]) };
+  }
+
+  const mimeType = (input.mimeType || '').trim() || 'image/png';
+  return { mimeType, data: trimmed };
 }
 
 const RAW_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
@@ -81,6 +137,7 @@ const viewLabels: Record<ViewKey, string> = {
   left: 'Left Side',
   right: 'Right Side',
   threeQuarter: '3/4 View',
+  closeUp: 'Close-up View',
   top: 'Top View',
 };
 
@@ -123,6 +180,14 @@ app.use('/api/realistic/render', jsonLarge);
 app.use('/api/image/edit', jsonLarge);
 app.use('/api/image/edit-views', jsonLarge);
 app.use('/api/sam2', jsonLarge);
+// These endpoints regularly receive base64-encoded images which can exceed the 5mb default.
+app.use('/api/generate-base', jsonLarge);
+app.use('/api/generate-views-from-base', jsonLarge);
+app.use('/api/convert-style', jsonLarge);
+app.use('/api/convert-model', jsonLarge);
+app.use('/api/uniform/generate', jsonLarge);
+app.use('/api/uniform/convert-style', jsonLarge);
+app.use('/api/uniform/convert-model', jsonLarge);
 app.use(jsonSmall);
 
 startAssetCleanup();
@@ -145,13 +210,47 @@ function mapGeminiError(err: any) {
   return 'Gemini request failed. Check server logs.';
 }
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+async function generateContentWithRetry<T>(
+  label: string,
+  fn: () => Promise<T>,
+  options?: { attempts?: number; baseDelayMs?: number }
+): Promise<T> {
+  const attempts = Math.max(1, Math.floor(options?.attempts ?? 2));
+  const baseDelayMs = Math.max(0, Math.floor(options?.baseDelayMs ?? 250));
+  let lastErr: any = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastErr = err;
+      const msg = String(err?.message || err);
+      const shouldRetry =
+        attempt < attempts &&
+        !msg.includes('API key not valid') &&
+        !msg.includes('PERMISSION_DENIED') &&
+        !msg.toLowerCase().includes('invalid_argument');
+
+      if (!shouldRetry) break;
+      console.warn(`[gemini] ${label} failed (attempt ${attempt}/${attempts}), retrying...`);
+      await sleep(baseDelayMs * attempt);
+    }
+  }
+
+  throw lastErr instanceof Error ? lastErr : new Error(`Gemini request failed for ${label}.`);
+}
+
 connectMongo().catch((err) => {
   console.error('Failed to connect to MongoDB', err);
   process.exit(1);
 });
 
 const allowedStyles: StyleKey[] = ['realistic', '3d', 'lineart', 'watercolor', 'modelMale', 'modelFemale', 'modelKid'];
-const allowedViews = new Set<ViewKey>(['front', 'back', 'left', 'right', 'threeQuarter', 'top']);
+const allowedViews = new Set<ViewKey>(['front', 'back', 'left', 'right', 'threeQuarter', 'closeUp', 'top']);
+const allowedBaseStyles = new Set<StyleKey>(['realistic', '3d', 'lineart', 'watercolor']);
+const allowedUniformViews = new Set<UniformViewKey>(['front', 'back', 'left', 'right']);
 
 const pngDataUrlRegex = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/i;
 const imageDataUrlRegex = /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/i;
@@ -180,6 +279,1009 @@ function assertEditDataUrlSize(value: string) {
   if (dataUrlSizeBytes(value) > MAX_EDIT_IMAGE_BYTES) {
     throw new Error('Image payload too large (max 8MB).');
   }
+}
+
+function base64SizeBytes(value: string) {
+  const trimmed = value.trim();
+  const base64 = trimmed.startsWith('data:') ? (trimmed.split(',')[1] || '') : trimmed;
+  return Math.floor((base64.length * 3) / 4);
+}
+
+function assertBase64Size(value: string) {
+  if (base64SizeBytes(value) > MAX_IMAGE_BYTES) {
+    throw new Error('Image payload too large (max 12MB).');
+  }
+}
+
+function normalizePngBase64(input: unknown) {
+  if (typeof input !== 'string') throw new Error('Image must be a base64 string.');
+  const trimmed = input.trim();
+  if (!trimmed) throw new Error('Image must be a base64 string.');
+  if (trimmed.startsWith('data:image/png;base64,')) {
+    const raw = trimmed.replace(/^data:image\/png;base64,/i, '');
+    if (!raw) throw new Error('Invalid PNG data URL.');
+    return raw;
+  }
+  return trimmed;
+}
+
+function pngBase64ToInlineData(pngBase64: string) {
+  const normalized = normalizePngBase64(pngBase64);
+  assertBase64Size(normalized);
+  return { mimeType: 'image/png', data: normalized };
+}
+
+async function normalizeGeminiOutputPngBase64(
+  imageBase64: string,
+  targetSize?: number,
+  options?: { background?: { r: number; g: number; b: number; alpha: number } }
+) {
+  const raw = Buffer.from(String(imageBase64 || ''), 'base64');
+  const background = options?.background ?? { r: 255, g: 255, b: 255, alpha: 1 };
+  const pipeline = sharp(raw).ensureAlpha();
+  const sized =
+    typeof targetSize === 'number' && Number.isFinite(targetSize) && targetSize > 0
+      ? pipeline.resize(targetSize, targetSize, { fit: 'contain', background, withoutEnlargement: true })
+      : pipeline;
+  const out = await sized.png().toBuffer();
+  return out.toString('base64');
+}
+
+const TRANSPARENT_BG = { r: 0, g: 0, b: 0, alpha: 0 };
+const WHITE_BG = { r: 255, g: 255, b: 255, alpha: 1 };
+const WHITE_BACKGROUND_PROMPT = [
+  'Background MUST be pure white (#FFFFFF), seamless and clean.',
+  'NO checkerboard, NO gray studio, NO wall, NO floor, NO scene.',
+  'NO frames, NO borders, NO boxes, NO mockups.',
+  'NO shadows, NO reflections, NO gradients, NO vignette.',
+].join(' ');
+
+const TRANSPARENT_CUTOUT_PROMPT = [
+  'Background MUST be TRANSPARENT (PNG with alpha).',
+  'Return a backgroundless cutout of the uniform only.',
+  'Do NOT render a checkerboard pattern (no baked transparency preview). Use true alpha transparency.',
+  'IMPORTANT: Do NOT include checkerboard, white studio, or gray background. Output must be a transparent PNG cutout.',
+  'NO wall, NO floor, NO studio environment.',
+  'NO shadows, NO reflections, NO gradients, NO vignette.',
+].join(' ');
+
+function wantsTransparentBackground() {
+  return false;
+}
+
+function promptRequestsBackground(promptRaw: unknown) {
+  const prompt = typeof promptRaw === 'string' ? promptRaw.toLowerCase() : '';
+  if (!prompt.trim()) return false;
+  const keywords = ['background', 'scene', 'field', 'studio', 'wall', 'environment'];
+  return keywords.some((k) => prompt.includes(k));
+}
+
+function shouldForceWhiteBackgroundFromPrompt(prompt: string) {
+  return !promptRequestsBackground(prompt);
+}
+
+async function hasMeaningfulTransparency(pngBase64: string, sampleSize = 64) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const { data } = await sharp(buf, { failOn: 'none' })
+    .ensureAlpha()
+    .resize(sampleSize, sampleSize, { fit: 'fill' })
+    .extractChannel(3)
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  let transparent = 0;
+  for (const a of data) if (a < 240) transparent += 1;
+  const total = data.length || 1;
+  return transparent / total >= 0.01;
+}
+
+async function sampleTransparentRatio(pngBase64: string, sampleSize = 64) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const { data } = await sharp(buf, { failOn: 'none' })
+    .ensureAlpha()
+    .resize(sampleSize, sampleSize, { fit: 'fill' })
+    .extractChannel(3)
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  let transparent = 0;
+  for (const a of data) if (a < 240) transparent += 1;
+  const total = data.length || 1;
+  return transparent / total;
+}
+
+async function alphaBoundingBox(pngBase64: string, alphaThreshold = 8) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const img = sharp(buf, { failOn: 'none' }).ensureAlpha();
+  const meta = await img.metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  if (!width || !height) throw new Error('Alpha bbox: missing dimensions.');
+
+  const { data } = await img.extractChannel(3).raw().toBuffer({ resolveWithObject: true });
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const a = data[y * width + x];
+      if (a > alphaThreshold) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0 || maxY < 0) return { left: 0, top: 0, width, height, imgWidth: width, imgHeight: height };
+  return { left: minX, top: minY, width: maxX - minX + 1, height: maxY - minY + 1, imgWidth: width, imgHeight: height };
+}
+
+async function applyAlphaFromReferencePngBase64(convertedPngBase64: string, referencePngBase64: string) {
+  const converted = Buffer.from(normalizePngBase64(convertedPngBase64), 'base64');
+  const reference = Buffer.from(normalizePngBase64(referencePngBase64), 'base64');
+
+  const meta = await sharp(converted, { failOn: 'none' }).metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  if (!width || !height) return normalizePngBase64(convertedPngBase64);
+
+  const alpha = await sharp(reference, { failOn: 'none' })
+    .ensureAlpha()
+    .extractChannel(3)
+    .resize(width, height, { fit: 'fill' })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const out = await sharp(converted, { failOn: 'none' })
+    .ensureAlpha()
+    .removeAlpha()
+    .joinChannel(alpha.data, { raw: { width, height, channels: 1 } })
+    .png()
+    .toBuffer();
+
+  return out.toString('base64');
+}
+
+async function tryMakeBackgroundTransparent(pngBase64: string) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const img = sharp(buf, { failOn: 'none' }).ensureAlpha();
+  const meta = await img.metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  if (!width || !height) return normalized;
+
+  const samplePx = Math.max(1, Math.floor(Math.min(width, height) * 0.06));
+  const corners = [
+    { left: 0, top: 0 },
+    { left: width - samplePx, top: 0 },
+    { left: 0, top: height - samplePx },
+    { left: width - samplePx, top: height - samplePx },
+  ];
+
+  const cornerMeans: Array<{ r: number; g: number; b: number }> = [];
+  for (const c of corners) {
+    const { data } = await sharp(buf, { failOn: 'none' })
+      .ensureAlpha()
+      .extract({ left: c.left, top: c.top, width: samplePx, height: samplePx })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    const count = Math.max(1, Math.floor(data.length / 4));
+    for (let i = 0; i < data.length; i += 4) {
+      r += data[i];
+      g += data[i + 1];
+      b += data[i + 2];
+    }
+    cornerMeans.push({ r: r / count, g: g / count, b: b / count });
+  }
+
+  const mean = cornerMeans.reduce(
+    (acc, c) => ({
+      r: acc.r + c.r / cornerMeans.length,
+      g: acc.g + c.g / cornerMeans.length,
+      b: acc.b + c.b / cornerMeans.length,
+    }),
+    { r: 0, g: 0, b: 0 }
+  );
+  const variance =
+    cornerMeans.reduce((acc, c) => {
+      const dr = c.r - mean.r;
+      const dg = c.g - mean.g;
+      const db = c.b - mean.b;
+      return acc + dr * dr + dg * dg + db * db;
+    }, 0) / cornerMeans.length;
+  if (variance > 250) return normalized;
+
+  const { data, info } = await sharp(buf, { failOn: 'none' }).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const out = Buffer.from(data);
+  let removed = 0;
+  const total = Math.max(1, info.width * info.height);
+  const thr = 38;
+
+  for (let i = 0; i < out.length; i += 4) {
+    const r = out[i];
+    const g = out[i + 1];
+    const b = out[i + 2];
+    const dr = r - mean.r;
+    const dg = g - mean.g;
+    const db = b - mean.b;
+    const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const isNeutral = max - min <= 24;
+    const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    if (isNeutral && dist <= thr && luma >= 120) {
+      out[i + 3] = 0;
+      removed += 1;
+    }
+  }
+
+  const removedRatio = removed / total;
+  if (removedRatio < 0.05 || removedRatio > 0.9) return normalized;
+
+  const png = await sharp(out, { raw: { width: info.width, height: info.height, channels: 4 } }).png().toBuffer();
+  return png.toString('base64');
+}
+
+function quantizeRgbKey(r: number, g: number, b: number, step = 16) {
+  const q = (v: number) => Math.max(0, Math.min(255, Math.round(v / step) * step));
+  return `${q(r)}_${q(g)}_${q(b)}`;
+}
+
+async function makeBackgroundTransparentByPalette(pngBase64: string) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const img = sharp(buf, { failOn: 'none' }).ensureAlpha();
+  const meta = await img.metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  if (!width || !height) return normalized;
+
+  const samplePx = Math.max(1, Math.floor(Math.min(width, height) * 0.08));
+  const corners = [
+    { left: 0, top: 0 },
+    { left: width - samplePx, top: 0 },
+    { left: 0, top: height - samplePx },
+    { left: width - samplePx, top: height - samplePx },
+  ];
+
+  const counts = new Map<string, number>();
+  const sums = new Map<string, { r: number; g: number; b: number; n: number }>();
+  for (const c of corners) {
+    const { data } = await sharp(buf, { failOn: 'none' })
+      .ensureAlpha()
+      .extract({ left: c.left, top: c.top, width: samplePx, height: samplePx })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const a = data[i + 3];
+      if (a < 200) continue;
+      const key = quantizeRgbKey(r, g, b, 16);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      const cur = sums.get(key) ?? { r: 0, g: 0, b: 0, n: 0 };
+      cur.r += r;
+      cur.g += g;
+      cur.b += b;
+      cur.n += 1;
+      sums.set(key, cur);
+    }
+  }
+
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const total = sorted.reduce((acc, [, n]) => acc + n, 0) || 1;
+  const top = sorted.slice(0, 3);
+  if (!top.length) return normalized;
+
+  const palette = top.map(([key, n]) => {
+    const s = sums.get(key)!;
+    return { r: s.r / s.n, g: s.g / s.n, b: s.b / s.n, w: n / total };
+  });
+  const coverage = palette.reduce((acc, c) => acc + c.w, 0);
+  if (coverage < 0.8) return normalized;
+
+  const lumaOf = (c: { r: number; g: number; b: number }) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+  const allNeutral = palette.every((c) => {
+    const max = Math.max(c.r, c.g, c.b);
+    const min = Math.min(c.r, c.g, c.b);
+    return max - min <= 18;
+  });
+  if (!allNeutral) return normalized;
+
+  const allBright = palette.every((c) => lumaOf(c) >= 150);
+  const allDark = palette.every((c) => lumaOf(c) <= 70);
+  if (!allBright && !allDark) return normalized;
+
+  const { data, info } = await sharp(buf, { failOn: 'none' }).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const out = Buffer.from(data);
+  let removed = 0;
+  const pxTotal = Math.max(1, info.width * info.height);
+
+  const distTo = (c: { r: number; g: number; b: number }, r: number, g: number, b: number) => {
+    const dr = r - c.r;
+    const dg = g - c.g;
+    const db = b - c.b;
+    return Math.sqrt(dr * dr + dg * dg + db * db);
+  };
+
+  for (let i = 0; i < out.length; i += 4) {
+    const r = out[i];
+    const g = out[i + 1];
+    const b = out[i + 2];
+    const a = out[i + 3];
+    if (a < 10) continue;
+
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const isNeutral = max - min <= 18;
+    if (!isNeutral) continue;
+
+    const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let best = Infinity;
+    for (const c of palette) best = Math.min(best, distTo(c, r, g, b));
+    if (allBright) {
+      // Allow a bigger threshold for neutral bright pixels to also remove light shadows.
+      const thr = luma >= 200 ? 42 : luma >= 170 ? 34 : 26;
+      if (best <= thr && luma >= 160) {
+        out[i + 3] = 0;
+        removed += 1;
+      }
+      continue;
+    }
+
+    // Dark/black matte or frame case: remove pixels close to corner black.
+    // Use a conservative threshold and only for darker pixels to avoid nuking the subject.
+    const thrDark = luma <= 35 ? 40 : luma <= 60 ? 28 : 18;
+    if (best <= thrDark && luma <= 90) {
+      out[i + 3] = 0;
+      removed += 1;
+    }
+  }
+
+  const removedRatio = removed / pxTotal;
+  if (removedRatio < 0.03 || removedRatio > 0.98) return normalized;
+  const png = await sharp(out, { raw: { width: info.width, height: info.height, channels: 4 } }).png().toBuffer();
+  return png.toString('base64');
+}
+
+async function ensureBackgroundlessPngBase64(pngBase64: string) {
+  const normalized = normalizePngBase64(pngBase64);
+  // Only keep as-is if there is a large transparent region (not just anti-aliased edges).
+  const alphaRatio = await sampleTransparentRatio(normalized).catch(() => 0);
+  if (alphaRatio >= 0.15) return normalized;
+
+  // Try single-color background keying first.
+  const keyed = await tryMakeBackgroundTransparent(normalized);
+  if ((await sampleTransparentRatio(keyed).catch(() => 0)) >= 0.15) return keyed;
+
+  // Try checkerboard/multi-tone neutral palette keying.
+  const pal = await makeBackgroundTransparentByPalette(normalized);
+  if ((await sampleTransparentRatio(pal).catch(() => 0)) >= 0.15) return pal;
+
+  return normalized;
+}
+
+async function ensureBackgroundlessPngBase64Strict(pngBase64: string) {
+  let out = await ensureBackgroundlessPngBase64(pngBase64);
+  const alphaRatio = await sampleTransparentRatio(out).catch(() => 0);
+  if (alphaRatio < 0.15) {
+    out = await ensureBackgroundlessPngBase64(out);
+  }
+  const alphaRatio2 = await sampleTransparentRatio(out).catch(() => 0);
+  if (alphaRatio2 < 0.15) {
+    out = await floodFillBackgroundCutout(out).catch(() => out);
+  }
+  return out;
+}
+
+async function ensureSolidWhiteBackgroundPngBase64(pngBase64: string) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const out = await sharp(buf, { failOn: 'none' }).ensureAlpha().flatten({ background: WHITE_BG }).png().toBuffer();
+  return out.toString('base64');
+}
+
+async function ensureSolidWhiteBackgroundStrict(pngBase64: string) {
+  // If Gemini returns a baked checkerboard/boxes, attempt a background mask (flood fill),
+  // then flatten to pure white so the user never sees transparency boxes.
+  let out = await ensureSolidWhiteBackgroundPngBase64(pngBase64);
+
+  const alphaRatio = await sampleTransparentRatio(out).catch(() => 0);
+  // If still partially transparent (rare) or if background looks patterned, fix using flood fill cutout.
+  if (alphaRatio > 0.01) {
+    out = await ensureSolidWhiteBackgroundPngBase64(out);
+  }
+
+  // Detect checkerboard-like border by looking for multiple neutral tones along the border.
+  try {
+    const buf = Buffer.from(normalizePngBase64(out), 'base64');
+    const { data, info } = await sharp(buf, { failOn: 'none' })
+      .resize(128, 128, { fit: 'fill' })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const w = info.width;
+    const h = info.height;
+    const tones = new Set<number>();
+    const add = (v: number) => tones.add(Math.round(v / 16) * 16);
+    for (let x = 0; x < w; x += 1) {
+      add(data[x]);
+      add(data[(h - 1) * w + x]);
+    }
+    for (let y = 0; y < h; y += 1) {
+      add(data[y * w]);
+      add(data[y * w + (w - 1)]);
+    }
+    if (tones.size >= 4) {
+      const cut = await floodFillBackgroundCutout(out);
+      out = await ensureSolidWhiteBackgroundPngBase64(cut);
+    }
+  } catch {
+    // ignore detection errors
+  }
+
+  return out;
+}
+
+async function scoreCroppingRiskOnWhiteBackground(pngBase64: string) {
+  const buf = Buffer.from(normalizePngBase64(pngBase64), 'base64');
+  const { data, info } = await sharp(buf, { failOn: 'none' })
+    .ensureAlpha()
+    .flatten({ background: WHITE_BG })
+    .resize(96, 96, { fit: 'fill' })
+    .grayscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const w = info.width;
+  const h = info.height;
+  const isInk = (v: number) => v < 245;
+  let edgeInk = 0;
+  for (let x = 0; x < w; x += 1) {
+    if (isInk(data[x])) edgeInk += 1;
+    if (isInk(data[(h - 1) * w + x])) edgeInk += 1;
+  }
+  for (let y = 0; y < h; y += 1) {
+    if (isInk(data[y * w])) edgeInk += 1;
+    if (isInk(data[y * w + (w - 1)])) edgeInk += 1;
+  }
+  return edgeInk;
+}
+
+async function floodFillBackgroundCutout(pngBase64: string, sampleSize = 256) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+
+  const meta = await sharp(buf, { failOn: 'none' }).metadata();
+  const origW = meta.width ?? 0;
+  const origH = meta.height ?? 0;
+  if (!origW || !origH) return normalized;
+
+  const { data, info } = await sharp(buf, { failOn: 'none' })
+    .ensureAlpha()
+    .resize(sampleSize, sampleSize, { fit: 'fill' })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const width = info.width;
+  const height = info.height;
+  if (!width || !height) return normalized;
+
+  const idx = (x: number, y: number) => (y * width + x) * 4;
+  const isNeutral = (r: number, g: number, b: number) => Math.max(r, g, b) - Math.min(r, g, b) <= 48;
+  const luma = (r: number, g: number, b: number) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  const dist = (c: { r: number; g: number; b: number }, r: number, g: number, b: number) => {
+    const dr = r - c.r;
+    const dg = g - c.g;
+    const db = b - c.b;
+    return Math.sqrt(dr * dr + dg * dg + db * db);
+  };
+
+  // Build a small palette from the border (handles checkerboards and studio mats).
+  const counts = new Map<string, number>();
+  const sums = new Map<string, { r: number; g: number; b: number; n: number }>();
+  const add = (r: number, g: number, b: number) => {
+    const key = quantizeRgbKey(r, g, b, 16);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    const cur = sums.get(key) ?? { r: 0, g: 0, b: 0, n: 0 };
+    cur.r += r;
+    cur.g += g;
+    cur.b += b;
+    cur.n += 1;
+    sums.set(key, cur);
+  };
+
+  const addBorderPixel = (x: number, y: number) => {
+    const o = idx(x, y);
+    const a = data[o + 3];
+    if (a < 200) return;
+    const r = data[o];
+    const g = data[o + 1];
+    const b = data[o + 2];
+    if (!isNeutral(r, g, b)) return;
+    add(r, g, b);
+  };
+
+  for (let x = 0; x < width; x += 1) {
+    addBorderPixel(x, 0);
+    addBorderPixel(x, height - 1);
+  }
+  for (let y = 0; y < height; y += 1) {
+    addBorderPixel(0, y);
+    addBorderPixel(width - 1, y);
+  }
+
+  const palette = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([k]) => {
+      const s = sums.get(k)!;
+      return { r: s.r / s.n, g: s.g / s.n, b: s.b / s.n };
+    });
+  if (!palette.length) return normalized;
+
+  // Decide whether this is mostly bright or mostly dark background.
+  const paletteLuma = palette.map((c) => luma(c.r, c.g, c.b));
+  const isBrightBg = paletteLuma.reduce((acc, v) => acc + v, 0) / paletteLuma.length >= 140;
+  const maxDist = isBrightBg ? 78 : 60;
+
+  const canBeBackground = (x: number, y: number) => {
+    const o = idx(x, y);
+    const a = data[o + 3];
+    if (a < 10) return true;
+    const r = data[o];
+    const g = data[o + 1];
+    const b = data[o + 2];
+    if (!isNeutral(r, g, b)) return false;
+    const lum = luma(r, g, b);
+    if (isBrightBg) {
+      if (lum < 110) return false;
+    } else {
+      if (lum > 120) return false;
+    }
+    let best = Infinity;
+    for (const c of palette) best = Math.min(best, dist(c, r, g, b));
+    return best <= maxDist;
+  };
+
+  const visited = new Uint8Array(width * height);
+  const bg = new Uint8Array(width * height);
+  const qx = new Int32Array(width * height);
+  const qy = new Int32Array(width * height);
+  let qh = 0;
+  let qt = 0;
+
+  const enqueue = (x: number, y: number) => {
+    const i = y * width + x;
+    if (visited[i]) return;
+    visited[i] = 1;
+    if (!canBeBackground(x, y)) return;
+    bg[i] = 1;
+    qx[qt] = x;
+    qy[qt] = y;
+    qt += 1;
+  };
+
+  for (let x = 0; x < width; x += 1) {
+    enqueue(x, 0);
+    enqueue(x, height - 1);
+  }
+  for (let y = 0; y < height; y += 1) {
+    enqueue(0, y);
+    enqueue(width - 1, y);
+  }
+
+  while (qh < qt) {
+    const x = qx[qh];
+    const y = qy[qh];
+    qh += 1;
+    if (x > 0) enqueue(x - 1, y);
+    if (x + 1 < width) enqueue(x + 1, y);
+    if (y > 0) enqueue(x, y - 1);
+    if (y + 1 < height) enqueue(x, y + 1);
+  }
+
+  const maskSmall = Buffer.alloc(width * height);
+  for (let i = 0; i < maskSmall.length; i += 1) {
+    maskSmall[i] = bg[i] ? 0 : 255;
+  }
+
+  const maskResized = await sharp(maskSmall, { raw: { width, height, channels: 1 } })
+    .resize(origW, origH, { fit: 'fill' })
+    .blur(0.6)
+    .threshold(128)
+    .raw()
+    .toBuffer();
+
+  const out = await sharp(buf, { failOn: 'none' })
+    .ensureAlpha()
+    .removeAlpha()
+    .joinChannel(maskResized, { raw: { width: origW, height: origH, channels: 1 } })
+    .png()
+    .toBuffer();
+  return out.toString('base64');
+}
+
+async function getPngDimensions(pngBase64: string) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const meta = await sharp(buf, { failOn: 'none' }).metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  if (!width || !height) throw new Error('Image is missing dimensions.');
+  return { width, height };
+}
+
+async function resizeToMatch(
+  pngBase64: string,
+  target: { width: number; height: number },
+  background: { r: number; g: number; b: number; alpha: number }
+) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const out = await sharp(buf, { failOn: 'none' })
+    .ensureAlpha()
+    .resize(target.width, target.height, { fit: 'contain', background, withoutEnlargement: true })
+    .png()
+    .toBuffer();
+  return out.toString('base64');
+}
+
+async function cropLineArtToInkBoundingBox(pngBase64: string, margin = 16) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const img = sharp(buf, { failOn: 'none' }).ensureAlpha().flatten({ background: { r: 255, g: 255, b: 255, alpha: 1 } });
+  const meta = await img.metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  if (!width || !height) return normalized;
+
+  const { data } = await img.grayscale().raw().toBuffer({ resolveWithObject: true });
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const v = data[y * width + x];
+      // ink stroke threshold (black-ish)
+      if (v <= 220) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0 || maxY < 0) return normalized;
+
+  const left = Math.max(0, minX - margin);
+  const top = Math.max(0, minY - margin);
+  const right = Math.min(width - 1, maxX + margin);
+  const bottom = Math.min(height - 1, maxY + margin);
+  const w = Math.max(1, right - left + 1);
+  const h = Math.max(1, bottom - top + 1);
+
+  const cropped = await sharp(buf, { failOn: 'none' }).extract({ left, top, width: w, height: h }).png().toBuffer();
+  return cropped.toString('base64');
+}
+
+async function stripLineArtBorderLines(pngBase64: string, maxBorder = 18) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const img = sharp(buf, { failOn: 'none' }).ensureAlpha().flatten({ background: { r: 255, g: 255, b: 255, alpha: 1 } });
+  const meta = await img.metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  if (!width || !height) return normalized;
+
+  const { data } = await img.grayscale().raw().toBuffer({ resolveWithObject: true });
+  const out = Buffer.from(data);
+  // Be a bit more tolerant than pure black to catch gray-ish frame lines.
+  const darkThreshold = 90;
+  const rowDarkRatio = (y: number) => {
+    let dark = 0;
+    for (let x = 0; x < width; x += 1) if (out[y * width + x] <= darkThreshold) dark += 1;
+    return dark / width;
+  };
+  const colDarkRatio = (x: number) => {
+    let dark = 0;
+    for (let y = 0; y < height; y += 1) if (out[y * width + x] <= darkThreshold) dark += 1;
+    return dark / height;
+  };
+
+  const whitenRow = (y: number) => {
+    for (let x = 0; x < width; x += 1) out[y * width + x] = 255;
+  };
+  const whitenCol = (x: number) => {
+    for (let y = 0; y < height; y += 1) out[y * width + x] = 255;
+  };
+
+  for (let i = 0; i < Math.min(maxBorder, height); i += 1) {
+    if (rowDarkRatio(i) > 0.6) whitenRow(i);
+    if (rowDarkRatio(height - 1 - i) > 0.6) whitenRow(height - 1 - i);
+  }
+  for (let i = 0; i < Math.min(maxBorder, width); i += 1) {
+    if (colDarkRatio(i) > 0.6) whitenCol(i);
+    if (colDarkRatio(width - 1 - i) > 0.6) whitenCol(width - 1 - i);
+  }
+
+  const png = await sharp(out, { raw: { width, height, channels: 1 } }).png().toBuffer();
+  return png.toString('base64');
+}
+
+async function stripLineArtHorizontalRules(pngBase64: string) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const img = sharp(buf, { failOn: 'none' }).ensureAlpha().flatten({ background: { r: 255, g: 255, b: 255, alpha: 1 } });
+  const meta = await img.metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  if (!width || !height) return normalized;
+
+  const { data } = await img.grayscale().raw().toBuffer({ resolveWithObject: true });
+  const out = Buffer.from(data);
+
+  const darkThreshold = 90;
+  const rowDarkRatio = (y: number) => {
+    let dark = 0;
+    for (let x = 0; x < width; x += 1) if (out[y * width + x] <= darkThreshold) dark += 1;
+    return dark / width;
+  };
+  const whitenRow = (y: number) => {
+    for (let x = 0; x < width; x += 1) out[y * width + x] = 255;
+  };
+
+  const topBand = Math.floor(height * 0.22);
+  const bottomStart = Math.floor(height * 0.78);
+
+  const candidate = (y: number) => rowDarkRatio(y) > 0.75;
+  const segments: Array<{ start: number; end: number }> = [];
+  let y = 0;
+  while (y < height) {
+    if (!candidate(y)) {
+      y += 1;
+      continue;
+    }
+    let start = y;
+    while (y + 1 < height && candidate(y + 1)) y += 1;
+    let end = y;
+    segments.push({ start, end });
+    y += 1;
+  }
+
+  for (const seg of segments) {
+    const mid = (seg.start + seg.end) / 2;
+    const nearTop = mid <= topBand;
+    const nearBottom = mid >= bottomStart;
+    if (!nearTop && !nearBottom) continue;
+    const pad = 2;
+    const s = Math.max(0, seg.start - pad);
+    const e = Math.min(height - 1, seg.end + pad);
+    for (let yy = s; yy <= e; yy += 1) whitenRow(yy);
+  }
+
+  const png = await sharp(out, { raw: { width, height, channels: 1 } }).png().toBuffer();
+  return png.toString('base64');
+}
+
+async function stripLineArtFullWidthRulesOutsideInk(pngBase64: string) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const img = sharp(buf, { failOn: 'none' }).ensureAlpha().flatten({ background: { r: 255, g: 255, b: 255, alpha: 1 } });
+  const meta = await img.metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  if (!width || !height) return normalized;
+
+  const { data } = await img.grayscale().raw().toBuffer({ resolveWithObject: true });
+  const out = Buffer.from(data);
+
+  const bbox = await computeInkBoundingBox(normalized, 220);
+  const topLimit = Math.max(0, bbox.top - 12);
+  const bottomLimit = Math.min(height - 1, bbox.top + bbox.height + 12);
+
+  const darkThreshold = 90;
+  const rowDarkRatio = (y: number) => {
+    let dark = 0;
+    for (let x = 0; x < width; x += 1) if (out[y * width + x] <= darkThreshold) dark += 1;
+    return dark / width;
+  };
+  const whitenRow = (y: number) => {
+    for (let x = 0; x < width; x += 1) out[y * width + x] = 255;
+  };
+
+  for (let y = 0; y < height; y += 1) {
+    if (rowDarkRatio(y) < 0.85) continue;
+    if (y >= topLimit && y <= bottomLimit) continue;
+    for (let yy = Math.max(0, y - 2); yy <= Math.min(height - 1, y + 2); yy += 1) {
+      if (rowDarkRatio(yy) >= 0.7) whitenRow(yy);
+    }
+  }
+
+  const png = await sharp(out, { raw: { width, height, channels: 1 } }).png().toBuffer();
+  return png.toString('base64');
+}
+
+async function computeInkBoundingBox(pngBase64: string, inkThreshold = 220) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const img = sharp(buf, { failOn: 'none' }).ensureAlpha().flatten({ background: { r: 255, g: 255, b: 255, alpha: 1 } });
+  const meta = await img.metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  if (!width || !height) throw new Error('Line art bbox: missing dimensions.');
+  const { data } = await img.grayscale().raw().toBuffer({ resolveWithObject: true });
+
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const v = data[y * width + x];
+      if (v <= inkThreshold) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (maxX < 0 || maxY < 0) {
+    return { left: 0, top: 0, width, height };
+  }
+
+  const left = Math.max(0, minX);
+  const top = Math.max(0, minY);
+  const right = Math.min(width - 1, maxX);
+  const bottom = Math.min(height - 1, maxY);
+  return { left, top, width: Math.max(1, right - left + 1), height: Math.max(1, bottom - top + 1) };
+}
+
+async function computeNonWhiteBoundingBox(pngBase64: string, nonWhiteThreshold = 245) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const img = sharp(buf, { failOn: 'none' }).ensureAlpha().flatten({ background: { r: 255, g: 255, b: 255, alpha: 1 } });
+  const meta = await img.metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  if (!width || !height) throw new Error('Content bbox: missing dimensions.');
+
+  const { data } = await img.grayscale().raw().toBuffer({ resolveWithObject: true });
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const v = data[y * width + x];
+      if (v < nonWhiteThreshold) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (maxX < 0 || maxY < 0) {
+    return { left: 0, top: 0, width, height };
+  }
+
+  const margin = Math.max(6, Math.floor(Math.min(width, height) * 0.02));
+  const left = Math.max(0, minX - margin);
+  const top = Math.max(0, minY - margin);
+  const right = Math.min(width - 1, maxX + margin);
+  const bottom = Math.min(height - 1, maxY + margin);
+  return { left, top, width: Math.max(1, right - left + 1), height: Math.max(1, bottom - top + 1) };
+}
+
+async function normalizeLineArtToTargetSize(
+  pngBase64: string,
+  target: { width: number; height: number },
+  referenceBox?: { width: number; height: number }
+) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const meta = await sharp(buf, { failOn: 'none' }).metadata();
+  const srcW = meta.width ?? 0;
+  const srcH = meta.height ?? 0;
+  if (!srcW || !srcH) throw new Error('Line art normalize: missing dimensions.');
+
+  // Remove border/frames before bbox analysis.
+  let cleaned = await stripLineArtBorderLines(normalized, 18);
+  cleaned = await stripLineArtHorizontalRules(cleaned);
+  const bbox = await computeInkBoundingBox(cleaned, 220);
+
+  // Target occupancy to keep front/back consistent.
+  // If a reference content box is provided (from the original colored render), match that size.
+  const desiredH = Math.max(1, Math.round((referenceBox?.height ?? target.height * 0.78) as number));
+  const desiredW = Math.max(1, Math.round((referenceBox?.width ?? target.width * 0.78) as number));
+  const scaleH = desiredH / Math.max(1, bbox.height);
+  const scaleW = desiredW / Math.max(1, bbox.width);
+  let scale = Math.min(scaleH, scaleW);
+  scale = Math.max(0.5, Math.min(3.0, scale));
+
+  const scaledW = Math.max(1, Math.round(srcW * scale));
+  const scaledH = Math.max(1, Math.round(srcH * scale));
+  const scaled = await sharp(Buffer.from(cleaned, 'base64'), { failOn: 'none' })
+    .resize(scaledW, scaledH, { fit: 'fill' })
+    .png()
+    .toBuffer();
+
+  // Center-crop if oversized; otherwise pad to target.
+  if (scaledW >= target.width && scaledH >= target.height) {
+    const left = Math.max(0, Math.floor((scaledW - target.width) / 2));
+    const top = Math.max(0, Math.floor((scaledH - target.height) / 2));
+    const cropped = await sharp(scaled, { failOn: 'none' })
+      .extract({ left, top, width: target.width, height: target.height })
+      .png()
+      .toBuffer();
+    let out = cropped.toString('base64');
+    out = await stripLineArtHorizontalRules(out);
+    out = await stripLineArtFullWidthRulesOutsideInk(out);
+    return out;
+  }
+
+  const background = { r: 255, g: 255, b: 255, alpha: 1 };
+  const left = Math.max(0, Math.floor((target.width - scaledW) / 2));
+  const top = Math.max(0, Math.floor((target.height - scaledH) / 2));
+  const padded = await sharp({
+    create: { width: target.width, height: target.height, channels: 4, background },
+  })
+    .composite([{ input: scaled, left, top }])
+    .png()
+    .toBuffer();
+  let out = padded.toString('base64');
+  out = await stripLineArtHorizontalRules(out);
+  out = await stripLineArtFullWidthRulesOutsideInk(out);
+  return out;
+}
+
+async function repairAlphaSpeckles(pngBase64: string) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const { data, info } = await sharp(buf, { failOn: 'none' }).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const width = info.width;
+  const height = info.height;
+  if (!width || !height) return normalized;
+
+  const out = Buffer.from(data);
+  const idx = (x: number, y: number) => (y * width + x) * 4;
+  let changed = 0;
+
+  for (let y = 2; y < height - 2; y += 1) {
+    for (let x = 2; x < width - 2; x += 1) {
+      const a = out[idx(x, y) + 3];
+      if (a >= 120) continue;
+      let opaqueNeighbors = 0;
+      for (let ky = -2; ky <= 2; ky += 1) {
+        for (let kx = -2; kx <= 2; kx += 1) {
+          if (kx === 0 && ky === 0) continue;
+          const na = out[idx(x + kx, y + ky) + 3];
+          if (na >= 230) opaqueNeighbors += 1;
+        }
+      }
+      if (opaqueNeighbors >= 16) {
+        out[idx(x, y) + 3] = 255;
+        changed += 1;
+      }
+    }
+  }
+
+  if (!changed) return normalized;
+  const png = await sharp(out, { raw: { width, height, channels: 4 } }).png().toBuffer();
+  return png.toString('base64');
 }
 
 async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 15000) {
@@ -242,8 +1344,9 @@ function validateDesignPayload(body: any) {
   if (new Set(views).size !== views.length) return { ok: false, error: 'Views must be unique.' };
   if (!views.every((v) => allowedViews.has(v))) return { ok: false, error: 'Invalid view value.' };
   if (views.length > 6) return { ok: false, error: 'Maximum 6 views allowed.' };
-  const normalizedComposite = normalizePngInput(composite);
-  if (!normalizedComposite) return { ok: false, error: 'Composite must be a PNG data URL.' };
+
+  const normalizedComposite = composite ? normalizePngInput(composite) : null;
+  if (composite && !normalizedComposite) return { ok: false, error: 'Composite must be a PNG data URL.' };
   if (images.length !== views.length) return { ok: false, error: 'Images must match number of views.' };
 
   const normalizedImages = images.map((img: any) => {
@@ -1315,6 +2418,12 @@ const viewSpecificInstructions: Record<ViewKey, string> = {
     "Camera sees the front and the subject's RIGHT side at the same time.",
     'The subject is turned slightly LEFT (front points slightly LEFT).',
   ].join(' '),
+  closeUp: [
+    'STRICT: Close-up view of the same product/design.',
+    'Camera is closer and zoomed in to show design details (logos, patterns, texture) clearly.',
+    'Keep the product centered; do NOT add frames, boxes, borders, or background patterns.',
+    'Do not crop important design elements; keep main chest/logo area fully visible.',
+  ].join(' '),
   top: 'STRICT: Top-down overhead view. Camera directly above. Show the top view only.',
 };
 
@@ -1322,14 +2431,808 @@ function buildViewPrompt(basePrompt: string, style: StyleKey, view: ViewKey, wid
   return [
     `Single-frame image of the SAME product/design viewed from the ${viewLabels[view]} angle.`,
     `View requirement: ${viewSpecificInstructions[view]}`,
-    `No grids, no collages, no multi-panel layouts. One centered subject on a neutral studio background.`,
+    `No grids, no collages, no multi-panel layouts. One centered subject.`,
     `Ensure the entire product is fully visible in frame with comfortable margins; no parts cut off by the image edges.`,
     `Keep lighting, materials, and colors identical to every other view.`,
     `Do not mirror or flip the subject. Do not swap left/right. Each requested view must be distinct and match its angle.`,
+    WHITE_BACKGROUND_PROMPT,
     `Style: ${styleModifiers[style]}.`,
     `Base prompt: ${basePrompt}`,
     `Target output size close to ${width}x${height}px (square crop friendly).`,
   ].join(' ');
+}
+
+function buildBasePrompt(prompt: string, style: StyleKey, resolution: number) {
+  const forceWhite = shouldForceWhiteBackgroundFromPrompt(prompt);
+  return [
+    'Generate ONE base design image for a shirt/uniform.',
+    'STRICT: Front view (head-on).',
+    'STRICT: Do not add socks, shoes, mannequins, models, people, faces, hands, or body parts unless the user prompt explicitly asks for them.',
+    'No grids, no collages, no multi-panel layouts.',
+    'Keep the entire product visible with comfortable margins (no cropping).',
+    forceWhite ? WHITE_BACKGROUND_PROMPT : null,
+    `Style: ${styleModifiers[style]}.`,
+    `User prompt: ${prompt}`,
+    `Target output size close to ${resolution}x${resolution}px (square).`,
+  ].join(' ');
+}
+
+function buildViewFromBasePrompt(
+  style: StyleKey,
+  view: ViewKey,
+  width: number,
+  height: number,
+  userPrompt?: string,
+  extraInstruction?: string,
+) {
+  const sideStrict =
+    view === 'left'
+      ? 'Generate the LEFT SIDE view (camera positioned on the left side of the outfit). Maintain exact same design. Do not mirror or change design. Only change camera angle.'
+      : view === 'right'
+        ? 'Generate the RIGHT SIDE view (camera positioned on the right side of the outfit). Maintain exact same design. Do not mirror or reuse left side. Only change camera angle. Ensure it is clearly the right side view.'
+        : null;
+  const forceWhite = shouldForceWhiteBackgroundFromPrompt(userPrompt || '');
+
+  return [
+    `Create a single image of the SAME design from the ${viewLabels[view]} angle.`,
+    `View requirement: ${viewSpecificInstructions[view]}`,
+    sideStrict,
+    extraInstruction?.trim() ? `IMPORTANT: ${extraInstruction.trim()}` : null,
+    'Use this exact design, do not change colors, patterns, or branding. Only change camera angle.',
+    'STRICT: Do not add socks, shoes, mannequins, models, people, faces, hands, or body parts unless the user prompt explicitly asks for them.',
+    userPrompt?.trim()
+      ? `User prompt (secondary reference): ${userPrompt.trim()}. The attached base image is the ground-truth design reference.`
+      : null,
+    forceWhite ? WHITE_BACKGROUND_PROMPT : null,
+    'No grids, no collages, no multi-panel layouts. One centered subject.',
+    'Do not mirror or flip the subject. Do not swap left/right.',
+    `Style: ${styleModifiers[style]}.`,
+    `Target output size close to ${width}x${height}px (square crop friendly).`,
+  ].join(' ');
+}
+
+function buildStyleConversionPrompt(style: StyleKey) {
+  if (style === 'lineart') {
+    // NOTE: This prompt is intentionally strict and should remain stable, since downstream validation relies on it.
+    return (
+      'Convert to CLEAN outline-only fashion flat technical drawing (tech pack / apparel CAD). ' +
+      'White background ONLY (pure #FFFFFF). Thin solid black continuous vector outline strokes ONLY. ' +
+      'DO NOT fill any areas black. DO NOT produce silhouettes or stencils. Keep shirt and shorts interior WHITE (empty). ' +
+      'NO shading, NO gradients, NO textures, NO folds, NO shadows. NO sketching, NO hatching, NO stipple, NO halftone. ' +
+      'NO dotted/broken lines. NO dashed lines. NO stitching marks. NO perforations. NO paper grain. ' +
+      'NO frames, NO borders, NO boxes, NO mockups, NO devices, NO rounded-rectangle panels. ' +
+      'Keep the same design details and proportions, but represent them as clean technical outlines only.'
+    );
+  }
+
+  return [
+    'Convert style only, keep design identical.',
+    'Do not change colors, patterns, logos, text, placement, or branding.',
+    `Target style: ${styleModifiers[style]}.`,
+    'Keep composition and camera angle the same as the input image.',
+  ].join(' ');
+}
+
+function buildMannequinConversionPrompt(modelKey: MannequinModelKey) {
+  return [
+    `Generate a high-resolution PHOTOREALISTIC studio photograph of a real ${modelKey} human athlete wearing the exact same soccer uniform from the reference image.`,
+    'STRICT: REAL human athlete (NOT mannequin, NOT doll, NOT statue, NOT dummy).',
+    'STRICT: REAL CAMERA PHOTO. Professional ecommerce studio photography. Natural skin texture and realistic facial details.',
+    'STRICT CAMERA FRAMING: FULL BODY including head and face. Head-to-toe. Wide full-body fashion photo. Centered subject. Leave margin above head and below feet. Do NOT crop the head/face.',
+    'STRICT: NOT 3D render. NOT CGI. NOT illustration. NOT stylized. NOT line art. NOT watercolor.',
+    'STRICT: Preserve the exact uniform design and all details: colors, patterns, logos, text, placement, numbering, and branding.',
+    'STRICT: Keep the same camera angle and view as the input image (front stays front; back stays back; left stays left; right stays right).',
+    'STRICT: Do not invent new design elements. Do not mirror or flip.',
+    'STRICT: Do not add socks, shoes, gloves, hats, or accessories unless they are clearly present in the input image.',
+    'Background: clean white or very light gray studio backdrop (no gradients, no heavy shadows).',
+  ].join(' ');
+}
+
+function modelFrontPrompt(modelKey: MannequinModelKey) {
+  return [
+    `Generate a high-resolution PHOTOREALISTIC studio photograph of a real ${modelKey} human athlete wearing the exact same soccer uniform from the reference image.`,
+    'VIEW: FRONT view. Keep the same orientation as the input.',
+    'STRICT: REAL human athlete (NOT mannequin, NOT doll, NOT statue, NOT dummy).',
+    'STRICT: REAL CAMERA PHOTO. Professional ecommerce studio fashion photography (NOT 3D, NOT CGI).',
+    'REALISM: natural skin microtexture, pores, fine hair strands, subtle imperfections. Avoid overly smooth/plastic skin.',
+    'STRICT CAMERA FRAMING: FULL BODY including head and face. Head-to-toe. Wide full-body fashion photo. Centered subject.',
+    'Leave clear margin above the head and below the feet. Do NOT crop any body part.',
+    'STRICT: Do NOT zoom in. Use a consistent wide camera distance.',
+    'STRICT: Preserve the exact uniform design and all details: colors, patterns, logos, text, placement, numbering, and branding.',
+    'STRICT: Do not invent new design elements. Do not mirror or flip.',
+    'STRICT: Do NOT add socks or shoes. Barefoot only, unless socks/shoes are clearly present in the reference image.',
+    'STRICT: Do not add gloves, hats, or accessories unless they are clearly present in the input image.',
+    WHITE_BACKGROUND_PROMPT,
+  ].join(' ');
+}
+
+function modelBackPrompt(modelKey: MannequinModelKey) {
+  return [
+    `Generate a high-resolution PHOTOREALISTIC studio photograph of a real ${modelKey} human athlete wearing the exact same soccer uniform from the reference image.`,
+    'VIEW: BACK view (rear view). Keep the same orientation as the input.',
+    'CRITICAL: Match the SAME camera distance and framing as the front view output (wide full-body).',
+    'STRICT: REAL human athlete (NOT mannequin, NOT doll, NOT statue, NOT dummy).',
+    'STRICT: REAL CAMERA PHOTO. Professional ecommerce studio fashion photography (NOT 3D, NOT CGI).',
+    'REALISM: natural skin microtexture, pores, fine hair strands, subtle imperfections. Avoid overly smooth/plastic skin.',
+    'STRICT CAMERA FRAMING (NO EXCEPTIONS): FULL BODY including head and face. Head-to-toe. Wide full-body fashion photo. Centered subject.',
+    'Leave clear margin above the head and below the feet (extra padding).',
+    'STRICT: Do NOT crop. Do NOT zoom. Do NOT use a close-up. Do NOT change focal length to crop the subject.',
+    'STRICT: Preserve the exact uniform design and all details: colors, patterns, logos, text, placement, numbering, and branding.',
+    'STRICT: Do not invent new design elements. Do not mirror or flip.',
+    'STRICT: Do NOT add socks or shoes. Barefoot only, unless socks/shoes are clearly present in the reference image.',
+    'STRICT: Do not add gloves, hats, or accessories unless they are clearly present in the input image.',
+    WHITE_BACKGROUND_PROMPT,
+  ].join(' ');
+}
+
+function modelFrontPromptMaleFrom3d() {
+  return [
+    'Generate a high-resolution PHOTOREALISTIC full-body studio sports photograph of a real adult male athlete wearing the exact same soccer uniform from the reference image.',
+    'VIEW: FRONT view. Neutral stance, arms relaxed at sides, kit clearly visible.',
+    'CAMERA: REAL DSLR photo, 85mm look, crisp focus, high dynamic range, natural softbox lighting, subtle realistic shadows.',
+    'REALISM DETAILS: visible skin pores and natural microtexture, subtle imperfections, realistic hair, natural facial features, correct human proportions.',
+    'STRICT CAMERA FRAMING: FULL BODY head-to-toe including head/face. Wide full-body fashion photo. Centered subject. Leave generous margin above head and below feet. DO NOT crop.',
+    'STRICT: NO 3D render. NO CGI. NO game character. NO cartoon. NO mannequin. NO plastic skin. NO doll.',
+    'STRICT: Preserve the exact uniform design and all details: colors, patterns, logos, text, placement, numbering, and branding.',
+    'STRICT: Do not invent design elements. Do not mirror or flip.',
+    'STRICT: Do not add socks/shoes/accessories unless clearly present in the reference image.',
+    'BACKGROUND: clean seamless white studio. Output should look like professional sports ecommerce photography.',
+  ].join(' ');
+}
+
+function modelBackPromptMaleFrom3d() {
+  return [
+    'Generate a high-resolution PHOTOREALISTIC full-body studio sports photograph of a real adult male athlete wearing the exact same soccer uniform from the reference image.',
+    'VIEW: BACK view (rear). Neutral stance, kit clearly visible.',
+    'CAMERA: REAL DSLR photo, 85mm look, crisp focus, high dynamic range, natural softbox lighting, subtle realistic shadows.',
+    'REALISM DETAILS: visible skin pores and natural microtexture, subtle imperfections, realistic hair, natural facial features, correct human proportions.',
+    'CRITICAL: Match the SAME camera distance and framing as the front view output (wide full-body).',
+    'STRICT CAMERA FRAMING: FULL BODY head-to-toe including head/face. Centered subject. Leave generous margin above head and below feet. DO NOT crop. DO NOT zoom.',
+    'STRICT: NO 3D render. NO CGI. NO game character. NO cartoon. NO mannequin. NO plastic skin. NO doll.',
+    'STRICT: Preserve the exact uniform design and all details: colors, patterns, logos, text, placement, numbering, and branding.',
+    'STRICT: Do not invent design elements. Do not mirror or flip.',
+    'STRICT: Do not add socks/shoes/accessories unless clearly present in the reference image.',
+    'BACKGROUND: clean seamless white studio. Output should look like professional sports ecommerce photography.',
+  ].join(' ');
+}
+
+function buildUniformFrontPrompt(userPrompt: string, resolution: number) {
+  return [
+    'Generate a 3D render of a sports uniform consisting ONLY of a shirt and shorts.',
+    'STRICT: Do not add socks, shoes, gloves, hats, mannequins, people, or any body parts unless the user prompt explicitly asks for them.',
+    'STRICT: No mannequin, no model, no person, no body, no legs, no feet unless explicitly requested.',
+    'STRICT: Front view (head-on).',
+    'Keep the entire uniform visible with comfortable margins (no cropping).',
+    'No grids, no collages, no multi-panel layouts. Single centered product.',
+    'Background: clean studio backdrop.',
+    `Style: ${styleModifiers['3d']}.`,
+    `User prompt: ${userPrompt}`,
+    `Target output size close to ${resolution}x${resolution}px (square).`,
+  ].join(' ');
+}
+
+function buildUniformBackPrompt(userPrompt: string, resolution: number) {
+  return [
+    'Generate the BACK view of the SAME sports uniform consisting ONLY of a shirt and shorts.',
+    'Use the provided FRONT image as the exact design reference.',
+    'STRICT: Back view (rear).',
+    'STRICT: Maintain the exact same design (colors, patterns, logos, text, placement, and branding).',
+    'STRICT: Do not mirror. Do not invent new details. Only change camera angle to back view.',
+    'STRICT: Do not add socks, shoes, mannequins, people, or body parts unless the user prompt explicitly asks for them.',
+    'No grids, no collages, no multi-panel layouts. Single centered product.',
+    'Background: clean studio backdrop.',
+    `Style: ${styleModifiers['3d']}.`,
+    `User prompt: ${userPrompt}`,
+    `Target output size close to ${resolution}x${resolution}px (square).`,
+  ].join(' ');
+}
+
+function buildStyleConversionPromptForUniform(style: StyleKey) {
+  // Reuse strict line-art rules, otherwise preserve design and angle.
+  return buildStyleConversionPrompt(style);
+}
+
+async function postProcessLineArtPngBase64(pngBase64: string, targetSize?: number) {
+  // Deterministic line-art conversion (no AI, no re-framing).
+  // Goal: produce clean outlines while keeping the original framing/size.
+  //
+  // Approach (simple + robust):
+  // - Flatten to white, denoise lightly.
+  // - Blur strongly.
+  // - Take per-pixel RGB absolute difference (edge strength) between denoised and blurred.
+  //   This captures both shape edges and color-panel seams even if luminance is similar.
+  // - Adaptive threshold so we don't return "almost blank" images.
+  const raw = Buffer.from(normalizePngBase64(pngBase64), 'base64');
+  const background = { r: 255, g: 255, b: 255, alpha: 1 };
+  const base = sharp(raw, { failOn: 'none' }).ensureAlpha().flatten({ background });
+  const sized =
+    typeof targetSize === 'number' && Number.isFinite(targetSize) && targetSize > 0
+      ? base.resize(targetSize, targetSize, { fit: 'contain', background, withoutEnlargement: true })
+      : base;
+
+  const denoise = sized.normalize().median(3).removeAlpha();
+
+  const { data: baseRgb, info } = await denoise.raw().toBuffer({ resolveWithObject: true });
+  const { data: blurRgb } = await denoise.blur(2.2).raw().toBuffer({ resolveWithObject: true });
+
+  const width = info.width;
+  const height = info.height;
+  if (!width || !height) throw new Error('Line art postprocess: missing dimensions.');
+
+  const pixelCount = width * height;
+  const diff = new Uint8Array(pixelCount);
+  let diffMax = 0;
+  for (let i = 0; i < pixelCount; i += 1) {
+    const off = i * 3;
+    const dr = Math.abs((baseRgb[off] ?? 0) - (blurRgb[off] ?? 0));
+    const dg = Math.abs((baseRgb[off + 1] ?? 0) - (blurRgb[off + 1] ?? 0));
+    const db = Math.abs((baseRgb[off + 2] ?? 0) - (blurRgb[off + 2] ?? 0));
+    const v = Math.max(dr, dg, db);
+    diff[i] = v;
+    if (v > diffMax) diffMax = v;
+  }
+
+  const samples: number[] = [];
+  const sampleTarget = 4096;
+  const step = Math.max(1, Math.floor(Math.sqrt(pixelCount / sampleTarget)));
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      samples.push(diff[y * width + x] ?? 0);
+    }
+  }
+  samples.sort((a, b) => a - b);
+  const pct = (q: number) => {
+    if (!samples.length) return 0;
+    const pos = Math.max(0, Math.min(samples.length - 1, Math.floor(q * (samples.length - 1))));
+    return samples[pos] ?? 0;
+  };
+
+  // Start with a conservative threshold and relax if too few edges.
+  let threshold = Math.max(10, Math.min(80, Math.max(pct(0.9) * 0.85, pct(0.85), diffMax * 0.18)));
+  const minInkPixels = Math.max(400, Math.floor(pixelCount / 1400)); // ~0.07% for 1024^2
+  const maxInkPixels = Math.floor(pixelCount * 0.06); // if we exceed this, we are capturing texture/noise
+
+  const buildMask = (t: number) => {
+    const mask = new Uint8Array(pixelCount);
+    let count = 0;
+    for (let i = 0; i < pixelCount; i += 1) {
+      if ((diff[i] ?? 0) >= t) {
+        mask[i] = 1;
+        count += 1;
+      }
+    }
+    return { mask, count };
+  };
+
+  let res = buildMask(threshold);
+  for (let attempt = 0; attempt < 6 && res.count < minInkPixels; attempt += 1) {
+    threshold = Math.max(4, threshold * 0.75);
+    res = buildMask(threshold);
+  }
+  for (let attempt = 0; attempt < 4 && res.count > maxInkPixels; attempt += 1) {
+    threshold = Math.min(140, threshold * 1.25);
+    res = buildMask(threshold);
+  }
+
+  const idx = (x: number, y: number) => y * width + x;
+  const keep = res.mask;
+
+  // Morphological closing (dilate then erode) with a cross kernel to connect small gaps without over-thickening.
+  const dilated = new Uint8Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const k = idx(x, y);
+      if (keep[k]) {
+        dilated[k] = 1;
+        continue;
+      }
+      if (x > 0 && keep[idx(x - 1, y)]) {
+        dilated[k] = 1;
+        continue;
+      }
+      if (x + 1 < width && keep[idx(x + 1, y)]) {
+        dilated[k] = 1;
+        continue;
+      }
+      if (y > 0 && keep[idx(x, y - 1)]) {
+        dilated[k] = 1;
+        continue;
+      }
+      if (y + 1 < height && keep[idx(x, y + 1)]) {
+        dilated[k] = 1;
+        continue;
+      }
+      dilated[k] = 0;
+    }
+  }
+
+  const closed = new Uint8Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const k = idx(x, y);
+      if (!dilated[k]) {
+        closed[k] = 0;
+        continue;
+      }
+      const left = x > 0 ? dilated[idx(x - 1, y)] : 1;
+      const right = x + 1 < width ? dilated[idx(x + 1, y)] : 1;
+      const up = y > 0 ? dilated[idx(x, y - 1)] : 1;
+      const down = y + 1 < height ? dilated[idx(x, y + 1)] : 1;
+      closed[k] = left && right && up && down ? 1 : 0;
+    }
+  }
+
+  const removeIsolatedInk = (mask: Uint8Array) => {
+    const next = new Uint8Array(mask.length);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const k = idx(x, y);
+        if (!mask[k]) continue;
+        let neighbors = 0;
+        for (let ky = -1; ky <= 1; ky += 1) {
+          const yy = y + ky;
+          if (yy < 0 || yy >= height) continue;
+          for (let kx = -1; kx <= 1; kx += 1) {
+            const xx = x + kx;
+            if (xx < 0 || xx >= width) continue;
+            if (kx === 0 && ky === 0) continue;
+            if (mask[idx(xx, yy)]) neighbors += 1;
+          }
+        }
+        if (neighbors >= 1) next[k] = 1;
+      }
+    }
+    return next;
+  };
+
+  let cleanedMask = removeIsolatedInk(closed);
+
+  // Convert any thick/filled regions into contour lines to avoid "black blobs" on logos/text.
+  // Boundary extraction: keep ink pixels that touch background (4-neighborhood).
+  const boundary = new Uint8Array(width * height);
+  for (let y = 1; y < height - 1; y += 1) {
+    const row = y * width;
+    for (let x = 1; x < width - 1; x += 1) {
+      const k = row + x;
+      if (!cleanedMask[k]) continue;
+      if (
+        !cleanedMask[k - 1] ||
+        !cleanedMask[k + 1] ||
+        !cleanedMask[k - width] ||
+        !cleanedMask[k + width]
+      ) {
+        boundary[k] = 1;
+      }
+    }
+  }
+  cleanedMask = removeIsolatedInk(boundary);
+
+  const out = Buffer.alloc(width * height);
+  for (let i = 0; i < out.length; i += 1) out[i] = cleanedMask[i] ? 0 : 255;
+
+  // Cleanup: remove single-pixel speckles/background grain while keeping solid continuous outlines.
+  // Blur+threshold wipes isolated dots but preserves longer strokes.
+  const png = await sharp(out, { raw: { width, height, channels: 1 } })
+    .median(1)
+    .png()
+    .toBuffer();
+
+  // Final pass to remove any remaining borders/rules introduced by the model.
+  let outB64 = png.toString('base64');
+  outB64 = await stripLineArtBorderLines(outB64, 18);
+  outB64 = await stripLineArtHorizontalRules(outB64);
+  outB64 = await stripLineArtFullWidthRulesOutsideInk(outB64);
+  return outB64;
+}
+
+async function cleanupLineArtOutputToTarget(pngBase64: string, target: { width: number; height: number }) {
+  const normalized = normalizePngBase64(pngBase64);
+  const background = { r: 255, g: 255, b: 255, alpha: 1 };
+
+  const crisp = await sharp(Buffer.from(normalized, 'base64'), { failOn: 'none' })
+    .ensureAlpha()
+    .flatten({ background })
+    .grayscale()
+    .median(1)
+    .threshold(235)
+    .png()
+    .toBuffer();
+
+  let out = crisp.toString('base64');
+  out = await stripLineArtBorderLines(out, 20);
+  out = await stripLineArtHorizontalRules(out);
+  out = await stripLineArtFullWidthRulesOutsideInk(out);
+
+  out = await resizeToMatch(out, target, WHITE_BG);
+  out = await ensureSolidWhiteBackgroundPngBase64(out);
+  return out;
+}
+
+async function sampleLumaStats(pngBase64: string, sampleSize = 64) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const { data } = await sharp(buf, { failOn: 'none' })
+    .ensureAlpha()
+    .flatten({ background: { r: 255, g: 255, b: 255, alpha: 1 } })
+    .resize(sampleSize, sampleSize, { fit: 'fill' })
+    .grayscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  let dark = 0;
+  let bright = 0;
+  let min = 255;
+  let max = 0;
+  for (const v of data) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+    if (v <= 20) dark += 1;
+    if (v >= 235) bright += 1;
+  }
+  const total = data.length || 1;
+  return { darkRatio: dark / total, brightRatio: bright / total, min, max };
+}
+
+async function validateLineArtPngBase64OrThrow(pngBase64: string) {
+  const normalized = normalizePngBase64(pngBase64);
+  if (!normalized) throw new Error('Empty image base64.');
+  const buf = Buffer.from(normalized, 'base64');
+  if (!buf.length) throw new Error('Converted image too small/corrupt.');
+
+  const img = sharp(buf, { failOn: 'none' }).ensureAlpha().flatten({ background: { r: 255, g: 255, b: 255 } });
+  const meta = await img.metadata();
+  if (!meta?.width || !meta?.height) throw new Error('Converted image missing dimensions.');
+  if (meta.width < 32 || meta.height < 32) throw new Error('Converted image dimensions too small.');
+  if (meta.format && !['png', 'jpeg', 'jpg', 'webp'].includes(String(meta.format).toLowerCase())) {
+    throw new Error(`Unsupported converted image format: ${String(meta.format)}`);
+  }
+
+  const sample = await sampleLumaStats(normalized);
+  if (sample.max <= 10 || sample.darkRatio >= 0.9) throw new Error('Converted line art appears fully black.');
+  if (sample.min >= 245 || sample.brightRatio >= 0.98) throw new Error('Converted line art appears blank/white.');
+  if (sample.darkRatio > 0.55) throw new Error('Converted line art appears filled/silhouette (too much black).');
+  if (sample.brightRatio <= 0.35) throw new Error('Converted line art background is not white.');
+}
+
+async function detectMostlyBlackSilhouette(pngBase64: string) {
+  const sample = await sampleLumaStats(pngBase64);
+  return sample.darkRatio > 0.55;
+}
+
+async function validateLineArtOutput(pngBase64: string) {
+  await validateLineArtPngBase64OrThrow(pngBase64);
+  if (await detectMostlyBlackSilhouette(pngBase64)) {
+    throw new Error('Converted line art detected as a filled silhouette (mostly black).');
+  }
+
+  // Reject "dirty" outputs (paper grain / halftone / stipple) by checking how much ink exists near the edges.
+  // Good line art should be mostly empty in the border area.
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const { data, info } = await sharp(buf, { failOn: 'none' })
+    .ensureAlpha()
+    .flatten({ background: { r: 255, g: 255, b: 255, alpha: 1 } })
+    .grayscale()
+    .resize(256, 256, { fit: 'fill' })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const width = info.width;
+  const height = info.height;
+  if (!width || !height) return;
+  const margin = Math.max(8, Math.floor(Math.min(width, height) * 0.08));
+  let borderDark = 0;
+  let borderTotal = 0;
+  const darkThreshold = 175;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const inBorder = x < margin || y < margin || x >= width - margin || y >= height - margin;
+      if (!inBorder) continue;
+      borderTotal += 1;
+      if (data[y * width + x] <= darkThreshold) borderDark += 1;
+    }
+  }
+  const borderDarkRatio = borderDark / Math.max(1, borderTotal);
+  if (borderDarkRatio > 0.02) {
+    throw new Error('Converted line art contains background speckle/noise (dirty border).');
+  }
+}
+
+async function fallbackLineArtEdgeDetectPngBase64(pngBase64: string) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+
+  const { data, info } = await sharp(buf, { failOn: 'none' })
+    .ensureAlpha()
+    .flatten({ background: { r: 255, g: 255, b: 255, alpha: 1 } })
+    .grayscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const width = info.width;
+  const height = info.height;
+  if (!width || !height) throw new Error('Fallback edge detect: missing dimensions.');
+
+  const gray = new Uint8Array(data);
+  const blurred = new Float32Array(gray.length);
+  const gaussian = [1, 2, 1, 2, 4, 2, 1, 2, 1];
+
+  const idx = (x: number, y: number) => y * width + x;
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      let acc = 0;
+      let k = 0;
+      for (let ky = -1; ky <= 1; ky += 1) {
+        for (let kx = -1; kx <= 1; kx += 1) {
+          acc += gray[idx(x + kx, y + ky)] * gaussian[k];
+          k += 1;
+        }
+      }
+      blurred[idx(x, y)] = acc / 16;
+    }
+  }
+
+  const mag = new Float32Array(gray.length);
+  let sumMag = 0;
+  let maxMag = 0;
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const a00 = blurred[idx(x - 1, y - 1)];
+      const a10 = blurred[idx(x, y - 1)];
+      const a20 = blurred[idx(x + 1, y - 1)];
+      const a01 = blurred[idx(x - 1, y)];
+      const a21 = blurred[idx(x + 1, y)];
+      const a02 = blurred[idx(x - 1, y + 1)];
+      const a12 = blurred[idx(x, y + 1)];
+      const a22 = blurred[idx(x + 1, y + 1)];
+
+      const gx = -a00 + a20 - 2 * a01 + 2 * a21 - a02 + a22;
+      const gy = a00 + 2 * a10 + a20 - a02 - 2 * a12 - a22;
+      const m = Math.sqrt(gx * gx + gy * gy);
+      mag[idx(x, y)] = m;
+      sumMag += m;
+      if (m > maxMag) maxMag = m;
+    }
+  }
+
+  const avgMag = sumMag / Math.max(1, (width - 2) * (height - 2));
+  const threshold = Math.max(25, Math.min(140, avgMag * 2.2));
+
+  const out = Buffer.alloc(gray.length);
+  for (let i = 0; i < mag.length; i += 1) {
+    out[i] = mag[i] > threshold ? 0 : 255;
+  }
+
+  const png = await sharp(out, { raw: { width, height, channels: 1 } }).png().toBuffer();
+  // Already strict monochrome outlines on white (0/255).
+  return png.toString('base64');
+}
+
+function buildUniformCompositePrompt({
+  userPrompt,
+  style,
+  views,
+  columns,
+  rows,
+  resolution,
+}: {
+  userPrompt: string;
+  style: StyleKey;
+  views: UniformViewKey[];
+  columns: number;
+  rows: number;
+  resolution: number;
+}) {
+  const viewToCell = views.map((view, idx) => {
+    const col = (idx % columns) + 1;
+    const row = Math.floor(idx / columns) + 1;
+    const strictInstruction = viewSpecificInstructions[view as ViewKey];
+    return `Cell ${idx + 1} (row ${row}, col ${col}): ${view.toUpperCase()} view. ${strictInstruction}`;
+  });
+
+  return [
+    `Generate ONE single composite image arranged as a grid with ${rows} row(s) and ${columns} column(s).`,
+    'Each grid cell is one view. Keep the layout rigid and evenly spaced.',
+    'STRICT: Do NOT add labels, text, captions, borders, or panel dividers. No watermarks.',
+    'STRICT: The composite must contain ONLY the requested views and nothing else.',
+    'Generate a sports uniform consisting ONLY of a shirt and shorts.',
+    'STRICT: Do not add socks, shoes, mannequins, people, or body parts unless the user prompt explicitly asks for them.',
+    'STRICT: Use this exact design across all views; do not change colors, patterns, logos, text, placement, or branding.',
+    'STRICT: Do not mirror or flip. Left must be left, right must be right.',
+    `Rendering style: ${styleModifiers[style]}.`,
+    ...viewToCell,
+    `User prompt: ${userPrompt}`,
+    `Target output size exactly ${resolution}x${resolution}px (square).`,
+  ].join(' ');
+}
+
+function computeSlices(total: number, parts: number) {
+  const base = Math.floor(total / parts);
+  const remainder = total - base * parts;
+  const sizes = Array.from({ length: parts }, (_v, idx) => base + (idx < remainder ? 1 : 0));
+  const offsets: number[] = [];
+  let acc = 0;
+  for (const s of sizes) {
+    offsets.push(acc);
+    acc += s;
+  }
+  return { sizes, offsets };
+}
+
+async function cropCompositeToTiles({
+  compositePngBase64,
+  resolution,
+  views,
+}: {
+  compositePngBase64: string;
+  resolution: number;
+  views: UniformViewKey[];
+}) {
+  const grid = computeGrid(views.length);
+  const { sizes: colSizes, offsets: colOffsets } = computeSlices(resolution, grid.columns);
+  const { sizes: rowSizes, offsets: rowOffsets } = computeSlices(resolution, grid.rows);
+
+  const compositeBuffer = await sharp(Buffer.from(normalizePngBase64(compositePngBase64), 'base64'))
+    .ensureAlpha()
+    .resize(resolution, resolution, { fit: 'fill' })
+    .png()
+    .toBuffer();
+
+  const tiles = await Promise.all(
+    views.map(async (view, idx) => {
+      const col = idx % grid.columns;
+      const row = Math.floor(idx / grid.columns);
+      const left = colOffsets[col] ?? 0;
+      const top = rowOffsets[row] ?? 0;
+      const width = colSizes[col] ?? 1;
+      const height = rowSizes[row] ?? 1;
+      const tile = await sharp(compositeBuffer).extract({ left, top, width, height }).png().toBuffer();
+      return { view, imageBase64: tile.toString('base64') };
+    })
+  );
+
+  return {
+    compositeBase64: compositeBuffer.toString('base64'),
+    tiles,
+    meta: {
+      grid,
+      resolution,
+      views,
+    },
+  };
+}
+
+function buildCompositeStyleConversionPrompt(style: StyleKey) {
+  if (style === 'lineart') {
+    return [
+      'Convert this composite grid image into clean black outline line-art on a pure white background.',
+      'STRICT: Preserve the exact grid layout and panel positions. Do not move, resize, crop, add borders, or add labels.',
+      'STRICT: Use ONLY solid black outlines. No gray. No blue. No shading. No gradients. No textures. No fill colors.',
+      'Keep the same uniform design details, but represent them as minimal clean black outlines only.',
+    ].join(' ');
+  }
+
+  return [
+    'Convert this composite grid image to the target style.',
+    'STRICT: Preserve the exact grid layout and panel positions. Do not move, resize, crop, add borders, or add labels.',
+    'STRICT: Keep the uniform design identical (colors, patterns, logos, text, placement). Style change only.',
+    `Target style: ${styleModifiers[style]}.`,
+  ].join(' ');
+}
+
+function buildCompositeMannequinPrompt(modelKey: MannequinModelKey) {
+  return [
+    `Convert this composite grid image into a mannequin preview using a ${modelKey} mannequin.`,
+    'STRICT: Preserve the exact grid layout and panel positions. Do not move, resize, crop, add borders, or add labels.',
+    'STRICT: Keep the same uniform design, style, and colors.',
+    'Photorealistic studio product photo (realistic).',
+    'No extra views beyond the existing grid panels.',
+  ].join(' ');
+}
+
+function normalizeIncomingStyleKey(raw: unknown): StyleKey | null {
+  if (typeof raw !== 'string') return null;
+  const normalized = raw.trim().toLowerCase().replace(/[\s_-]+/g, '_');
+  if (!normalized) return null;
+  if (normalized === 'realistic') return 'realistic';
+  if (normalized === 'watercolor') return 'watercolor';
+  if (normalized === 'line_art' || normalized === 'lineart') return 'lineart';
+  if (normalized === '3d' || normalized === '3d_render' || normalized === 'render_3d') return '3d';
+  return null;
+}
+
+function normalizeIncomingViewKey(raw: unknown): ViewKey | null {
+  if (typeof raw !== 'string') return null;
+  const v = raw.trim();
+  if (!v) return null;
+  const normalized = v.toLowerCase().replace(/[\s_-]+/g, '_');
+
+  if (normalized === 'front') return 'front';
+  if (normalized === 'back') return 'back';
+  if (normalized === 'left') return 'left';
+  if (normalized === 'right') return 'right';
+  if (normalized === 'top') return 'top';
+
+  if (normalized === 'three_quarter' || normalized === 'threequarter' || normalized === '3_4' || normalized === '3_4_view') {
+    return 'threeQuarter';
+  }
+  if (normalized === 'close_up' || normalized === 'closeup' || normalized === 'close_up_view') {
+    return 'closeUp';
+  }
+
+  return null;
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (item: T, idx: number) => Promise<R>) {
+  const limit = Math.max(1, Math.floor(concurrency || 1));
+  const results = new Array<R>(items.length);
+  let nextIdx = 0;
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const idx = nextIdx;
+      nextIdx += 1;
+      if (idx >= items.length) return;
+      results[idx] = await fn(items[idx], idx);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
+type ExportFormat = 'zip' | 'composite' | 'pdf';
+type ExportItem = { name: string; imageBase64: string };
+type ExportSession = { userId: string; format: ExportFormat; items: ExportItem[]; createdAt: number };
+const exportSessions = new Map<string, ExportSession>();
+const EXPORT_TTL_MS = 10 * 60 * 1000;
+
+function cleanupExportSessions() {
+  const now = Date.now();
+  for (const [id, sess] of exportSessions.entries()) {
+    if (now - sess.createdAt > EXPORT_TTL_MS) exportSessions.delete(id);
+  }
+}
+
+async function buildCompositeGridPng(items: ExportItem[]) {
+  if (!items.length) throw new Error('No items to export.');
+  const buffers = items.map((it) => Buffer.from(normalizePngBase64(it.imageBase64), 'base64'));
+
+  const metas = await Promise.all(buffers.map((buf) => sharp(buf).metadata().catch(() => null)));
+  const tileSize = Math.max(
+    256,
+    Math.min(
+      2048,
+      Math.round(
+        Number(metas.find((m) => m?.width && m?.width === m?.height)?.width) ||
+          Number(metas.find((m) => m?.width)?.width) ||
+          1024
+      )
+    )
+  );
+
+  const columns = 2;
+  const rows = Math.ceil(items.length / columns);
+  const background = { r: 255, g: 255, b: 255, alpha: 1 };
+
+  const resized = await Promise.all(
+    buffers.map((buf) => sharp(buf).resize(tileSize, tileSize, { fit: 'contain', background }).png().toBuffer())
+  );
+
+  const overlays = resized.map((buf, idx) => {
+    const col = idx % columns;
+    const row = Math.floor(idx / columns);
+    return { input: buf, left: col * tileSize, top: row * tileSize };
+  });
+
+  return await sharp({
+    create: { width: columns * tileSize, height: rows * tileSize, channels: 4, background },
+  })
+    .composite(overlays)
+    .png()
+    .toBuffer();
 }
 
 async function generateViewImage(
@@ -1337,12 +3240,18 @@ async function generateViewImage(
   style: StyleKey,
   view: ViewKey,
   targetWidth: number,
-  targetHeight: number
+  targetHeight: number,
+  options?: { background?: { r: number; g: number; b: number; alpha: number } }
 ) {
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: buildViewPrompt(prompt, style, view, targetWidth, targetHeight),
-  });
+  const response = await generateContentWithRetry(
+    `generateViewImage:${view}`,
+    async () =>
+      await ai.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: buildViewPrompt(prompt, style, view, targetWidth, targetHeight),
+      }),
+    { attempts: 2, baseDelayMs: 350 }
+  );
 
   const parts = (response as any)?.candidates?.[0]?.content?.parts;
   const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
@@ -1352,7 +3261,7 @@ async function generateViewImage(
   }
 
   const raw = Buffer.from(imagePart.data as string, 'base64');
-  const background = { r: 245, g: 246, b: 248, alpha: 1 };
+  const background = options?.background ?? { r: 245, g: 246, b: 248, alpha: 1 };
   const insetScale = 0.9;
   const insetWidth = Math.max(1, Math.round(targetWidth * insetScale));
   const insetHeight = Math.max(1, Math.round(targetHeight * insetScale));
@@ -1377,19 +3286,121 @@ async function generateViewImage(
   };
 }
 
+async function generateViewImageFromBase(
+  baseImageBase64: string,
+  style: StyleKey,
+  view: ViewKey,
+  targetWidth: number,
+  targetHeight: number,
+  userPrompt?: string,
+  extraInstruction?: string,
+  options?: { background?: { r: number; g: number; b: number; alpha: number } }
+) {
+  const inlineData = pngBase64ToInlineData(baseImageBase64);
+  const response = await generateContentWithRetry(
+    `generateViewImageFromBase:${view}`,
+    async () =>
+      await ai.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: buildViewFromBasePrompt(style, view, targetWidth, targetHeight, userPrompt, extraInstruction) },
+              { inlineData },
+            ],
+          },
+        ],
+      }),
+    { attempts: 2, baseDelayMs: 500 }
+  );
+
+  const parts = (response as any)?.candidates?.[0]?.content?.parts;
+  const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
+
+  if (!imagePart?.data) {
+    throw new Error(`Gemini response did not include an image for view "${view}".`);
+  }
+
+  const raw = Buffer.from(imagePart.data as string, 'base64');
+  const background = options?.background ?? { r: 245, g: 246, b: 248, alpha: 1 };
+  const insetScale = 0.9;
+  const insetWidth = Math.max(1, Math.round(targetWidth * insetScale));
+  const insetHeight = Math.max(1, Math.round(targetHeight * insetScale));
+  const inset = await sharp(raw)
+    .resize(insetWidth, insetHeight, { fit: 'contain', background, withoutEnlargement: true })
+    .png()
+    .toBuffer();
+
+  const left = Math.floor((targetWidth - insetWidth) / 2);
+  const top = Math.floor((targetHeight - insetHeight) / 2);
+  const resized = await sharp({
+    create: { width: targetWidth, height: targetHeight, channels: 4, background },
+  })
+    .composite([{ input: inset, left, top }])
+    .png()
+    .toBuffer();
+
+  return {
+    view,
+    buffer: resized,
+    dataUrl: `data:image/png;base64,${resized.toString('base64')}`,
+  };
+}
+
+async function computeDHash64(buffer: Buffer): Promise<bigint> {
+  const { data } = await sharp(buffer).resize(9, 8, { fit: 'fill' }).greyscale().raw().toBuffer({ resolveWithObject: true });
+  let hash = 0n;
+  for (let row = 0; row < 8; row += 1) {
+    const rowOffset = row * 9;
+    for (let col = 0; col < 8; col += 1) {
+      const left = data[rowOffset + col] ?? 0;
+      const right = data[rowOffset + col + 1] ?? 0;
+      if (left > right) {
+        hash |= 1n << BigInt(row * 8 + col);
+      }
+    }
+  }
+  return hash;
+}
+
+function hammingDistance64(a: bigint, b: bigint): number {
+  let x = a ^ b;
+  let count = 0;
+  while (x !== 0n) {
+    count += Number(x & 1n);
+    x >>= 1n;
+  }
+  return count;
+}
+
+async function isLikelySameAngle(left: Buffer, right: Buffer): Promise<boolean> {
+  const leftHash = await computeDHash64(left);
+  const rightHash = await computeDHash64(right);
+  const flippedLeft = await sharp(left).flop().png().toBuffer();
+  const flippedLeftHash = await computeDHash64(flippedLeft);
+
+  const distSame = hammingDistance64(leftHash, rightHash);
+  const distFlip = hammingDistance64(flippedLeftHash, rightHash);
+
+  return distSame <= 6 && distFlip >= distSame + 4;
+}
+
 async function composeComposite(
   tiles: { view: ViewKey; buffer: Buffer }[],
   columns: number,
   rows: number,
   tileWidth: number,
-  tileHeight: number
+  tileHeight: number,
+  options?: { background?: { r: number; g: number; b: number; alpha: number } }
 ) {
+  const background = options?.background ?? { r: 245, g: 246, b: 248, alpha: 1 };
   const canvas = sharp({
     create: {
       width: columns * tileWidth,
       height: rows * tileHeight,
       channels: 4,
-      background: { r: 245, g: 246, b: 248, alpha: 1 },
+      background,
     },
   });
 
@@ -1495,6 +3506,734 @@ app.post('/api/generate-views', async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('Gemini error:', err);
     res.status(500).json({ error: mapGeminiError(err) });
+  }
+});
+
+app.post('/api/generate-base', async (req: Request, res: Response) => {
+  const { prompt, resolution, referenceImageBase64, referenceImageMimeType } = req.body as GenerateBaseRequestBody;
+  const style = normalizeIncomingStyleKey((req.body as any)?.style);
+
+  if (!prompt || !prompt.trim()) {
+    return res.status(400).json({ error: 'Prompt is required.' });
+  }
+
+  if (!style || !(style in styleModifiers) || !allowedBaseStyles.has(style)) {
+    return res.status(400).json({ error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' });
+  }
+
+  if (!resolution || !allowedResolutions.has(resolution)) {
+    return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
+  }
+
+  try {
+    const referenceInlineData = referenceImageBase64
+      ? inlineDataFromAnyImageBase64({ base64: referenceImageBase64, mimeType: referenceImageMimeType })
+      : null;
+    const forceWhite = shouldForceWhiteBackgroundFromPrompt(prompt.trim());
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: [
+                buildBasePrompt(prompt.trim(), style, resolution),
+                referenceInlineData
+                  ? 'Reference image provided: use it as a visual design reference. Preserve the same design identity while generating the front view.'
+                  : '',
+              ]
+                .filter(Boolean)
+                .join(' '),
+            },
+            ...(referenceInlineData ? [{ inlineData: referenceInlineData }] : []),
+          ],
+        },
+      ],
+    });
+
+    const parts = (response as any)?.candidates?.[0]?.content?.parts;
+    const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
+
+    if (!imagePart?.data) {
+      throw new Error('Gemini response did not include an image.');
+    }
+
+    let baseImage = await normalizeGeminiOutputPngBase64(String(imagePart.data), resolution, { background: WHITE_BG });
+    if (forceWhite) {
+      baseImage = await ensureSolidWhiteBackgroundStrict(baseImage);
+    }
+    return res.json({ baseImage });
+  } catch (err: any) {
+    console.error('Generate base error:', err);
+    return res.status(500).json({ error: mapGeminiError(err) });
+  }
+});
+
+app.post('/api/generate-views-from-base', async (req: Request, res: Response) => {
+  const { baseImageBase64, resolution, prompt } = req.body as GenerateViewsFromBaseRequestBody;
+  const style = normalizeIncomingStyleKey((req.body as any)?.style);
+  const viewsRaw = Array.isArray((req.body as any)?.views) ? (req.body as any).views : [];
+  const views = viewsRaw
+    .map((v: any) => normalizeIncomingViewKey(v))
+    .filter((v: ViewKey | null): v is ViewKey => Boolean(v));
+
+  if (!baseImageBase64 || typeof baseImageBase64 !== 'string') {
+    return res.status(400).json({ error: 'baseImageBase64 is required.' });
+  }
+
+  if (!style || !(style in styleModifiers) || !allowedBaseStyles.has(style)) {
+    return res.status(400).json({ error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' });
+  }
+
+  if (!views.length) {
+    return res.status(400).json({ error: 'At least one view must be selected.' });
+  }
+
+  // Ensure every incoming view is supported (normalized from UI labels/variants).
+  const invalidView = viewsRaw.find((v: any) => !normalizeIncomingViewKey(v));
+  if (invalidView) return res.status(400).json({ error: `Invalid view: ${String(invalidView)}` });
+
+  if (!resolution || !allowedResolutions.has(resolution)) {
+    return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
+  }
+
+  try {
+    const forceWhite = shouldForceWhiteBackgroundFromPrompt((prompt || '').trim());
+    const tileBackground = WHITE_BG;
+    const grid = computeGrid(views.length);
+    const tileWidth = Math.max(64, Math.floor(resolution / grid.columns));
+    const tileHeight = Math.max(64, Math.floor(resolution / grid.rows));
+
+    const normalizedBase = normalizePngBase64(baseImageBase64);
+    const frontTileBuffer = await sharp(Buffer.from(normalizedBase, 'base64'))
+      .resize(tileWidth, tileHeight, { fit: 'contain', background: tileBackground })
+      .png()
+      .toBuffer();
+
+    const tiles = await Promise.all(
+      views.map(async (view) => {
+        if (view === 'front') {
+          if (!forceWhite) return { view, buffer: frontTileBuffer };
+          const white = await ensureSolidWhiteBackgroundStrict(frontTileBuffer.toString('base64'));
+          return { view, buffer: Buffer.from(white, 'base64') };
+        }
+        const generated = await generateViewImageFromBase(normalizedBase, style, view, tileWidth, tileHeight, prompt, undefined, {
+          background: tileBackground,
+        });
+        const outBuf = forceWhite
+          ? Buffer.from(await ensureSolidWhiteBackgroundStrict(generated.buffer.toString('base64')), 'base64')
+          : generated.buffer;
+        return { view: generated.view, buffer: outBuf };
+      })
+    );
+
+    if (views.includes('left') && views.includes('right')) {
+      const leftTile = tiles.find((t) => t.view === 'left') ?? null;
+      const rightIdx = tiles.findIndex((t) => t.view === 'right');
+
+      if (leftTile && rightIdx !== -1) {
+        const rightTile = tiles[rightIdx];
+        if (rightTile && (await isLikelySameAngle(leftTile.buffer, rightTile.buffer))) {
+          const regenerated = await generateViewImageFromBase(
+            normalizedBase,
+            style,
+            'right',
+            tileWidth,
+            tileHeight,
+            prompt,
+            "This MUST be the RIGHT side view (opposite side from the LEFT). Do NOT reuse the left-side angle. Ensure the garment's front points to the LEFT in the frame.",
+            { background: tileBackground }
+          );
+          const outBuf = forceWhite
+            ? Buffer.from(await ensureSolidWhiteBackgroundStrict(regenerated.buffer.toString('base64')), 'base64')
+            : regenerated.buffer;
+          tiles[rightIdx] = { view: 'right', buffer: outBuf };
+        }
+      }
+    }
+
+    const composite = await composeComposite(tiles, grid.columns, grid.rows, tileWidth, tileHeight, {
+      background: tileBackground,
+    });
+
+    return res.json({
+      compositeBase64: composite.buffer.toString('base64'),
+      images: tiles.map((tile) => ({ view: tile.view, imageBase64: tile.buffer.toString('base64') })),
+      meta: {
+        dimensions: composite.dimensions,
+        grid: { ...grid, tileWidth, tileHeight },
+        viewOrder: views,
+      },
+    });
+  } catch (err: any) {
+    console.error('Generate views from base error:', err);
+    return res.status(500).json({ error: mapGeminiError(err) });
+  }
+});
+
+app.post('/api/generate-uniform', async (req: Request, res: Response) => {
+  const { prompt, resolution } = req.body as GenerateUniformRequestBody;
+
+  if (!prompt || !prompt.trim()) {
+    return res.status(400).json({ error: 'Prompt is required.' });
+  }
+
+  if (!resolution || !allowedResolutions.has(resolution)) {
+    return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
+  }
+
+  try {
+    const frontResponse = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: buildUniformFrontPrompt(prompt.trim(), resolution),
+    });
+
+    const frontParts = (frontResponse as any)?.candidates?.[0]?.content?.parts;
+    const frontInline = frontParts?.find((part: any) => part.inlineData?.data)?.inlineData;
+    if (!frontInline?.data) throw new Error('Gemini response did not include a front image.');
+    const front = await normalizeGeminiOutputPngBase64(String(frontInline.data), resolution);
+
+    const backResponse = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: buildUniformBackPrompt(prompt.trim(), resolution) },
+            { inlineData: pngBase64ToInlineData(front) },
+          ],
+        },
+      ],
+    });
+
+    const backParts = (backResponse as any)?.candidates?.[0]?.content?.parts;
+    const backInline = backParts?.find((part: any) => part.inlineData?.data)?.inlineData;
+    if (!backInline?.data) throw new Error('Gemini response did not include a back image.');
+    const back = await normalizeGeminiOutputPngBase64(String(backInline.data), resolution);
+
+    return res.json({ front, back });
+  } catch (err: any) {
+    console.error('Generate uniform error:', err);
+    return res.status(500).json({ error: mapGeminiError(err) });
+  }
+});
+
+app.post('/api/uniform/generate-composite', async (req: Request, res: Response) => {
+  const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
+  const resolution = Number(req.body?.resolution);
+  const styleKey = normalizeIncomingStyleKey(req.body?.styleKey) ?? '3d';
+  const referenceImageBase64 =
+    typeof req.body?.referenceImageBase64 === 'string' ? req.body.referenceImageBase64.trim() : '';
+  const viewsRaw = Array.isArray(req.body?.views) ? req.body.views : [];
+  const views = viewsRaw
+    .filter((v: any) => typeof v === 'string')
+    .map((v: string) => v.trim() as UniformViewKey)
+    .filter((v: UniformViewKey) => allowedUniformViews.has(v));
+
+  if (!prompt) return res.status(400).json({ error: 'Prompt is required.' });
+  if (!resolution || !allowedResolutions.has(resolution)) {
+    return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
+  }
+  if (!allowedBaseStyles.has(styleKey)) {
+    return res.status(400).json({ error: 'Invalid styleKey. Allowed: line_art, watercolor, realistic, 3d_render.' });
+  }
+  if (!views.length) return res.status(400).json({ error: 'Select at least one view.' });
+  if (views.length > 4) return res.status(400).json({ error: 'Maximum 4 views supported.' });
+
+  try {
+    const referenceInlineData = referenceImageBase64 ? pngBase64ToInlineData(referenceImageBase64) : null;
+    const grid = computeGrid(views.length);
+    const compositePrompt = buildUniformCompositePrompt({
+      userPrompt: prompt,
+      style: styleKey,
+      views,
+      columns: grid.columns,
+      rows: grid.rows,
+      resolution,
+    });
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: [
+                compositePrompt,
+                referenceInlineData
+                  ? 'Reference image provided: use it as a visual design reference. Preserve design identity while generating the requested grid views.'
+                  : '',
+              ]
+                .filter(Boolean)
+                .join(' '),
+            },
+            ...(referenceInlineData ? [{ inlineData: referenceInlineData }] : []),
+          ],
+        },
+      ],
+    });
+
+    const parts = (response as any)?.candidates?.[0]?.content?.parts;
+    const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
+    if (!imagePart?.data) {
+      throw new Error('Gemini response did not include an image.');
+    }
+
+    const normalizedComposite = await normalizeGeminiOutputPngBase64(String(imagePart.data), resolution);
+    const out = await cropCompositeToTiles({ compositePngBase64: normalizedComposite, resolution, views });
+    return res.json(out);
+  } catch (err: any) {
+    console.error('Uniform composite generation error:', err);
+    return res.status(500).json({ error: mapGeminiError(err) });
+  }
+});
+
+app.post('/api/uniform/convert-style', async (req: Request, res: Response) => {
+  const compositeBase64 = typeof req.body?.compositeBase64 === 'string' ? req.body.compositeBase64.trim() : '';
+  const resolution = Number(req.body?.resolution);
+  const styleKey = normalizeIncomingStyleKey(req.body?.styleKey);
+  const viewsRaw = Array.isArray(req.body?.views) ? req.body.views : [];
+  const views = viewsRaw
+    .filter((v: any) => typeof v === 'string')
+    .map((v: string) => v.trim() as UniformViewKey)
+    .filter((v: UniformViewKey) => allowedUniformViews.has(v));
+
+  if (!compositeBase64) return res.status(400).json({ error: 'compositeBase64 is required.' });
+  if (!resolution || !allowedResolutions.has(resolution)) {
+    return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
+  }
+  if (!styleKey || !allowedBaseStyles.has(styleKey)) {
+    return res.status(400).json({ error: 'Invalid styleKey. Allowed: line_art, watercolor, realistic, 3d_render.' });
+  }
+  if (!views.length) return res.status(400).json({ error: 'views is required.' });
+
+  try {
+    const inlineData = pngBase64ToInlineData(compositeBase64);
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: [{ role: 'user', parts: [{ text: buildCompositeStyleConversionPrompt(styleKey) }, { inlineData }] }],
+    });
+
+    const parts = (response as any)?.candidates?.[0]?.content?.parts;
+    const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
+    if (!imagePart?.data) throw new Error('Gemini response did not include an image.');
+
+    const normalizedComposite = await normalizeGeminiOutputPngBase64(String(imagePart.data), resolution);
+    const out = await cropCompositeToTiles({ compositePngBase64: normalizedComposite, resolution, views });
+    return res.json(out);
+  } catch (err: any) {
+    console.error('Uniform convert style error:', err);
+    return res.status(500).json({ error: mapGeminiError(err) });
+  }
+});
+
+app.post('/api/uniform/convert-model', async (req: Request, res: Response) => {
+  const compositeBase64 = typeof req.body?.compositeBase64 === 'string' ? req.body.compositeBase64.trim() : '';
+  const resolution = Number(req.body?.resolution);
+  const modelKey = typeof req.body?.modelKey === 'string' ? req.body.modelKey.trim().toLowerCase() : '';
+  const viewsRaw = Array.isArray(req.body?.views) ? req.body.views : [];
+  const views = viewsRaw
+    .filter((v: any) => typeof v === 'string')
+    .map((v: string) => v.trim() as UniformViewKey)
+    .filter((v: UniformViewKey) => allowedUniformViews.has(v));
+
+  if (!compositeBase64) return res.status(400).json({ error: 'compositeBase64 is required.' });
+  if (!resolution || !allowedResolutions.has(resolution)) {
+    return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
+  }
+  if (modelKey !== 'male' && modelKey !== 'female') {
+    return res.status(400).json({ error: 'Invalid modelKey. Allowed: male, female.' });
+  }
+  if (!views.length) return res.status(400).json({ error: 'views is required.' });
+
+  try {
+    const inlineData = pngBase64ToInlineData(compositeBase64);
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: [
+        { role: 'user', parts: [{ text: buildCompositeMannequinPrompt(modelKey as MannequinModelKey) }, { inlineData }] },
+      ],
+    });
+
+    const parts = (response as any)?.candidates?.[0]?.content?.parts;
+    const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
+    if (!imagePart?.data) throw new Error('Gemini response did not include an image.');
+
+    const normalizedComposite = await normalizeGeminiOutputPngBase64(String(imagePart.data), resolution);
+    const out = await cropCompositeToTiles({ compositePngBase64: normalizedComposite, resolution, views });
+    return res.json(out);
+  } catch (err: any) {
+    console.error('Uniform convert model error:', err);
+    return res.status(500).json({ error: mapGeminiError(err) });
+  }
+});
+
+app.post('/api/convert-style', async (req: Request, res: Response) => {
+  const { images, imageFrontBase64, imageBackBase64, styleKey } = req.body as ConvertStyleRequestBody;
+  const normalizedStyle = normalizeIncomingStyleKey(styleKey);
+
+  if (!normalizedStyle || !allowedBaseStyles.has(normalizedStyle)) {
+    return res.status(400).json({ error: 'Invalid styleKey. Allowed: line_art, watercolor, realistic, 3d_render.' });
+  }
+
+  const fallbackImages: Array<{ view: ViewKey; imageBase64: string }> = [];
+  if (typeof imageFrontBase64 === 'string' && imageFrontBase64.trim()) fallbackImages.push({ view: 'front', imageBase64: imageFrontBase64 });
+  if (typeof imageBackBase64 === 'string' && imageBackBase64.trim()) fallbackImages.push({ view: 'back', imageBase64: imageBackBase64 });
+
+  const incomingRaw = Array.isArray(images) && images.length ? images : fallbackImages;
+  const incomingParsed = incomingRaw
+    .filter((it: any) => it && typeof it.imageBase64 === 'string')
+    .map((it: any) => ({
+      rawView: it.view,
+      view: normalizeIncomingViewKey(it.view),
+      imageBase64: String(it.imageBase64 || '').trim(),
+    }));
+
+  if (!incomingParsed.length) return res.status(400).json({ error: 'images is required.' });
+
+  const invalidViews = incomingParsed.filter((it) => !it.view).map((it) => String(it.rawView));
+  if (invalidViews.length) {
+    return res.status(400).json({ error: `Invalid view(s): ${invalidViews.join(', ')}` });
+  }
+
+  const emptyImages = incomingParsed.filter((it) => !it.imageBase64).map((it) => String(it.view));
+  if (emptyImages.length) {
+    return res.status(400).json({ error: `Missing imageBase64 for view(s): ${emptyImages.join(', ')}` });
+  }
+
+  const incoming = incomingParsed.map((it) => ({ view: it.view as ViewKey, imageBase64: it.imageBase64 }));
+
+  try {
+    const isLineArt = normalizedStyle === 'lineart';
+
+    const convertOne = async (pngBase64: string, promptText?: string) => {
+      const inlineData = pngBase64ToInlineData(normalizePngBase64(pngBase64));
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: promptText || buildStyleConversionPromptForUniform(normalizedStyle) }, { inlineData }],
+          },
+        ],
+      });
+
+      const parts = (response as any)?.candidates?.[0]?.content?.parts;
+      const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
+      if (!imagePart?.data) {
+        throw new Error('Gemini response did not include an image.');
+      }
+
+      const normalized = await normalizeGeminiOutputPngBase64(String(imagePart.data), undefined, { background: WHITE_BG });
+      return await ensureSolidWhiteBackgroundPngBase64(normalized);
+    };
+
+	    const retryConversion = async (
+	      originalPngBase64: string,
+	      view: ViewKey,
+	      originalHasAlpha: boolean,
+	      target: { width: number; height: number }
+	    ): Promise<{ view: ViewKey; imageBase64: string }> => {
+	      if (isLineArt) {
+	        const prompt = [
+	          buildStyleConversionPrompt('lineart'),
+	          'STRICT: Keep the exact same framing, zoom, and size as the input image. Do not crop. Do not zoom.',
+	          'STRICT: Do not add any paper texture, dots, grain, halftone, or background noise.',
+	        ].join(' ');
+
+	        try {
+	          const outRaw = await convertOne(originalPngBase64, prompt);
+	          const out = await cleanupLineArtOutputToTarget(outRaw, target);
+	          await validateLineArtOutput(out);
+	          return { view, imageBase64: out };
+	        } catch (err) {
+	          try {
+	            const fallback = await fallbackLineArtEdgeDetectPngBase64(originalPngBase64);
+	            const out = await cleanupLineArtOutputToTarget(fallback, target);
+	            return { view, imageBase64: out };
+	          } catch {
+	            // Last resort: don't fail the whole request.
+	            return { view, imageBase64: originalPngBase64 };
+	          }
+	        }
+	      }
+
+	      const maxAttempts = 1;
+	      let lastErr: any = null;
+
+	      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+	        try {
+	          const outRaw = await convertOne(originalPngBase64);
+	          if (!outRaw || typeof outRaw !== 'string' || !outRaw.trim()) throw new Error('Empty converted image.');
+
+	          // Non-lineart conversions should keep consistent dimensions with the original view.
+	          let out = await resizeToMatch(outRaw, target, WHITE_BG);
+	          out = await ensureSolidWhiteBackgroundPngBase64(out);
+	          return { view, imageBase64: out };
+	        } catch (err) {
+	          lastErr = err;
+	          if (attempt < maxAttempts) {
+	            console.warn(`Convert style retry ${attempt}/${maxAttempts - 1} for view "${view}"`);
+          }
+        }
+	      }
+
+      console.warn(`Convert style failed for view "${view}", falling back to original.`, lastErr);
+      return { view, imageBase64: originalPngBase64 };
+    };
+
+	    const converted = await Promise.all(
+	      incoming.map(async (it) => {
+	        const original = normalizePngBase64(it.imageBase64);
+	        const originalHasAlpha = await hasMeaningfulTransparency(original).catch(() => false);
+	        const target = await getPngDimensions(original);
+	        return await retryConversion(original, it.view, originalHasAlpha, target);
+	      })
+	    );
+    return res.json({ converted });
+  } catch (err: any) {
+    console.error('Convert style error:', err);
+    return res.status(500).json({ error: mapGeminiError(err) });
+  }
+});
+
+app.post('/api/convert-model', async (req: Request, res: Response) => {
+  const { images, imageFrontBase64, imageBackBase64, modelKey } = req.body as ConvertModelRequestBody;
+  const styleRaw =
+    typeof (req.body as any)?.style === 'string'
+      ? String((req.body as any).style)
+      : typeof (req.body as any)?.sourceStyle === 'string'
+        ? String((req.body as any).sourceStyle)
+        : '';
+  const style = styleRaw.trim().toLowerCase();
+
+  if (!modelKey || (modelKey !== 'male' && modelKey !== 'female')) {
+    return res.status(400).json({ error: 'Invalid modelKey. Allowed: male, female.' });
+  }
+  if (
+    style &&
+    style !== 'realistic' &&
+    style !== '3d' &&
+    style !== '3d_render' &&
+    style !== 'lineart' &&
+    style !== 'watercolor'
+  ) {
+    return res.status(400).json({ error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' });
+  }
+
+  const fallbackImages: Array<{ view: ViewKey; imageBase64: string }> = [];
+  if (typeof imageFrontBase64 === 'string' && imageFrontBase64.trim()) fallbackImages.push({ view: 'front', imageBase64: imageFrontBase64 });
+  if (typeof imageBackBase64 === 'string' && imageBackBase64.trim()) fallbackImages.push({ view: 'back', imageBase64: imageBackBase64 });
+
+  const incomingRaw = Array.isArray(images) && images.length ? images : fallbackImages;
+  const incomingParsed = incomingRaw
+    .filter((it: any) => it && typeof it.imageBase64 === 'string')
+    .map((it: any) => ({
+      rawView: it.view,
+      view: normalizeIncomingViewKey(it.view),
+      imageBase64: String(it.imageBase64 || '').trim(),
+    }));
+
+  if (!incomingParsed.length) return res.status(400).json({ error: 'images is required.' });
+
+  const invalidViews = incomingParsed.filter((it) => !it.view).map((it) => String(it.rawView));
+  if (invalidViews.length) {
+    return res.status(400).json({ error: `Invalid view(s): ${invalidViews.join(', ')}` });
+  }
+
+  const emptyImages = incomingParsed.filter((it) => !it.imageBase64).map((it) => String(it.view));
+  if (emptyImages.length) {
+    return res.status(400).json({ error: `Missing imageBase64 for view(s): ${emptyImages.join(', ')}` });
+  }
+
+  const incoming = incomingParsed.map((it) => ({ view: it.view as ViewKey, imageBase64: it.imageBase64 }));
+
+  try {
+    const incomingFrontBack = incoming.filter((it) => it?.view === 'front' || it?.view === 'back');
+    if (!incomingFrontBack.length) return res.status(400).json({ error: 'images must include front and/or back.' });
+
+    const promptForView = (view: ViewKey) => {
+      // Model previews should always be generated as realistic photography (never CGI/3D),
+      // regardless of the selected generation/style in the UI.
+      return view === 'back' ? modelBackPrompt(modelKey) : modelFrontPrompt(modelKey);
+    };
+
+	    const convertOne = async (pngBase64: string, view: ViewKey, target: { width: number; height: number }) => {
+	      const input = normalizePngBase64(pngBase64);
+	      const inlineData = pngBase64ToInlineData(input);
+	      const basePrompt = promptForView(view);
+
+	      const maxAttempts = view === 'back' ? 3 : 2;
+	      let lastErr: any = null;
+	      let bestOut: string | null = null;
+	      let bestScore = Number.POSITIVE_INFINITY;
+
+	      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+	        try {
+	          const extra =
+	            attempt >= 2
+	              ? [
+	                  'CRITICAL: Zoom OUT. The subject must occupy at most ~70% of image height.',
+	                  'Add extra empty space above the head and below the feet. Feet must be fully visible.',
+	                  'Do NOT crop any body part. Do NOT use a close-up.',
+	                ].join(' ')
+	              : '';
+	          const response = await ai.models.generateContent({
+	            model: 'gemini-2.5-flash-image',
+	            contents: [{ role: 'user', parts: [{ text: [basePrompt, extra].filter(Boolean).join(' ') }, { inlineData }] }],
+	          });
+
+	          const parts = (response as any)?.candidates?.[0]?.content?.parts;
+	          const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
+	          if (!imagePart?.data) throw new Error('Gemini response did not include an image.');
+
+	          let out = await normalizeGeminiOutputPngBase64(String(imagePart.data), undefined, { background: WHITE_BG });
+	          out = await ensureSolidWhiteBackgroundStrict(out);
+	          out = await resizeToMatch(out, target, WHITE_BG);
+
+	          const score = await scoreCroppingRiskOnWhiteBackground(out).catch(() => 9999);
+	          if (score < bestScore) {
+	            bestScore = score;
+	            bestOut = out;
+	          }
+	          // Good enough, stop early.
+	          if (score <= 28) return out;
+
+	          // Otherwise keep trying for a better-framed result.
+	        } catch (err) {
+	          lastErr = err;
+	          if (attempt < maxAttempts) console.warn(`Convert model retry ${attempt}/${maxAttempts - 1} for view "${view}"`);
+	        }
+	      }
+
+	      if (bestOut) return bestOut;
+	      throw lastErr instanceof Error ? lastErr : new Error('Model conversion failed.');
+	    };
+
+	    const converted = await Promise.all(
+	      incomingFrontBack.map(async (it) => {
+	        const input = normalizePngBase64(it.imageBase64);
+	        const target = await getPngDimensions(input);
+	        return { view: it.view, imageBase64: await convertOne(input, it.view, target) };
+	      })
+	    );
+    return res.json({ converted });
+  } catch (err: any) {
+    console.error('Convert model error:', err);
+    return res.status(500).json({ error: mapGeminiError(err) });
+  }
+});
+
+app.post('/api/export', jsonLarge, async (req: Request, res: Response) => {
+  const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
+  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+
+  try {
+    cleanupExportSessions();
+    const formatRaw = typeof req.body?.format === 'string' ? req.body.format.trim().toLowerCase() : '';
+    const format: ExportFormat = formatRaw === 'pdf' ? 'pdf' : formatRaw === 'composite' ? 'composite' : 'zip';
+    const items: ExportItem[] = Array.isArray(req.body?.items) ? req.body.items : [];
+
+    if (!items.length) return res.status(400).json({ error: 'items must be a non-empty array.' });
+    const invalid = items.find((it: any) => !it?.name || typeof it.name !== 'string' || typeof it.imageBase64 !== 'string');
+    if (invalid) return res.status(400).json({ error: 'Each item must include { name, imageBase64 }.' });
+
+    const exportId = randomUUID();
+    exportSessions.set(exportId, { userId, format, items, createdAt: Date.now() });
+    return res.json({ exportId, url: `/api/export?exportId=${exportId}` });
+  } catch (err: any) {
+    console.error('Export init error:', err);
+    return res.status(500).json({ error: err?.message || 'Failed to prepare export.' });
+  }
+});
+
+app.get('/api/export', async (req: Request, res: Response) => {
+  const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
+  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+
+  try {
+    cleanupExportSessions();
+    const exportId = typeof req.query.exportId === 'string' ? req.query.exportId.trim() : '';
+    if (!exportId) return res.status(400).json({ error: 'exportId is required.' });
+
+    const sess = exportSessions.get(exportId);
+    if (!sess || sess.userId !== userId) return res.status(404).json({ error: 'Export not found.' });
+
+    const items = sess.items;
+
+    if (sess.format === 'zip') {
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename=\"uniform-export-${exportId}.zip\"`);
+      const archive = archiver('zip', { zlib: { level: 9 } });
+      archive.on('error', (err) => {
+        console.error('Export zip error', err);
+        if (!res.headersSent) res.status(500).end();
+      });
+      archive.pipe(res);
+
+      for (const item of items) {
+        const buf = Buffer.from(normalizePngBase64(item.imageBase64), 'base64');
+        archive.append(buf, { name: item.name.endsWith('.png') ? item.name : `${item.name}.png` });
+      }
+
+      await archive.finalize();
+      return;
+    }
+
+    if (sess.format === 'composite') {
+      const png = await buildCompositeGridPng(items);
+      res.setHeader('Content-Type', 'image/png');
+      res.setHeader('Content-Disposition', `attachment; filename=\"uniform-export-${exportId}.png\"`);
+      res.end(png);
+      return;
+    }
+
+    const { PDFDocument, StandardFonts } = await import('pdf-lib');
+    const pdf = await PDFDocument.create();
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+
+    const page = pdf.addPage([612, 792]); // letter
+    const margin = 36;
+    const gap = 12;
+    const columns = 2;
+    const cellW = (page.getWidth() - margin * 2 - gap) / columns;
+    const cellH = cellW;
+    let x = margin;
+    let y = page.getHeight() - margin - cellH;
+
+    page.drawText('Uniform Export', { x: margin, y: page.getHeight() - margin + 6, size: 14, font });
+
+    for (let i = 0; i < items.length; i += 1) {
+      const item = items[i];
+      const buf = Buffer.from(normalizePngBase64(item.imageBase64), 'base64');
+      const png = await pdf.embedPng(buf);
+      const scale = Math.min(cellW / png.width, cellH / png.height);
+      const w = png.width * scale;
+      const h = png.height * scale;
+      const dx = x + (cellW - w) / 2;
+      const dy = y + (cellH - h) / 2;
+
+      page.drawImage(png, { x: dx, y: dy, width: w, height: h });
+      page.drawText(item.name.replace(/\\.png$/i, ''), { x, y: y - 12, size: 9, font });
+
+      if (i % columns === 0) {
+        x = margin + cellW + gap;
+      } else {
+        x = margin;
+        y -= cellH + 24 + gap;
+      }
+    }
+
+    const bytes = await pdf.save();
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=\"uniform-export-${exportId}.pdf\"`);
+    res.end(Buffer.from(bytes));
+  } catch (err: any) {
+    console.error('Export error:', err);
+    if (!res.headersSent) res.status(500).json({ error: err?.message || 'Export failed.' });
   }
 });
 
@@ -2318,19 +5057,25 @@ app.post('/api/designs', async (req, res) => {
       throw new Error('Image must be a PNG data URL.');
     };
 
-    const compositeDataUrl = await resolvePngInputToDataUrl(validation.data.composite);
     const imageDataUrls = await Promise.all(validation.data.images.map((img: any) => resolvePngInputToDataUrl(img)));
 
-    const compositeFileId = await uploadDataUrlToGridFS(compositeDataUrl, `composite-${Date.now()}.png`);
     const imageFileIds = await Promise.all(
       imageDataUrls.map((dataUrl, idx) =>
         uploadDataUrlToGridFS(dataUrl, `${validation.data.images[idx]?.view || idx}-${Date.now()}.png`)
       )
     );
 
+    let compositeField: any | undefined = undefined;
+    if (validation.data.composite) {
+      const compositeDataUrl = await resolvePngInputToDataUrl(validation.data.composite);
+      const compositeFileId = await uploadDataUrlToGridFS(compositeDataUrl, `composite-${Date.now()}.png`);
+      compositeField = { mime: 'image/png', fileId: compositeFileId.toString() };
+    }
+
+    const { composite: _composite, ...dataWithoutComposite } = validation.data as any;
     const doc = await Design.create({
-      ...validation.data,
-      composite: { mime: 'image/png', fileId: compositeFileId.toString() },
+      ...dataWithoutComposite,
+      ...(compositeField ? { composite: compositeField } : {}),
       images: validation.data.images.map((img: any, idx: number) => ({
         view: img.view,
         mime: img.mime,
@@ -2405,11 +5150,14 @@ app.get('/api/designs/:id', async (req, res) => {
       style: doc.style,
       resolution: doc.resolution,
       views: doc.views,
-      composite: {
-        mime: doc.composite.mime,
-        url: buildFileUrl(doc.composite.fileId),
-        dataUrl: doc.composite.dataUrl,
-      },
+      composite:
+        doc.composite?.fileId || doc.composite?.dataUrl
+          ? {
+              mime: doc.composite?.mime,
+              url: buildFileUrl(doc.composite?.fileId),
+              dataUrl: doc.composite?.dataUrl,
+            }
+          : null,
       images: doc.images.map((img: any) => ({
         view: img.view,
         mime: img.mime,
@@ -2474,11 +5222,11 @@ app.get('/api/designs/:id/download.zip', async (req, res) => {
     });
     archive.pipe(res);
 
-    // Composite
-    if (doc.composite.fileId) {
+    // Composite (optional; not saved by the multi-view generator anymore)
+    if (doc.composite?.fileId) {
       const stream = await getReadStream(doc.composite.fileId);
       archive.append(stream, { name: 'composite.png' });
-    } else if (doc.composite.dataUrl) {
+    } else if (doc.composite?.dataUrl) {
       const { buffer } = dataUrlToBuffer(doc.composite.dataUrl);
       archive.append(buffer, { name: 'composite.png' });
     }

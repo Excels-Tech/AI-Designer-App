@@ -13,22 +13,18 @@ import {
   Plus,
   X,
   Users,
-  User,
-  Baby,
   ChevronDown,
   Check,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { toast } from 'sonner';
 import { authFetch, getUserId } from '../utils/auth';
 import { TOOLBAR_ICON_BTN, TOOLBAR_PILL_BTN } from './ui/toolbarStyles';
 
-type ModelStyleKey = 'modelMale' | 'modelFemale' | 'modelKid';
 type ArtStyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor';
-type StyleKey = ArtStyleKey | ModelStyleKey;
-type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'top';
+type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'closeUp' | 'top';
 type FramingMode = 'preserve' | 'zoomIn' | 'zoomOut';
+type MannequinModelKey = 'male' | 'female';
 
 interface AIImageGeneratorProps {
   onGenerate?: (composite: string) => void;
@@ -37,6 +33,7 @@ interface AIImageGeneratorProps {
 interface GeneratedImage {
   view: ViewKey;
   src: string;
+  imageBase64?: string;
 }
 
 interface GenerateResponse {
@@ -47,10 +44,11 @@ interface GenerateResponse {
 
 type GeneratedVariant = {
   id: string;
+  kind?: 'base' | 'style_converted' | 'model_preview';
   styleLabel: string;
   styleKey?: ArtStyleKey;
   modelLabel?: string;
-  modelKey?: ModelStyleKey;
+  modelKey?: MannequinModelKey;
   views: ViewKey[];
   composite: string;
   images: GeneratedImage[];
@@ -94,36 +92,25 @@ const styleOptions: { id: ArtStyleKey; label: string; preview: string; helper: s
   },
 ];
 
-const modelOptions: Array<{ id: ModelStyleKey; label: string; icon: LucideIcon; helper: string }> = [
-  { id: 'modelMale', label: 'Male', icon: User, helper: 'shirt on male model' },
-  { id: 'modelFemale', label: 'Female', icon: User, helper: 'shirt on female model' },
-  { id: 'modelKid', label: 'Kid', icon: Baby, helper: 'shirt on kid model' },
-];
-
 const viewOptions: { id: ViewKey; label: string }[] = [
   { id: 'front', label: 'Front View' },
   { id: 'back', label: 'Back View' },
   { id: 'left', label: 'Left Side' },
   { id: 'right', label: 'Right Side' },
   { id: 'threeQuarter', label: '3/4 View' },
-  { id: 'top', label: 'Top View' },
+  { id: 'closeUp', label: 'Close-up View' },
 ];
 
 const viewLabel = (view: ViewKey) => viewOptions.find((v) => v.id === view)?.label ?? view;
 
-const VIEW_ORDER: ViewKey[] = ['front', 'back', 'left', 'right', 'threeQuarter', 'top'];
+const VIEW_ORDER: ViewKey[] = ['front', 'back', 'left', 'right', 'threeQuarter', 'closeUp', 'top'];
 
-export function normalizeViews(selectedViews: ViewKey[]): ViewKey[] {
+function normalizeViews(selectedViews: ViewKey[]): ViewKey[] {
   const normalized = new Set<ViewKey>(selectedViews);
   normalized.add('front');
   normalized.add('back');
   return VIEW_ORDER.filter((v) => normalized.has(v));
 }
-
-const modelOptionLabel = (style: ModelStyleKey) => {
-  const match = modelOptions.find((opt) => opt.id === style);
-  return match ? `Model (${match.label})` : 'Model';
-};
 
 const appendPromptModifier = (prompt: string, modifier: string) => {
   const trimmedPrompt = prompt.trim();
@@ -291,6 +278,12 @@ function AutoScaledPreviewImage({
       }}
     />
   );
+}
+
+function isProbablyValidPngDataUrl(src: string) {
+  const trimmed = String(src || '').trim();
+  const match = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/i.exec(trimmed);
+  return Boolean(match?.[1] && match[1].length > 1000);
 }
 
 function trimCanvasToContent(
@@ -853,13 +846,14 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   };
 
   const [prompt, setPrompt] = useState('');
-  const [selectedStyles, setSelectedStyles] = useState<ArtStyleKey[]>(['3d']);
-  const [selectedModels, setSelectedModels] = useState<ModelStyleKey[]>([]);
+  const [selectedStyle, setSelectedStyle] = useState<ArtStyleKey>('3d');
   const [resolution, setResolution] = useState<number>(1024);
   const [selectedViews, setSelectedViews] = useState<ViewKey[]>(['front', 'back']);
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [styleProgress, setStyleProgress] = useState<Record<string, 'pending' | 'converting' | 'done' | 'error'>>({});
+  const [lastStyleTarget, setLastStyleTarget] = useState<ArtStyleKey | null>(null);
   const [result, setResult] = useState<GenerateResponse | null>(null);
   const [variants, setVariants] = useState<GeneratedVariant[]>([]);
   const [editedImageDataUrl, setEditedImageDataUrl] = useState<string | null>(null);
@@ -869,7 +863,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const [uploadedImageDataUrl, setUploadedImageDataUrl] = useState<string | null>(null);
   const [uploadedImageName, setUploadedImageName] = useState<string | null>(null);
   const [uploadedImageFile, setUploadedImageFile] = useState<File | null>(null);
-  const [framingMode, setFramingMode] = useState<FramingMode>('preserve');
+  const [selectedModel, setSelectedModel] = useState<MannequinModelKey>('male');
   const [savedDesignId, setSavedDesignId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -878,58 +872,8 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const [userId, setUserId] = useState<string | null>(null);
   const [designName, setDesignName] = useState('');
   const [hasResultFlag, setHasResultFlag] = useState(false);
-  const [openMenu, setOpenMenu] = useState<'model' | 'resolution' | 'style' | 'views' | 'framing' | null>(null);
+  const [openMenu, setOpenMenu] = useState<'convertStyle' | 'convertModel' | 'resolution' | 'style' | 'views' | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
-
-  type GenerationPlanItem = {
-    kind: 'style' | 'model';
-    style: ArtStyleKey;
-    styleLabel: string;
-    modelKey?: ModelStyleKey;
-    modelLabel?: string;
-    views: ViewKey[];
-  };
-
-  function getViewsForGeneration(selected: ViewKey[]): ViewKey[] {
-    // Business rule: only generate side views when user explicitly selects the standard 4 views.
-    const normalized = normalizeViews(selected);
-    const hasFourStandard = (['front', 'back', 'left', 'right'] as const).every((v) => normalized.includes(v));
-    return hasFourStandard ? (['front', 'back', 'left', 'right'] as ViewKey[]) : (['front', 'back'] as ViewKey[]);
-  }
-
-  function buildGenerationPlan({
-    selectedStyles: stylesInput,
-    selectedViews: viewsInput,
-    selectedModel,
-  }: {
-    selectedStyles: ArtStyleKey[];
-    selectedViews: ViewKey[];
-    selectedModel: ModelStyleKey | null;
-  }): GenerationPlanItem[] {
-    const styles = stylesInput.length ? stylesInput : (['realistic'] as ArtStyleKey[]);
-    const views = getViewsForGeneration(viewsInput);
-
-    const items: GenerationPlanItem[] = styles.map((style) => ({
-      kind: 'style',
-      style,
-      styleLabel: styleOptions.find((opt) => opt.id === style)?.label ?? style,
-      views,
-    }));
-
-    if (selectedModel) {
-      const modelOpt = modelOptions.find((opt) => opt.id === selectedModel);
-      items.push({
-        kind: 'model',
-        style: styles[0] ?? 'realistic',
-        styleLabel: styleOptions.find((opt) => opt.id === (styles[0] ?? 'realistic'))?.label ?? (styles[0] ?? 'realistic'),
-        modelKey: selectedModel,
-        modelLabel: modelOpt?.label ?? selectedModel,
-        views: ['front', 'back'],
-      });
-    }
-
-    return items;
-  }
 
   useEffect(() => {
     setUserId(getUserId());
@@ -948,31 +892,15 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const previewCompact = Boolean(uploadedImageDataUrl) && (hasEditedViews || Boolean(editedImageDataUrl));
 
   const selectedViewsLabel = 'View Angles';
-  // Legacy variable retained to avoid touching older generation branches below.
-  const effectiveStyle: ArtStyleKey = selectedStyles[0] ?? 'realistic';
-  const selectedStyleLabels = useMemo(
-    () => selectedStyles.map((style) => styleOptions.find((opt) => opt.id === style)?.label ?? style),
-    [selectedStyles]
-  );
+  const effectiveStyle: ArtStyleKey = selectedStyle ?? 'realistic';
   const styleButtonLabel = useMemo(() => {
-    if (selectedStyleLabels.length === 1) return `Style: ${selectedStyleLabels[0]}`;
-    if (selectedStyleLabels.length === 2) return `Style: ${selectedStyleLabels[0]} + ${selectedStyleLabels[1]}`;
-    return 'Style';
-  }, [selectedStyleLabels]);
-  const isEditMode = Boolean(uploadedImageDataUrl || uploadedImageFile);
-  const hasSingleEditResult = isEditMode && Boolean(editedImageDataUrl) && !hasEditedViews;
-  const modelPreferenceLabel = useMemo(() => {
-    if (!selectedModels.length) return 'None';
-    return selectedModels.map((id) => modelOptions.find((opt) => opt.id === id)?.label ?? id).join(' + ');
-  }, [selectedModels]);
-  const globalModelValue = useMemo<'male' | 'female' | 'kid' | 'none'>(() => {
-    const first = selectedModels[0];
-    if (first === 'modelMale') return 'male';
-    if (first === 'modelFemale') return 'female';
-    if (first === 'modelKid') return 'kid';
-    return 'none';
-  }, [selectedModels]);
-  const globalResolutionValue = useMemo(() => `${resolution}x${resolution}`, [resolution]);
+    const label = styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? effectiveStyle;
+    return `Style: ${label}`;
+  }, [effectiveStyle]);
+  const hasReferenceImage = Boolean(uploadedImageDataUrl || uploadedImageFile);
+  const hasSingleEditResult = false;
+  const baseVariant = useMemo(() => variants.find((v) => v.kind === 'base') ?? null, [variants]);
+  const globalResolutionValue = useMemo(() => `${resolution}×${resolution}`, [resolution]);
 
   useEffect(() => {
     setSelectedViews((prev) => normalizeViews(prev));
@@ -985,28 +913,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     });
   };
 
-  const toggleModel = (modelId: ModelStyleKey) => {
-    setSelectedModels((prev) => {
-      const isActive = prev.includes(modelId);
-      if (isActive) return prev.filter((m) => m !== modelId);
-      if (prev.length >= 2) {
-        toast('You can select maximum 2 models');
-        return prev;
-      }
-      return [...prev, modelId];
-    });
-  };
-
-  useEffect(() => {
-    if (!selectedModels.length) return;
-    setSelectedViews((prev) => normalizeViews(prev));
-  }, [selectedModels]);
-
   const clearUploadedImage = () => {
     setUploadedImageDataUrl(null);
     setUploadedImageName(null);
     setUploadedImageFile(null);
-    setFramingMode('preserve');
     setEditedImageDataUrl(null);
     setEditedViews(null);
     setResult(null);
@@ -1051,21 +961,28 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     setHasResultFlag(false);
     setStatusMessage('');
   };
-
   const handleGenerate = async () => {
     const trimmedPrompt = prompt.trim();
-    const hasUploadedImage = Boolean(uploadedImageDataUrl || uploadedImageFile);
-
     if (!trimmedPrompt) {
-      setError(isEditMode ? 'Describe what to change…' : 'Please enter a prompt.');
+      setError('Please enter a prompt.');
       return;
     }
 
     const normalizedViews = normalizeViews(selectedViews);
+    if (!normalizedViews.length) {
+      setError('Please select at least one view.');
+      return;
+    }
+
+    const referenceMatch = uploadedImageDataUrl ? /^data:([^;]+);base64,(.+)$/i.exec(uploadedImageDataUrl) : null;
+    const referenceImageBase64 = referenceMatch?.[2] ?? null;
+    const referenceImageMimeType = referenceMatch?.[1] ?? (uploadedImageFile?.type || null);
 
     setIsGenerating(true);
-    setStatusMessage(hasUploadedImage ? 'Sending image to Gemini...' : 'Sending prompt to Gemini...');
+    setStatusMessage('Generating base design (front view)...');
     setError(null);
+    setStyleProgress({});
+    setLastStyleTarget(null);
     setSaveMessage(null);
     setSaveError(null);
     setSavedDesignId(null);
@@ -1078,231 +995,214 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     setHasResultFlag(false);
 
     try {
-      if (hasUploadedImage) {
-        const promptForModel = appendPromptModifier(
-          appendPromptModifier(trimmedPrompt, framingPromptModifier(framingMode)),
-          WHITE_BACKGROUND_PROMPT
-        );
-        const originalImageDataUrl =
-          uploadedImageDataUrl || (uploadedImageFile ? await readFileAsDataUrl(uploadedImageFile) : '');
-        if (!originalImageDataUrl) throw new Error('Missing uploaded image.');
-
-        const paddedImageDataUrl = uploadedImageFile
-          ? await readFileAsDataUrl(await addPaddingToImage(uploadedImageFile, PADDING_PERCENT))
-          : originalImageDataUrl;
-        const body: Record<string, unknown> = {
-          imageDataUrl: paddedImageDataUrl,
-          prompt: promptForModel,
+      const baseResp = await authFetch('/api/generate-base', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: trimmedPrompt,
+          style: effectiveStyle,
           resolution,
-        };
+          ...(referenceImageBase64 ? { referenceImageBase64, referenceImageMimeType } : {}),
+        }),
+      });
+      const basePayload = await baseResp.json().catch(() => ({}));
+      if (!baseResp.ok) throw new Error(basePayload.error || 'Base generation failed.');
+      if (!basePayload?.baseImage) throw new Error('Base generation failed.');
 
-        if (selectedModels.length > 1) toast('Edit mode supports one model; using the first selected.');
-        if (globalModelValue !== 'none') body.model = globalModelValue;
+      setStatusMessage('Generating requested views from the base design...');
+      const viewsResp = await authFetch('/api/generate-views-from-base', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseImageBase64: basePayload.baseImage,
+          views: normalizedViews,
+          style: effectiveStyle,
+          resolution,
+          prompt: trimmedPrompt,
+        }),
+      });
+      const viewsPayload = await viewsResp.json().catch(() => ({}));
+      if (!viewsResp.ok) throw new Error(viewsPayload.error || 'View generation failed.');
+      if (!viewsPayload?.compositeBase64 || !Array.isArray(viewsPayload.images)) throw new Error('View generation failed.');
 
-        const response = await authFetch('/api/image/edit', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-
-        if (!response.ok) {
-          const payload = await response.json().catch(() => ({}));
-          throw new Error(payload.error || 'Edit failed.');
-        }
-
-        const payload: SingleEditResponse = await response.json();
-        if (!payload?.imageDataUrl) throw new Error('Edit failed.');
-        setEditedImageDataUrl(await ensureWhiteBackgroundPngDataUrl(payload.imageDataUrl));
-        setStatusMessage('Image edited successfully.');
-      } else {
-        const modelKey = selectedModels.length ? selectedModels[0] : null;
-        if (selectedModels.length > 1) toast('Model output supports one model; using the first selected.');
-
-        const plan = buildGenerationPlan({
-          selectedStyles: selectedStyles.length ? selectedStyles : (['realistic'] as ArtStyleKey[]),
-          selectedViews: normalizedViews,
-          selectedModel: modelKey,
-        });
-
-        let requestIndex = 0;
-        const totalRequests = plan.length;
-        const nextVariants: GeneratedVariant[] = [];
-        let emittedPrimary = false;
-
-        for (const item of plan) {
-          requestIndex += 1;
-
-          const groupLabel =
-            item.kind === 'model' ? `Model ${item.modelLabel ?? ''} (${item.styleLabel})`.trim() : item.styleLabel;
-          setStatusMessage(`Generating ${groupLabel} (${requestIndex}/${totalRequests})...`);
-
-          const baseLines = [
-            trimmedPrompt,
-            `Style: ${item.styleLabel}.`,
-            `View order: ${item.views.map((v) => viewLabel(v)).join(' -> ')}.`,
-            'No collages; one view per image; keep the same product/design.',
-          ];
-
-          const extraLines: Array<string | null> = [];
-          if (item.kind === 'style' && item.style === '3d') extraLines.push(THREE_D_NO_MANNEQUIN_PROMPT);
-          if (item.kind === 'model') {
-            extraLines.push(MODEL_NO_MANNEQUIN_PROMPT);
-            extraLines.push(`Model: ${item.modelLabel ?? 'Model'} wearing the same uniform design.`);
-          }
-          extraLines.push(WHITE_BACKGROUND_PROMPT);
-
-          const promptForViews = [...baseLines, ...extraLines].filter(Boolean).join('\n');
-
-          const response = await authFetch('/api/generate-views', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              prompt: promptForViews,
-              style: item.style,
-              views: item.views,
-              resolution,
-            }),
-          });
-
-          if (!response.ok) {
-            const payload = await response.json().catch(() => ({}));
-            throw new Error(payload.error || 'Generation failed.');
-          }
-
-          const payload: GenerateResponse = await response.json();
-          const normalizedComposite = await ensureWhiteBackgroundPngDataUrl(payload.composite);
-          const trimmedImages = await Promise.all(
-            (payload.images ?? []).map(async (img) => ({
-              ...img,
-              src: await ensureTrimmedPngDataUrl(img.src),
-            }))
-          );
-
-          const newVariant: GeneratedVariant = {
-            id: crypto.randomUUID(),
-            styleLabel: item.styleLabel,
-            styleKey: item.style,
-            ...(item.kind === 'model' ? { modelLabel: item.modelLabel, modelKey: item.modelKey } : null),
-            views: item.views,
-            composite: normalizedComposite,
-            images: trimmedImages,
-          };
-
-          nextVariants.push(newVariant);
-          setVariants((prev) => [...prev, newVariant]);
-
-          if (!emittedPrimary && normalizedComposite) {
-            emittedPrimary = true;
-            onGenerate?.(normalizedComposite);
-          }
-        }
-
-        setHasResultFlag(nextVariants.length > 0);
-        setStatusMessage(`Generated ${nextVariants.length} output${nextVariants.length === 1 ? '' : 's'}.`);
-
-        /* Legacy generation path (disabled):
-        if (!modelStyle && selectedViews.length === 4 && selectedStyles.length === 2) {
-          const [style1, style2] = selectedStyles;
-          const [label1, label2] = selectedStyleLabels;
-          const firstViews = selectedViews.slice(0, 2);
-          const secondViews = selectedViews.slice(2, 4);
-
-          const makePrompt = (styleLabel: string, views: ViewKey[]) =>
-            [
-              trimmedPrompt,
-              `Style assignment: This request is for ${views.map((v) => viewLabel(v)).join(' + ')} using ${styleLabel} style.`,
-              `No collages; one view per image; keep the same product/design.`,
-            ].join('\n');
-
-          setStatusMessage(`Generating ${label1} (views 1–2)...`);
-          const response1 = await authFetch('/api/generate-views', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              prompt: makePrompt(label1, firstViews),
-              style: style1,
-              views: firstViews,
-              resolution,
-            }),
-          });
-          if (!response1.ok) {
-            const payload = await response1.json().catch(() => ({}));
-            throw new Error(payload.error || 'Generation failed.');
-          }
-
-          setStatusMessage(`Generating ${label2} (views 3–4)...`);
-          const response2 = await authFetch('/api/generate-views', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              prompt: makePrompt(label2, secondViews),
-              style: style2,
-              views: secondViews,
-              resolution,
-            }),
-          });
-          if (!response2.ok) {
-            const payload = await response2.json().catch(() => ({}));
-            throw new Error(payload.error || 'Generation failed.');
-          }
-
-          const payload1: GenerateResponse = await response1.json();
-          const payload2: GenerateResponse = await response2.json();
-
-          const viewToSrc = new Map<ViewKey, string>();
-          payload1.images.forEach((img) => viewToSrc.set(img.view, img.src));
-          payload2.images.forEach((img) => viewToSrc.set(img.view, img.src));
-
-          const orderedTiles: GeneratedImage[] = selectedViews.map((view) => {
-            const src = viewToSrc.get(view);
-            if (!src) throw new Error(`Missing generated view: ${view}`);
-            return { view, src };
-          });
-
-          const composite = await composeCompositeFromTiles(orderedTiles, resolution);
-          const merged: GenerateResponse = { composite, images: orderedTiles };
-          setResult(merged);
-          setHasResultFlag(true);
-          setStatusMessage('Composite generated and cropped automatically.');
-          onGenerate?.(composite);
-        } else {
-          const singleStyleLabel = modelStyle ? modelOptionLabel(modelStyle) : selectedStyleLabels[0] ?? 'Style';
-          const promptForViews = [
-            trimmedPrompt,
-            `Style assignment: All ${selectedViews.length} view(s) must use ${singleStyleLabel} style.`,
-            `View order: ${selectedViews.map((v) => viewLabel(v)).join(' → ')}.`,
-          ].join('\n');
-
-          const response = await authFetch('/api/generate-views', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              prompt: promptForViews,
-              style: effectiveStyle,
-              views: selectedViews,
-              resolution,
-            }),
-          });
-
-          if (!response.ok) {
-            const payload = await response.json().catch(() => ({}));
-            throw new Error(payload.error || 'Generation failed.');
-          }
-
-          const payload: GenerateResponse = await response.json();
-          setResult(payload);
-          setHasResultFlag(Boolean(payload?.composite && payload?.images?.length));
-          setStatusMessage('Composite generated and cropped automatically.');
-          onGenerate?.(payload.composite);
-        }
-        */
+      const viewToBase64 = new Map<ViewKey, string>();
+      for (const it of viewsPayload.images as Array<{ view: ViewKey; imageBase64: string }>) {
+        if (it?.view && it?.imageBase64) viewToBase64.set(it.view, it.imageBase64);
       }
+
+      const orderedImages: GeneratedImage[] = normalizedViews.map((view) => {
+        const imageBase64 = viewToBase64.get(view);
+        if (!imageBase64) throw new Error(`Missing generated view: ${view}`);
+        return { view, src: `data:image/png;base64,${imageBase64}`, imageBase64 };
+      });
+
+      const composite = `data:image/png;base64,${String(viewsPayload.compositeBase64)}`;
+      const baseVariant: GeneratedVariant = {
+        id: crypto.randomUUID(),
+        kind: 'base',
+        styleLabel: styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? String(effectiveStyle),
+        styleKey: effectiveStyle,
+        views: normalizedViews,
+        composite,
+        images: orderedImages,
+      };
+
+      setVariants([baseVariant]);
+      setHasResultFlag(true);
+      setStatusMessage('Generated views successfully.');
+      onGenerate?.(composite);
     } catch (err: any) {
       setError(err?.message || 'Something went wrong while generating images.');
       setResult(null);
       setVariants([]);
       setEditedImageDataUrl(null);
       setEditedViews(null);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleConvertStyle = async (target: ArtStyleKey) => {
+    const base = variants.find((v) => v.kind === 'base') ?? null;
+    if (!base) return;
+
+    setIsGenerating(true);
+    setLastStyleTarget(target);
+    setStatusMessage(`Converting style to ${styleOptions.find((opt) => opt.id === target)?.label ?? target}...`);
+    setError(null);
+    setStyleProgress(Object.fromEntries(base.views.map((v) => [v, 'pending' as const])));
+
+    try {
+      const viewToBase64 = new Map<ViewKey, string>();
+      const viewToInput = new Map<ViewKey, string>();
+      for (const img of base.images) {
+        viewToInput.set(img.view, img.imageBase64 ?? '');
+      }
+
+      for (let i = 0; i < base.views.length; i += 1) {
+        const view = base.views[i];
+        const viewKey = view;
+        setStyleProgress((prev) => ({ ...prev, [viewKey]: 'converting' }));
+        setStatusMessage(
+          `Converting style to ${styleOptions.find((opt) => opt.id === target)?.label ?? target} (${i + 1}/${
+            base.views.length
+          })...`
+        );
+
+        const inputBase64 = viewToInput.get(view) ?? '';
+        const resp = await authFetch('/api/convert-style', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            images: [{ view: viewKey, imageBase64: inputBase64 }],
+            styleKey: target,
+          }),
+        });
+        const payload = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          setStyleProgress((prev) => ({ ...prev, [viewKey]: 'error' }));
+          throw new Error(payload.error || `Style conversion failed for ${viewKey}.`);
+        }
+        if (!Array.isArray(payload.converted) || !payload.converted[0]?.imageBase64) {
+          setStyleProgress((prev) => ({ ...prev, [viewKey]: 'error' }));
+          throw new Error(`Style conversion failed for ${viewKey}.`);
+        }
+
+        viewToBase64.set(view, String(payload.converted[0].imageBase64));
+        setStyleProgress((prev) => ({ ...prev, [viewKey]: 'done' }));
+      }
+
+      const orderedImages: GeneratedImage[] = base.views.map((view) => {
+        const imageBase64 = viewToBase64.get(view);
+        if (!imageBase64) throw new Error(`Missing converted view: ${view}`);
+        return { view, src: `data:image/png;base64,${imageBase64}`, imageBase64 };
+      });
+
+      const composite = await composeCompositeFromTiles(orderedImages, resolution);
+      const styleVariant: GeneratedVariant = {
+        id: crypto.randomUUID(),
+        kind: 'style_converted',
+        styleLabel: styleOptions.find((opt) => opt.id === target)?.label ?? String(target),
+        styleKey: target,
+        views: base.views,
+        composite,
+        images: orderedImages,
+      };
+
+      setVariants((prev) => {
+        const keep = prev.filter((v) => v.kind !== 'style_converted' && v.kind !== 'model_preview');
+        return [...keep, styleVariant];
+      });
+      setStatusMessage('Style converted.');
+    } catch (err: any) {
+      setError(err?.message || 'Style conversion failed.');
+      setStatusMessage('Style conversion failed.');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleConvertModel = async (modelKey: MannequinModelKey) => {
+    const base = variants.find((v) => v.kind === 'base') ?? null;
+    if (!base) return;
+
+    const modelSourceImages = base.images.filter((img) => img.view === 'front' || img.view === 'back');
+    if (!modelSourceImages.length) {
+      setError('Missing base front/back views for model conversion.');
+      return;
+    }
+
+    setIsGenerating(true);
+    setStatusMessage(`Generating ${modelKey} mannequin previews...`);
+    setError(null);
+
+    try {
+      const resp = await authFetch('/api/convert-model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          images: modelSourceImages.map((img) => ({ view: img.view, imageBase64: img.imageBase64 ?? '' })),
+          modelKey,
+          // Model previews should always be generated as realistic photography (not 3D/CGI),
+          // regardless of the selected generation style.
+          style: 'realistic',
+        }),
+      });
+      const payload = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(payload.error || 'Model conversion failed.');
+      if (!Array.isArray(payload.converted)) throw new Error('Model conversion failed.');
+
+      const viewToBase64 = new Map<ViewKey, string>();
+      for (const it of payload.converted as Array<{ view: ViewKey; imageBase64: string }>) {
+        if (it?.view && it?.imageBase64) viewToBase64.set(it.view, it.imageBase64);
+      }
+
+      const orderedImages: GeneratedImage[] = modelSourceImages.map((img) => img.view).map((view) => {
+        const imageBase64 = viewToBase64.get(view);
+        if (!imageBase64) throw new Error(`Missing model preview view: ${view}`);
+        return { view, src: `data:image/png;base64,${imageBase64}`, imageBase64 };
+      });
+
+      const composite = await composeCompositeFromTiles(orderedImages, resolution);
+      const modelVariant: GeneratedVariant = {
+        id: crypto.randomUUID(),
+        kind: 'model_preview',
+        styleLabel: 'Realistic',
+        styleKey: 'realistic',
+        modelLabel: modelKey === 'male' ? 'Male' : 'Female',
+        modelKey,
+        views: orderedImages.map((i) => i.view),
+        composite,
+        images: orderedImages,
+      };
+
+      setVariants((prev) => {
+        const keep = prev.filter((v) => v.kind !== 'model_preview');
+        return [...keep, modelVariant];
+      });
+      setStatusMessage('Model previews generated.');
+    } catch (err: any) {
+      setError(err?.message || 'Model conversion failed.');
     } finally {
       setIsGenerating(false);
     }
@@ -1347,7 +1247,6 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         const nameWithSuffix = `${finalName}${suffix}`.slice(0, 60);
 
         const viewsToSave = (variant.images || []).map((img) => img.view);
-        const compositeDataUrl = await ensureWhiteBackgroundPngDataUrl(variant.composite);
         const imageDataUrls = await Promise.all(variant.images.map((img) => ensureTrimmedPngDataUrl(img.src)));
 
         const payload = {
@@ -1358,7 +1257,6 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           style: variant.styleKey ?? effectiveStyle,
           resolution,
           views: viewsToSave,
-          composite: compositeDataUrl,
           images: variant.images.map((img, idx) => ({ view: img.view, dataUrl: imageDataUrls[idx] })),
         };
 
@@ -1387,55 +1285,65 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     }
   };
 
-  const handleDownloadAll = () => {
-    const variantsToDownload = variants.length
-      ? variants
-      : result
-        ? [
-            {
-              id: 'single',
-              styleLabel: styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? String(effectiveStyle),
-              styleKey: effectiveStyle,
-              views: result.images.map((i) => i.view),
-              composite: result.composite,
-              images: result.images,
-            } as GeneratedVariant,
-          ]
-        : [];
+  const handleDownloadAll = async () => {
+    const stripPngDataUrl = (dataUrl: string) => {
+      const match = /^data:image\/png;base64,(.+)$/i.exec(String(dataUrl || '').trim());
+      return match?.[1] ?? '';
+    };
 
-    if (!variantsToDownload.length) return;
+    const baseVariant =
+      variants.find((v) => v.kind === 'base') ??
+      (result
+        ? ({
+            id: 'single',
+            kind: 'base',
+            styleLabel: styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? String(effectiveStyle),
+            styleKey: effectiveStyle,
+            views: result.images.map((i) => i.view),
+            composite: result.composite,
+            images: result.images,
+          } as GeneratedVariant)
+        : null);
 
-    if (savedDesignId && savedDesignIds.length <= 1) {
-      const uid = userId || getUserId();
-      authFetch(`/api/designs/${savedDesignId}/download.zip`, {
-        method: 'GET',
-      })
-        .then(async (resp) => {
-          if (!resp.ok) {
-            const data = await resp.json().catch(() => ({}));
-            throw new Error(data.error || 'Failed to download.');
-          }
-          const blob = await resp.blob();
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement('a');
-          link.href = url;
-          link.download = `design-${savedDesignId}.zip`;
-          link.click();
-          URL.revokeObjectURL(url);
-        })
-        .catch((err) => setSaveError(err?.message || 'Failed to download.'));
-      return;
-    }
-    // Fallback for unsaved or multi-save: download individual PNGs
-    variantsToDownload.forEach((variant) => {
-      const prefix = [variant.modelLabel, variant.styleLabel].filter(Boolean).join('-').replace(/\s+/g, '_') || 'design';
-      variant.images.forEach((image) => {
-        const link = document.createElement('a');
-        link.href = image.src;
-        link.download = `${image.view}-${prefix}.png`;
-        link.click();
+    if (!baseVariant) return;
+
+    const styleVariant = variants.find((v) => v.kind === 'style_converted') ?? null;
+    const modelVariant = variants.find((v) => v.kind === 'model_preview') ?? null;
+
+    const buildItems = (folder: string, v: GeneratedVariant) =>
+      v.images.map((img) => ({
+        name: `${folder}/${img.view}.png`,
+        imageBase64: img.imageBase64 ?? stripPngDataUrl(img.src),
+      }));
+
+    const items = [
+      ...buildItems('base', baseVariant),
+      ...(styleVariant ? buildItems('style_converted', styleVariant) : []),
+      ...(modelVariant ? buildItems('model_preview', modelVariant) : []),
+    ].filter((it) => it.imageBase64);
+
+    if (!items.length) return;
+
+    setIsGenerating(true);
+    setStatusMessage('Preparing ZIP export...');
+    setError(null);
+
+    try {
+      const resp = await authFetch('/api/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ format: 'zip', items }),
       });
-    });
+      const payload = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(payload.error || 'Export failed.');
+      if (!payload?.url) throw new Error('Export failed.');
+      window.location.href = String(payload.url);
+      setStatusMessage('Export started.');
+    } catch (err: any) {
+      setError(err?.message || 'Export failed.');
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   return (
@@ -1446,9 +1354,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             <Sparkles className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h2 className="text-slate-900">Multi-View AI Image Generator</h2>
+            <h2 className="text-slate-900">AI Image Generator</h2>
             <p className="text-slate-600 text-sm">
-              Generate one composite image, then automatically crop out each view.
+              Generate one base design, then generate consistent multi-view outputs.
             </p>
           </div>
         </div>
@@ -1474,13 +1382,13 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                     uploadInputRef.current?.click();
                   }}
                   className={TOOLBAR_ICON_BTN}
-                  aria-label={isEditMode ? 'Replace image' : 'Upload image'}
-                  title={isEditMode ? 'Replace image' : 'Upload image'}
+                  aria-label={hasReferenceImage ? 'Replace reference image' : 'Upload reference image'}
+                  title={hasReferenceImage ? 'Replace reference image' : 'Upload reference image'}
                 >
                   <Plus className="w-6 h-6" />
                 </button>
 
-                {isEditMode && (
+                {hasReferenceImage && (
                   <div className="ml-2 px-3 py-1 rounded-full border border-slate-200 bg-slate-50 flex items-center gap-2 text-sm max-w-[200px] min-w-0">
                     <span className="text-slate-800 truncate min-w-0">
                       {uploadedImageFile?.name || uploadedImageName || 'Uploaded image'}
@@ -1497,82 +1405,22 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                   </div>
                 )}
               </div>
-              <textarea
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder="e.g., A futuristic streetwear hoodie design with cyberpunk aesthetics, neon colors, and geometric patterns..."
-                className="w-full h-32 px-4 py-3 pr-12 pl-14 pb-14 rounded-2xl border-2 border-slate-200 focus:border-purple-500 focus:outline-none resize-none transition-colors"
-              />
-              <Wand2 className="absolute right-4 top-4 w-5 h-5 text-slate-400" />
-            </div>
-          </div>
+	              <textarea
+	                value={prompt}
+	                onChange={(e) => setPrompt(e.target.value)}
+	                placeholder="e.g., A futuristic streetwear hoodie design with cyberpunk aesthetics, neon colors, and geometric patterns..."
+	                className="w-full h-32 px-4 py-3 pr-12 pl-14 pb-14 rounded-2xl border-2 border-slate-200 focus:border-purple-500 focus:outline-none resize-none transition-colors"
+	              />
+	              <Wand2 className="absolute right-4 top-4 w-5 h-5 text-slate-400" />
+	            </div>
+	          </div>
 
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <MenuDropdown
-                open={openMenu === 'model'}
-                onClose={() => setOpenMenu(null)}
-                button={
-                  <ToolbarDropdownButton
-                    label="Model"
-                    icon={Users}
-                    isOpen={openMenu === 'model'}
-                    onClick={() => setOpenMenu((prev) => (prev === 'model' ? null : 'model'))}
-                    className="max-w-[160px]"
-                  />
-                }
-              >
-                <div className="p-1.5">
-                  <div className="flex flex-col gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setSelectedModels([])}
-                      className={clsx(
-                        'w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left',
-                        selectedModels.length === 0
-                          ? 'bg-purple-50 text-slate-900 border-purple-300'
-                          : 'bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50'
-                      )}
-                    >
-                      <span className="inline-flex items-center gap-2 min-w-0">
-                        <Users className="w-4 h-4 text-slate-600 flex-none" />
-                        <span className="truncate text-sm">None</span>
-                      </span>
-                      {selectedModels.length === 0 && <Check className="w-4 h-4 text-purple-600 flex-none" />}
-                    </button>
-                    {modelOptions.map((opt) => {
-                      const active = selectedModels.includes(opt.id);
-                      const Icon = opt.icon;
-                      return (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => {
-                            toggleModel(opt.id);
-                          }}
-                          className={clsx(
-                            'w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left',
-                            active
-                              ? 'bg-purple-50 text-slate-900 border-purple-300'
-                              : 'bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50'
-                          )}
-                        >
-                          <span className="inline-flex items-center gap-2 min-w-0">
-                            <Icon className="w-4 h-4 text-slate-600 flex-none" />
-                            <span className="truncate text-sm">Model ({opt.label})</span>
-                          </span>
-                          {active && <Check className="w-4 h-4 text-purple-600 flex-none" />}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </MenuDropdown>
-
-              <MenuDropdown
-                open={openMenu === 'resolution'}
-                onClose={() => setOpenMenu(null)}
-                button={
+	          <div className="space-y-3">
+	            <div className="flex flex-wrap items-center gap-2">
+	              <MenuDropdown
+	                open={openMenu === 'resolution'}
+	                onClose={() => setOpenMenu(null)}
+	                button={
                   <ToolbarDropdownButton
                     label="Resolution"
                     icon={Maximize2}
@@ -1610,165 +1458,165 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                 </div>
               </MenuDropdown>
 
-              {isEditMode && (
-                <MenuDropdown
-                  open={openMenu === 'framing'}
-                  onClose={() => setOpenMenu(null)}
-                  button={
-                    <ToolbarDropdownButton
-                      label={`Framing: ${framingModeLabel(framingMode)}`}
-                      icon={Camera}
-                      isOpen={openMenu === 'framing'}
-                      onClick={() => setOpenMenu((prev) => (prev === 'framing' ? null : 'framing'))}
-                      className="max-w-[260px]"
-                    />
-                  }
-                >
-                  <div className="p-1.5">
-                    <div className="flex flex-col gap-2">
-                      {(['preserve', 'zoomIn', 'zoomOut'] as FramingMode[]).map((mode) => {
-                        const active = framingMode === mode;
-                        return (
-                          <button
-                            key={mode}
-                            type="button"
-                            onClick={() => {
-                              setFramingMode(mode);
-                              setOpenMenu(null);
-                            }}
-                            className={clsx(
-                              'w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left',
-                              active
-                                ? 'bg-purple-50 text-slate-900 border-purple-300'
-                                : 'bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50'
-                            )}
-                          >
-                            <span className="min-w-0 text-sm truncate">{framingModeLabel(mode)}</span>
-                            {active && <Check className="w-4 h-4 text-purple-600 flex-none" />}
-                          </button>
-                        );
-                      })}
+              <MenuDropdown
+                open={openMenu === 'style'}
+                onClose={() => setOpenMenu(null)}
+                button={
+                  <ToolbarDropdownButton
+                    label={styleButtonLabel}
+                    icon={Palette}
+                    isOpen={openMenu === 'style'}
+                    onClick={() => setOpenMenu((prev) => (prev === 'style' ? null : 'style'))}
+                    className="max-w-[170px]"
+                  />
+                }
+              >
+                <div className="p-1.5">
+                  <div className="px-2 pt-2 pb-1">
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
+                        {styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? effectiveStyle}
+                      </span>
                     </div>
+                    <p className="mt-2 text-[12px] text-slate-500">All views will use this style</p>
                   </div>
-                </MenuDropdown>
-              )}
 
-	              {!isEditMode && (
-	                <MenuDropdown
-	                  open={openMenu === 'style'}
-	                  onClose={() => setOpenMenu(null)}
-	                  button={
-	                    <ToolbarDropdownButton
-	                      label={styleButtonLabel}
-	                      icon={Palette}
-	                      isOpen={openMenu === 'style'}
-	                      onClick={() => setOpenMenu((prev) => (prev === 'style' ? null : 'style'))}
-	                      className="max-w-[170px]"
-	                    />
-	                  }
-	                >
-	                  <div className="p-1.5">
-	                    <div className="px-2 pt-2 pb-1">
-	                      <div className="flex flex-wrap gap-1.5">
-	                        {selectedStyleLabels.map((label) => (
-	                          <span
-	                            key={label}
-	                            className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700"
-	                          >
-	                            {label}
-	                          </span>
-	                        ))}
-	                      </div>
-	                      <p className="mt-2 text-[12px] text-slate-500">
-	                        {selectedStyles.length === 1
-	                          ? 'All views will use this style'
-	                          : 'Generates one full output per selected style'}
-	                      </p>
-	                    </div>
+                  <div className="flex flex-col gap-2 p-2">
+                    {styleOptions.map((opt) => {
+                      const active = effectiveStyle === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedStyle(opt.id);
+                            setOpenMenu(null);
+                          }}
+                          className={clsx(
+                            'w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left',
+                            active
+                              ? 'bg-purple-50 text-slate-900 border-purple-300'
+                              : 'bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50'
+                          )}
+                        >
+                          <span className="min-w-0 text-sm truncate">{opt.label}</span>
+                          {active && <Check className="w-4 h-4 text-purple-600 flex-none" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </MenuDropdown>
 
-	                    <div className="flex flex-col gap-2 p-2">
-	                      {styleOptions.map((opt) => {
-	                        const active = selectedStyles.includes(opt.id);
-	                        return (
-	                          <button
-	                            key={opt.id}
-	                            type="button"
-	                            onClick={() => {
-	                              setSelectedStyles((prev) => {
-	                                if (prev.includes(opt.id)) {
-	                                  if (prev.length === 1) return prev;
-	                                  return prev.filter((id) => id !== opt.id);
-	                                }
-	                                if (prev.length >= 2) {
-	                                  toast('You can select maximum 2 styles');
-	                                  return prev;
-	                                }
-	                                return [...prev, opt.id];
-	                              });
-	                            }}
-	                            className={clsx(
-	                              'w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left',
-	                              active
-	                                ? 'bg-purple-50 text-slate-900 border-purple-300'
-	                                : 'bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50'
-	                            )}
-	                          >
-	                            <span className="min-w-0 text-sm truncate">{opt.label}</span>
-	                            {active && <Check className="w-4 h-4 text-purple-600 flex-none" />}
-	                          </button>
-	                        );
-	                      })}
-	                    </div>
+              <MenuDropdown
+                open={openMenu === 'views'}
+                onClose={() => setOpenMenu(null)}
+                button={
+                  <ToolbarDropdownButton
+                    label={selectedViewsLabel}
+                    icon={Camera}
+                    isOpen={openMenu === 'views'}
+                    onClick={() => setOpenMenu((prev) => (prev === 'views' ? null : 'views'))}
+                    className="max-w-[220px]"
+                  />
+                }
+              >
+                <div className="p-1.5">
+                  <div className="space-y-1">
+                    {viewOptions.map((view) => {
+                      const active = selectedViews.includes(view.id);
+                      return (
+                        <button
+                          key={view.id}
+                          type="button"
+                          onClick={() => toggleView(view.id)}
+                          className={clsx(
+                            'w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-colors text-left',
+                            active
+                              ? 'bg-purple-50 text-slate-900 border-purple-300'
+                              : 'bg-white text-slate-800 border-transparent hover:bg-slate-50'
+                          )}
+                        >
+                          <span className="min-w-0 text-sm truncate">{view.label}</span>
+                          {active && <Check className="w-4 h-4 text-purple-600 flex-none shrink-0" />}
+                        </button>
+                      );
+                    })}
 	                  </div>
-	                </MenuDropdown>
-	              )}
+	                </div>
+	              </MenuDropdown>
 
-              {!isEditMode && (
-                <MenuDropdown
-                  open={openMenu === 'views'}
-                  onClose={() => setOpenMenu(null)}
-                  button={
-                    <ToolbarDropdownButton
-                      label={selectedViewsLabel}
-                      icon={Camera}
-                      isOpen={openMenu === 'views'}
-                      onClick={() => setOpenMenu((prev) => (prev === 'views' ? null : 'views'))}
-                      className="max-w-[220px]"
-                    />
-                  }
-                >
-                  <div className="p-1.5">
-                    <div className="space-y-1">
-                      {viewOptions.map((view) => {
-                        const active = selectedViews.includes(view.id);
-                        return (
-                          <button
-                            key={view.id}
-                            type="button"
-                            onClick={() => toggleView(view.id)}
-                            className={clsx(
-                              'w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-colors text-left',
-                              active
-                                ? 'bg-purple-50 text-slate-900 border-purple-300'
-                                : 'bg-white text-slate-800 border-transparent hover:bg-slate-50'
-                            )}
-                          >
-                            <span className="min-w-0 text-sm truncate">{view.label}</span>
-                            {active && <Check className="w-4 h-4 text-purple-600 flex-none shrink-0" />}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </MenuDropdown>
-              )}
+	              <MenuDropdown
+	                open={openMenu === 'convertStyle'}
+	                onClose={() => setOpenMenu(null)}
+	                button={
+	                  <ToolbarDropdownButton
+	                    label="Convert Style"
+	                    icon={Palette}
+	                    isOpen={openMenu === 'convertStyle'}
+	                    disabled={isGenerating || !variants.some((v) => v.kind === 'base')}
+	                    onClick={() => setOpenMenu((prev) => (prev === 'convertStyle' ? null : 'convertStyle'))}
+	                    className="max-w-[160px]"
+	                  />
+	                }
+	              >
+	                <div className="p-1.5">
+	                  <div className="flex flex-col gap-2">
+	                    {styleOptions.map((opt) => (
+	                      <button
+	                        key={opt.id}
+	                        type="button"
+	                        onClick={() => {
+	                          setOpenMenu(null);
+	                          handleConvertStyle(opt.id);
+	                        }}
+	                        className="w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50"
+	                      >
+	                        <span className="min-w-0 text-sm truncate">{opt.label}</span>
+	                      </button>
+	                    ))}
+	                  </div>
+	                </div>
+	              </MenuDropdown>
 
-            </div>
+	              <MenuDropdown
+	                open={openMenu === 'convertModel'}
+	                onClose={() => setOpenMenu(null)}
+	                button={
+	                  <ToolbarDropdownButton
+	                    label="Convert Model"
+	                    icon={Users}
+	                    isOpen={openMenu === 'convertModel'}
+	                    disabled={isGenerating || !variants.some((v) => v.kind === 'base')}
+	                    onClick={() => setOpenMenu((prev) => (prev === 'convertModel' ? null : 'convertModel'))}
+	                    className="max-w-[170px]"
+	                  />
+	                }
+	              >
+	                <div className="p-1.5">
+	                  <div className="flex flex-col gap-2">
+	                    {(['male', 'female'] as const).map((m) => (
+	                      <button
+	                        key={m}
+	                        type="button"
+	                        onClick={() => {
+	                          setSelectedModel(m);
+	                          setOpenMenu(null);
+	                          handleConvertModel(m);
+	                        }}
+	                        className="w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50"
+	                      >
+	                        <span className="min-w-0 text-sm truncate">{m === 'male' ? 'Male' : 'Female'}</span>
+	                      </button>
+	                    ))}
+	                  </div>
+	                </div>
+	              </MenuDropdown>
+
+	            </div>
 
             <p className="text-xs text-slate-500">
-              {isEditMode
-                ? 'Describe the edit in your prompt. If you need specific views, describe them in the prompt.'
-                : 'All selected views will be arranged in a single composite image and auto-cropped.'}
+              Generates a front base design first, then generates the selected views from that base for consistent designs.
             </p>
           </div>
 
@@ -1776,25 +1624,63 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               <AlertCircle className="w-4 h-4" />
               <span>{error}</span>
+              {lastStyleTarget && (
+                <button
+                  type="button"
+                  className="ml-auto inline-flex items-center justify-center px-3 py-1.5 rounded-lg bg-purple-600 text-white text-xs hover:bg-purple-700"
+                  onClick={() => handleConvertStyle(lastStyleTarget)}
+                  disabled={isGenerating}
+                >
+                  Retry conversion
+                </button>
+              )}
+            </div>
+          )}
+
+          {baseVariant?.views?.length && Object.keys(styleProgress).length > 0 && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+              {baseVariant.views.map((v) => {
+                const key = v;
+                const st = styleProgress[key];
+                const label = viewLabel(v);
+                return (
+                  <div
+                    key={key}
+                    className={clsx(
+                      'rounded-lg border px-3 py-2 flex items-center justify-between',
+                      st === 'done'
+                        ? 'border-green-200 bg-green-50 text-green-800'
+                        : st === 'error'
+                          ? 'border-red-200 bg-red-50 text-red-800'
+                          : st === 'converting'
+                            ? 'border-purple-200 bg-purple-50 text-purple-800'
+                            : 'border-slate-200 bg-slate-50 text-slate-700'
+                    )}
+                  >
+                    <span className="truncate">{label}</span>
+                    <span className="ml-2">
+                      {st === 'done' ? 'Done' : st === 'error' ? 'Error' : st === 'converting' ? '...' : ''}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           )}
 
           <button
             onClick={handleGenerate}
-            disabled={isGenerating}
+            disabled={isGenerating || prompt.trim().length === 0}
             className="w-full bg-gradient-to-r from-violet-500 to-purple-500 text-white py-4 rounded-2xl hover:shadow-2xl hover:shadow-purple-500/40 transition-all duration-200 disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
             {isGenerating ? (
               <>
                 <Loader2 className="w-5 h-5 animate-spin" />
-                <span>
-                  {isEditMode ? 'Editing image...' : `Generating ${selectedViews.length} view image...`}
-                </span>
+                <span>Generating...</span>
               </>
             ) : (
               <>
                 <Sparkles className="w-5 h-5" />
-                <span>{isEditMode ? 'Edit Image' : `Generate ${selectedViews.length} View Image`}</span>
+                <span>Generate Image</span>
               </>
             )}
           </button>
@@ -1812,8 +1698,8 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	            <div className="w-full rounded-2xl border border-slate-200 bg-white p-4">
 	              <div className="flex items-center justify-between">
 	                <div>
-	                  <h3 className="text-sm font-semibold">
-                    {hasEditedViews || hasSingleEditResult ? 'Edited Preview' : 'Composite Preview'}
+                  <h3 className="text-sm font-semibold">
+                    {hasEditedViews || hasSingleEditResult ? 'Edited Preview' : 'Preview'}
                   </h3>
                   <p className="text-xs text-slate-500">
                     {hasEditedViews || hasSingleEditResult
@@ -1881,11 +1767,27 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	                              key={`${variant.id}-${image.view}`}
 	                              className="w-full h-[260px] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center"
 	                            >
-	                              <AutoScaledPreviewImage
-	                                src={image.src}
-	                                alt={viewLabel(image.view)}
-	                                className="w-full h-full object-contain bg-white"
-	                              />
+	                              {isProbablyValidPngDataUrl(image.src) ? (
+	                                <AutoScaledPreviewImage
+	                                  src={image.src}
+	                                  alt={viewLabel(image.view)}
+	                                  className="w-full h-full object-contain bg-white"
+	                                />
+	                              ) : (
+	                                <div className="p-4 text-center">
+	                                  <p className="text-sm text-slate-900">Invalid image</p>
+	                                  <p className="text-xs text-slate-500 mt-1">This view failed to render.</p>
+	                                  {variant.kind === 'style_converted' && variant.styleKey && (
+	                                    <button
+	                                      type="button"
+	                                      className="mt-3 inline-flex items-center justify-center px-3 py-2 rounded-lg bg-purple-600 text-white text-xs hover:bg-purple-700"
+	                                      onClick={() => handleConvertStyle(variant.styleKey as ArtStyleKey)}
+	                                    >
+	                                      Retry conversion
+	                                    </button>
+	                                  )}
+	                                </div>
+	                              )}
 	                            </div>
 	                          ))}
 	                        </div>
@@ -1898,11 +1800,18 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	                      key={image.view}
 	                      className="w-full h-[260px] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center"
 	                    >
-	                      <AutoScaledPreviewImage
-	                        src={image.src}
-	                        alt={viewLabel(image.view)}
-	                        className="w-full h-full object-contain bg-white"
-	                      />
+	                      {isProbablyValidPngDataUrl(image.src) ? (
+	                        <AutoScaledPreviewImage
+	                          src={image.src}
+	                          alt={viewLabel(image.view)}
+	                          className="w-full h-full object-contain bg-white"
+	                        />
+	                      ) : (
+	                        <div className="p-4 text-center">
+	                          <p className="text-sm text-slate-900">Invalid image</p>
+	                          <p className="text-xs text-slate-500 mt-1">This view failed to render.</p>
+	                        </div>
+	                      )}
 	                    </div>
 	                  ))
 	                )}
@@ -2036,17 +1945,33 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                               key={`${variant.id}-${image.view}`}
                               className="rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm"
                             >
-                              <div className="w-full h-[260px] flex items-center justify-center bg-white overflow-hidden">
-                                <AutoScaledPreviewImage
-                                  src={image.src}
-                                  alt={viewLabel(image.view)}
-                                  className="w-full h-full object-contain bg-white"
-                                />
-                              </div>
+                      <div className="w-full h-[260px] flex items-center justify-center bg-white overflow-hidden">
+                                {isProbablyValidPngDataUrl(image.src) ? (
+                                  <AutoScaledPreviewImage
+                                    src={image.src}
+                                    alt={viewLabel(image.view)}
+                                    className="w-full h-full object-contain bg-white"
+                                  />
+                                ) : (
+                                  <div className="p-4 text-center">
+                                    <p className="text-sm text-slate-900">Invalid image</p>
+                                    <p className="text-xs text-slate-500 mt-1">This view failed to render.</p>
+                                    {variant.kind === 'style_converted' && variant.styleKey && (
+                                      <button
+                                        type="button"
+                                        className="mt-3 inline-flex items-center justify-center px-3 py-2 rounded-lg bg-purple-600 text-white text-xs hover:bg-purple-700"
+                                        onClick={() => handleConvertStyle(variant.styleKey as ArtStyleKey)}
+                                      >
+                                        Retry conversion
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                      </div>
                               <div className="p-3 flex items-center justify-between">
                                 <div>
                                   <p className="text-sm text-slate-900">{viewLabel(image.view)}</p>
-                                  <p className="text-xs text-slate-500">Auto-cropped from composite</p>
+                                  <p className="text-xs text-slate-500">Generated view</p>
                                 </div>
                                 <button
                                   onClick={() => {
@@ -2075,16 +2000,23 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                       className="rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm"
                     >
                       <div className="w-full h-[260px] flex items-center justify-center bg-white overflow-hidden">
-                        <AutoScaledPreviewImage
-                          src={image.src}
-                          alt={viewLabel(image.view)}
-                          className="w-full h-full object-contain bg-white"
-                        />
+                        {isProbablyValidPngDataUrl(image.src) ? (
+                          <AutoScaledPreviewImage
+                            src={image.src}
+                            alt={viewLabel(image.view)}
+                            className="w-full h-full object-contain bg-white"
+                          />
+                        ) : (
+                          <div className="p-4 text-center">
+                            <p className="text-sm text-slate-900">Invalid image</p>
+                            <p className="text-xs text-slate-500 mt-1">This view failed to render.</p>
+                          </div>
+                        )}
                       </div>
                       <div className="p-3 flex items-center justify-between">
                         <div>
                           <p className="text-sm text-slate-900">{viewLabel(image.view)}</p>
-                          <p className="text-xs text-slate-500">Auto-cropped from composite</p>
+                          <p className="text-xs text-slate-500">Generated view</p>
                         </div>
                         <button
                           onClick={() => {

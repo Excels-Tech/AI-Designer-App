@@ -15,11 +15,11 @@ export interface DesignDoc extends Document {
   style: 'realistic' | '3d' | 'lineart' | 'watercolor' | 'modelMale' | 'modelFemale' | 'modelKid';
   resolution: number;
   views: string[];
-  composite: {
-    mime: 'image/png';
+  composite?: {
+    mime?: 'image/png';
     fileId?: string;
     dataUrl?: string; // legacy fallback
-  };
+  } | null;
   images: DesignImage[];
   createdAt: Date;
   updatedAt: Date;
@@ -39,7 +39,7 @@ const DesignSchema = new Schema<DesignDoc>(
     resolution: { type: Number, required: true },
     views: { type: [String], required: true },
     composite: {
-      mime: { type: String, enum: ['image/png'], required: true },
+      mime: { type: String, enum: ['image/png'] },
       fileId: { type: String },
       dataUrl: { type: String },
     },
