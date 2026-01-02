@@ -10,6 +10,7 @@ import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { getAssetInfo, touchAsset } from './videoAssets';
 import ffmpegPath from 'ffmpeg-static';
+import sharp from 'sharp';
 
 type SlideInput = {
   imageSrc: string;
@@ -71,6 +72,124 @@ const MAX_JOBS = 20;
 const ALLOWED_FPS = new Set([12, 24, 30, 60]);
 
 const isValidHexColor = (value: unknown) => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value.trim());
+
+let cachedDrawtextSupport: boolean | null = null;
+let drawtextSupportPromise: Promise<boolean> | null = null;
+
+const detectDrawtextSupport = async () => {
+  if (cachedDrawtextSupport !== null) return cachedDrawtextSupport;
+  if (drawtextSupportPromise) return await drawtextSupportPromise;
+
+  drawtextSupportPromise = new Promise<boolean>((resolve) => {
+    const bin = ffmpegPath || 'ffmpeg';
+    const proc = spawn(bin, ['-hide_banner', '-filters'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    proc.stdout.on('data', (d) => (out += d.toString()));
+    proc.stderr.on('data', (d) => (out += d.toString()));
+    proc.on('error', () => resolve(false));
+    proc.on('close', (code) => {
+      if (code !== 0) return resolve(false);
+      resolve(/\bdrawtext\b/i.test(out));
+    });
+  }).finally(() => {
+    drawtextSupportPromise = null;
+  });
+
+  cachedDrawtextSupport = await drawtextSupportPromise;
+  return cachedDrawtextSupport;
+};
+
+const escapeXml = (value: string) =>
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+
+const wrapText = (text: string, maxCharsPerLine: number) => {
+  const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return [];
+  const words = cleaned.split(' ');
+  const lines: string[] = [];
+  let line = '';
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length <= maxCharsPerLine) {
+      line = next;
+      continue;
+    }
+    if (line) lines.push(line);
+    line = word;
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, 4);
+};
+
+const clamp01 = (v: unknown, fallback: number) => {
+  const n = typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+  return Math.max(0, Math.min(1, n));
+};
+
+const renderOverlayPng = async (slide: SlideInput, width: number, height: number, outPath: string) => {
+  const fontSizeBase = typeof slide.fontSizePx === 'number' && Number.isFinite(slide.fontSizePx) ? slide.fontSizePx : 48;
+  const fontSize = Math.max(18, Math.min(140, Math.round(fontSizeBase * (height / 720))));
+  const approxCharWidth = fontSize * 0.6;
+  const boxMaxWidth = Math.floor(width * 0.82);
+  const maxChars = Math.max(10, Math.floor(boxMaxWidth / Math.max(1, approxCharWidth)));
+  const lines = wrapText(slide.overlayText || '', maxChars);
+
+  const transparent = { r: 0, g: 0, b: 0, alpha: 0 };
+  if (!lines.length) {
+    await sharp({ create: { width, height, channels: 4, background: transparent } }).png().toFile(outPath);
+    return;
+  }
+
+  const lineHeight = Math.round(fontSize * 1.15);
+  const paddingX = Math.round(fontSize * 0.6);
+  const paddingY = Math.round(fontSize * 0.35);
+  const textMaxLen = Math.max(...lines.map((l) => l.length));
+  const textWidth = Math.min(boxMaxWidth, Math.round(textMaxLen * approxCharWidth));
+  const boxW = Math.min(boxMaxWidth, textWidth + paddingX * 2);
+  const boxH = lines.length * lineHeight + paddingY * 2;
+
+  const xPct = slide.position === 'custom' ? clamp01(slide.xPct, 0.5) : 0.5;
+  const yPct =
+    slide.position === 'custom'
+      ? clamp01(slide.yPct, 0.85)
+      : slide.position === 'top'
+        ? 0.1
+        : slide.position === 'center'
+          ? 0.5
+          : 0.85;
+
+  const cx = Math.round(width * xPct);
+  const cy = Math.round(height * yPct);
+  const boxX = Math.round(cx - boxW / 2);
+  const boxY = Math.round(cy - boxH / 2);
+  const rx = Math.max(8, Math.round(fontSize * 0.35));
+
+  const colorHex = typeof slide.overlayColorHex === 'string' ? slide.overlayColorHex.trim() : '#FFFFFF';
+  const safeColor = isValidHexColor(colorHex) ? colorHex : '#FFFFFF';
+
+  const textSpans = lines
+    .map((line, idx) => {
+      const y = boxY + paddingY + lineHeight * idx + Math.round(lineHeight / 2);
+      return `<text x="${cx}" y="${y}" fill="${safeColor}" font-size="${fontSize}" font-family="sans-serif" text-anchor="middle" dominant-baseline="middle">${escapeXml(
+        line
+      )}</text>`;
+    })
+    .join('');
+
+  const svg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+  <rect x="0" y="0" width="${width}" height="${height}" fill="rgba(0,0,0,0)"/>
+  <rect x="${boxX}" y="${boxY}" width="${boxW}" height="${boxH}" rx="${rx}" fill="rgba(0,0,0,0.45)"/>
+  ${textSpans}
+</svg>`.trim();
+
+  await sharp(Buffer.from(svg)).png().toFile(outPath);
+};
 
 const ffmpegColor = (value: unknown) => {
   if (!value) return 'white';
@@ -294,9 +413,11 @@ const buildSlideFilter = (
   slide: SlideInput,
   width: number,
   height: number,
-  fps: number
+  fps: number,
+  options?: { includeText?: boolean; finalFormat?: 'yuv420p' | 'rgba' }
 ) => {
   const filters: string[] = [];
+  const includeText = options?.includeText ?? true;
   const fontSize = Math.max(18, Math.min(140, Math.round(slide.fontSizePx * (height / 720))));
   const x =
     slide.position === 'custom'
@@ -345,7 +466,7 @@ const buildSlideFilter = (
     }
   }
 
-  if (slide.overlayText) {
+  if (includeText && slide.overlayText) {
     const color = ffmpegColor(slide.overlayColorHex);
     filters.push(
       `drawtext=fontfile='${fontFile}':text='${escapeDrawtext(
@@ -360,7 +481,7 @@ const buildSlideFilter = (
     filters.push(`fade=t=in:st=0:d=${fadeDur}`, `fade=t=out:st=${slide.durationSec - fadeDur}:d=${fadeDur}`);
   }
 
-  filters.push('format=yuv420p');
+  filters.push(`format=${options?.finalFormat ?? 'yuv420p'}`);
   return filters.join(',');
 };
 
@@ -490,6 +611,10 @@ export const createVideoJob = async (
     try {
       const width = project.width ?? QUALITY_MAP[project.quality].width;
       const height = project.height ?? QUALITY_MAP[project.quality].height;
+
+      const wantsText = project.slides.some((s) => Boolean(s.overlayText));
+      const canDrawtext = wantsText ? await detectDrawtextSupport() : true;
+
       const inputPaths = await Promise.all(
         project.slides.map((slide, index) =>
           resolveImageToFile(slide.imageSrc, slide.assetId, tempDir, index, userId, baseUrl)
@@ -500,41 +625,99 @@ export const createVideoJob = async (
       for (let i = 0; i < project.slides.length; i += 1) {
         const slide = project.slides[i];
         const segmentPath = path.join(tempDir, `segment-${i}.mp4`);
-        const filter = buildSlideFilter(slide, width, height, project.fps);
-        const args = [
-          '-y',
-          '-loop',
-          '1',
-          '-t',
-          slide.durationSec.toFixed(2),
-          '-i',
-          inputPaths[i],
-          '-f',
-          'lavfi',
-          '-t',
-          slide.durationSec.toFixed(2),
-          '-i',
-          'anullsrc=channel_layout=stereo:sample_rate=44100',
-          '-vf',
-          filter,
-          '-r',
-          String(project.fps),
-          '-c:v',
-          'libx264',
-          '-preset',
-          'veryfast',
-          '-crf',
-          '20',
-          '-pix_fmt',
-          'yuv420p',
-          '-c:a',
-          'aac',
-          '-b:a',
-          '128k',
-          '-shortest',
-          segmentPath,
-        ];
-        await runFfmpeg(args);
+        const dur = slide.durationSec.toFixed(2);
+        const needsOverlay = Boolean(slide.overlayText) && !canDrawtext;
+
+        if (needsOverlay) {
+          const overlayPath = path.join(tempDir, `overlay-${i}.png`);
+          await renderOverlayPng(slide, width, height, overlayPath);
+          const graph = [
+            `[0:v]${buildSlideFilter(slide, width, height, project.fps, { includeText: false, finalFormat: 'rgba' })}[base]`,
+            `[1:v]format=rgba[ov]`,
+            `[base][ov]overlay=0:0:format=auto,format=yuv420p[v]`,
+          ].join(';');
+          const args = [
+            '-y',
+            '-loop',
+            '1',
+            '-t',
+            dur,
+            '-i',
+            inputPaths[i],
+            '-loop',
+            '1',
+            '-t',
+            dur,
+            '-i',
+            overlayPath,
+            '-f',
+            'lavfi',
+            '-t',
+            dur,
+            '-i',
+            'anullsrc=channel_layout=stereo:sample_rate=44100',
+            '-filter_complex',
+            graph,
+            '-map',
+            '[v]',
+            '-map',
+            '2:a',
+            '-r',
+            String(project.fps),
+            '-c:v',
+            'libx264',
+            '-preset',
+            'veryfast',
+            '-crf',
+            '20',
+            '-pix_fmt',
+            'yuv420p',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '128k',
+            '-shortest',
+            segmentPath,
+          ];
+          await runFfmpeg(args);
+        } else {
+          const filter = buildSlideFilter(slide, width, height, project.fps);
+          const args = [
+            '-y',
+            '-loop',
+            '1',
+            '-t',
+            dur,
+            '-i',
+            inputPaths[i],
+            '-f',
+            'lavfi',
+            '-t',
+            dur,
+            '-i',
+            'anullsrc=channel_layout=stereo:sample_rate=44100',
+            '-vf',
+            filter,
+            '-r',
+            String(project.fps),
+            '-c:v',
+            'libx264',
+            '-preset',
+            'veryfast',
+            '-crf',
+            '20',
+            '-pix_fmt',
+            'yuv420p',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '128k',
+            '-shortest',
+            segmentPath,
+          ];
+          await runFfmpeg(args);
+        }
+
         segmentPaths.push(segmentPath);
         job.progress = Math.round(((i + 1) / (project.slides.length + 1)) * 90);
         job.updatedAt = Date.now();
