@@ -111,6 +111,7 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
 
   const [saveName, setSaveName] = useState('');
   const [saving, setSaving] = useState(false);
+  const [exportResolutionScale, setExportResolutionScale] = useState<1 | 2 | 4>(1);
 
   const placeholderThumb =
     "data:image/svg+xml;charset=utf-8," +
@@ -456,7 +457,7 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
     dragRef.current = null;
   };
 
-  const exportBlob = async (): Promise<Blob> => {
+  const exportBlob = async (scale: 1 | 2 | 4 = exportResolutionScale): Promise<Blob> => {
     if (!baseImageSrc || !baseImageDims) {
       throw new Error('Upload a base image first');
     }
@@ -486,10 +487,13 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
     }
 
     const canvas = document.createElement('canvas');
-    canvas.width = baseImageDims.width;
-    canvas.height = baseImageDims.height;
+    canvas.width = Math.max(1, Math.round(baseImageDims.width * scale));
+    canvas.height = Math.max(1, Math.round(baseImageDims.height * scale));
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('Canvas not available');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.scale(scale, scale);
 
     const baseImg = await new Promise<HTMLImageElement>((resolve, reject) => {
       const img = new Image();
@@ -498,8 +502,8 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
       img.src = baseImageSrc;
     });
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(baseImg, 0, 0, canvas.width, canvas.height);
+    ctx.clearRect(0, 0, baseImageDims.width, baseImageDims.height);
+    ctx.drawImage(baseImg, 0, 0, baseImageDims.width, baseImageDims.height);
 
     const stageRect = stageRef.current?.getBoundingClientRect() ?? null;
     const exportStageSize = stageRect ? Math.min(stageRect.width, stageRect.height) : 0;
@@ -579,7 +583,12 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
     return await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob((result) => {
         if (!result) reject(new Error('Failed to export image.'));
-        else resolve(result);
+        else {
+          console.info(
+            `[export] scale=${scale} output=${canvas.width}x${canvas.height} base=${baseImageDims.width}x${baseImageDims.height}`
+          );
+          resolve(result);
+        }
       }, 'image/png');
     });
   };
@@ -587,7 +596,7 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
   const downloadExport = async () => {
     try {
       commitEditingTextToState();
-      const blob = await exportBlob();
+      const blob = await exportBlob(exportResolutionScale);
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -611,7 +620,7 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
     setSaving(true);
     try {
       commitEditingTextToState();
-      const blob = await exportBlob();
+      const blob = await exportBlob(exportResolutionScale);
       const dataUrl = await blobToDataUrl(blob);
       const uid = getUserId();
       const res = await authFetch('/api/designs', {
@@ -674,6 +683,20 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
               Download
             </button>
           </div>
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-2">
+          <p className="text-sm text-slate-900 font-medium">Export Resolution</p>
+          <select
+            value={exportResolutionScale}
+            onChange={(e) => setExportResolutionScale(Number(e.target.value) as 1 | 2 | 4)}
+            className="w-full h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-800"
+          >
+            <option value={1}>Normal Resolution (1×)</option>
+            <option value={2}>High Resolution (2×)</option>
+            <option value={4}>Ultra High (4×)</option>
+          </select>
+          <p className="text-xs text-slate-500">Higher resolutions export sharper PNGs but increase file size.</p>
         </div>
 
         <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">

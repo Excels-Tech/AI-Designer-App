@@ -50,6 +50,8 @@ interface GenerateBaseRequestBody {
   prompt?: string;
   style?: StyleKey;
   resolution?: number;
+  width?: number;
+  height?: number;
   referenceImageBase64?: string;
   referenceImageMimeType?: string;
 }
@@ -59,6 +61,8 @@ interface GenerateViewsFromBaseRequestBody {
   views?: ViewKey[];
   style?: StyleKey;
   resolution?: number;
+  width?: number;
+  height?: number;
   prompt?: string;
 }
 
@@ -156,7 +160,7 @@ const allowedOrigins = (process.env.CLIENT_ORIGIN || '')
   .map((origin) => normalizeOrigin(origin.trim()))
   .filter(Boolean);
 if (allowedOrigins.length) {
-  allowedOrigins.push('http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173');
+  allowedOrigins.push('http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:3001', 'http://127.0.0.1:3001');
 }
 
 app.use(
@@ -236,6 +240,140 @@ async function generateContentWithRetry<T>(
       if (!shouldRetry) break;
       console.warn(`[gemini] ${label} failed (attempt ${attempt}/${attempts}), retrying...`);
       await sleep(baseDelayMs * attempt);
+    }
+  }
+
+  throw lastErr instanceof Error ? lastErr : new Error(`Gemini request failed for ${label}.`);
+}
+
+function extractGeminiText(response: any): string {
+  const parts = response?.candidates?.[0]?.content?.parts;
+  if (Array.isArray(parts)) {
+    return parts
+      .map((p: any) => (typeof p?.text === 'string' ? p.text : ''))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+  if (typeof response?.text === 'string') return response.text.trim();
+  return '';
+}
+
+function safeParseJsonObject<T>(raw: string): T | null {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return null;
+
+  // Remove common markdown fences.
+  const unfenced = trimmed.replace(/^\s*```(?:json)?/i, '').replace(/```\s*$/i, '').trim();
+
+  try {
+    return JSON.parse(unfenced) as T;
+  } catch {
+    // Attempt to extract the first JSON object substring.
+    const start = unfenced.indexOf('{');
+    const end = unfenced.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      const slice = unfenced.slice(start, end + 1);
+      try {
+        return JSON.parse(slice) as T;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+function normalizeLines(items: unknown, maxLen = 500): string[] {
+  if (!Array.isArray(items)) return [];
+  const out: string[] = [];
+  for (const it of items) {
+    if (typeof it !== 'string') continue;
+    const v = it
+      .replace(/^\s*[-*•\d]+[.)\]]\s*/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!v) continue;
+    out.push(v.slice(0, maxLen));
+  }
+  return out;
+}
+
+function uniqStable(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of values) {
+    const key = v.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(v);
+  }
+  return out;
+}
+
+function buildTitlesPrompt(input: { productName: string; category?: string; count: number }) {
+  return [
+    'You are an ecommerce SEO assistant. Generate product listing titles.',
+    `Product name: "${input.productName}".`,
+    input.category ? `Category constraint: "${input.category}".` : '',
+    `Generate exactly ${input.count} unique titles.`,
+    'Rules: each title must be 60–120 characters; include buyer-intent keywords; include material/style/season/audience when relevant;',
+    'MUST ONLY be relevant to the product name (do NOT invent unrelated apparel types); avoid duplicates; no numbering; no extra commentary.',
+    'Return ONLY valid JSON in this exact shape: {"titles":["..."]}',
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+function buildKeywordsPrompt(input: { productName: string; category?: string; count: number }) {
+  return [
+    'You are an ecommerce SEO assistant. Generate search keywords for a product listing.',
+    `Product name: "${input.productName}".`,
+    input.category ? `Category constraint: "${input.category}".` : '',
+    `Generate exactly ${input.count} unique keywords.`,
+    'Rules: mix short + long-tail; high-intent ecommerce phrases; MUST ONLY be relevant to the product name; avoid duplicates; no numbering; no extra commentary.',
+    'Return ONLY valid JSON in this exact shape: {"keywords":["..."]}',
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+const TEXT_MODEL_CANDIDATES = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'] as const;
+
+async function generateTextJsonWithModelFallback<T>(label: string, prompt: string): Promise<T> {
+  let lastErr: any = null;
+
+  for (const model of TEXT_MODEL_CANDIDATES) {
+    try {
+      const response = await generateContentWithRetry(`${label} | ${model}`, () =>
+        ai.models.generateContent({
+          model,
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        })
+      );
+
+      const raw = extractGeminiText(response);
+      const parsed = safeParseJsonObject<T>(raw);
+      if (parsed) return parsed;
+
+      // One strict retry for non-JSON responses.
+      const retryPrompt = `${prompt} Return ONLY valid JSON.`;
+      const retry = await generateContentWithRetry(`${label}-json-retry | ${model}`, () =>
+        ai.models.generateContent({
+          model,
+          contents: [{ role: 'user', parts: [{ text: retryPrompt }] }],
+        })
+      );
+      const retryParsed = safeParseJsonObject<T>(extractGeminiText(retry));
+      if (retryParsed) return retryParsed;
+
+      lastErr = new Error('Gemini returned non-JSON output.');
+    } catch (err: any) {
+      lastErr = err;
+      const msg = String(err?.message || err);
+      const isModelNotFound = msg.toLowerCase().includes('model') && msg.toLowerCase().includes('not found');
+      if (!isModelNotFound) break;
+      // Try next model.
     }
   }
 
@@ -331,9 +469,23 @@ const TRANSPARENT_BG = { r: 0, g: 0, b: 0, alpha: 0 };
 const WHITE_BG = { r: 255, g: 255, b: 255, alpha: 1 };
 const WHITE_BACKGROUND_PROMPT = [
   'Background MUST be pure white (#FFFFFF), seamless and clean.',
-  'NO checkerboard, NO gray studio, NO wall, NO floor, NO scene.',
+  'Isolated subject on pure white background, ecommerce style.',
+  'NO room, NO studio scene, NO windows, NO wall texture, NO background objects, NO floor.',
+  'NO checkerboard, NO gray studio box, NO environment, NO props.',
   'NO frames, NO borders, NO boxes, NO mockups.',
-  'NO shadows, NO reflections, NO gradients, NO vignette.',
+  'NO shadows, NO floor shadows, NO reflections, NO gradients, NO vignette.',
+].join(' ');
+
+const FULL_FRAME_POSITIVE_PROMPT = [
+  'FRAMING: Full-length shot. Entire main subject fully visible head-to-toe (top-to-bottom).',
+  'STRICT ZOOM: Zoomed-out framing. Subject appears smaller and occupies only ~60–70% of the image height.',
+  'COMPOSITION: Centered subject with lots of whitespace. Leave ~15–25% empty margin around the subject on all sides.',
+  'Subject fits comfortably inside the frame; never crop any part of the subject. Keep generous padding.',
+].join(' ');
+
+const FULL_FRAME_NEGATIVE_PROMPT = [
+  'NO zoomed-in. NO close-up. NO tight framing. NO close camera.',
+  'NO cropped edges. NO extreme crop. NO partial view. NO cut-off legs. NO cut-off sleeves.',
 ].join(' ');
 
 const TRANSPARENT_CUTOUT_PROMPT = [
@@ -349,15 +501,38 @@ function wantsTransparentBackground() {
   return false;
 }
 
-function promptRequestsBackground(promptRaw: unknown) {
+function promptRequestsNonWhiteBackground(promptRaw: unknown) {
   const prompt = typeof promptRaw === 'string' ? promptRaw.toLowerCase() : '';
-  if (!prompt.trim()) return false;
-  const keywords = ['background', 'scene', 'field', 'studio', 'wall', 'environment'];
-  return keywords.some((k) => prompt.includes(k));
+  const p = prompt.trim();
+  if (!p) return false;
+
+  // Explicit requests for white background should still be treated as "white background ok".
+  if (p.includes('#ffffff') || p.includes('pure white') || p.includes('plain white') || p.includes('white background')) {
+    return false;
+  }
+
+  // Explicit non-white/scene requests. Keep this STRICT to avoid false positives like "streetwear" or "floor length".
+  if (p.includes('transparent background') || p.includes('checkerboard')) return true;
+  if (p.includes('gradient background') || p.includes('pattern background') || p.includes('textured background')) return true;
+
+  // If the user explicitly mentions a background/backdrop color other than white.
+  if (/\b(background|backdrop)\b/.test(p) && /\b(black|blue|red|green|yellow|pink|purple|orange|grey|gray|color(ed)?|colou?r(ed)?)\b/.test(p)) {
+    return true;
+  }
+
+  // If the user explicitly requests an environment/scene (word-boundary matches to avoid "streetwear").
+  if (/\b(outdoors?|outdoor)\b/.test(p)) return true;
+  if (/\b(studio scene|studio set|in a studio|in the studio)\b/.test(p)) return true;
+  if (/\b(in|on|at)\s+(a|the)\s+(room|interior|street|city|forest|beach|mountain|park)\b/.test(p)) return true;
+  if (/\b(environment|scene)\b/.test(p) && !/\b(no|without)\s+(environment|scene)\b/.test(p)) return true;
+
+  // Color/texture/gradient background requests.
+  return false;
 }
 
 function shouldForceWhiteBackgroundFromPrompt(prompt: string) {
-  return !promptRequestsBackground(prompt);
+  // Default is white background unless the user explicitly requests a non-white / scene background.
+  return !promptRequestsNonWhiteBackground(prompt);
 }
 
 async function hasMeaningfulTransparency(pngBase64: string, sampleSize = 64) {
@@ -2432,7 +2607,9 @@ function buildViewPrompt(basePrompt: string, style: StyleKey, view: ViewKey, wid
     `Single-frame image of the SAME product/design viewed from the ${viewLabels[view]} angle.`,
     `View requirement: ${viewSpecificInstructions[view]}`,
     `No grids, no collages, no multi-panel layouts. One centered subject.`,
-    `Ensure the entire product is fully visible in frame with comfortable margins; no parts cut off by the image edges.`,
+    FULL_FRAME_POSITIVE_PROMPT,
+    FULL_FRAME_NEGATIVE_PROMPT,
+    'Consistency: keep the same zoom level, padding, and camera distance across all requested views.',
     `Keep lighting, materials, and colors identical to every other view.`,
     `Do not mirror or flip the subject. Do not swap left/right. Each requested view must be distinct and match its angle.`,
     WHITE_BACKGROUND_PROMPT,
@@ -2445,11 +2622,12 @@ function buildViewPrompt(basePrompt: string, style: StyleKey, view: ViewKey, wid
 function buildBasePrompt(prompt: string, style: StyleKey, resolution: number) {
   const forceWhite = shouldForceWhiteBackgroundFromPrompt(prompt);
   return [
-    'Generate ONE base design image for a shirt/uniform.',
-    'STRICT: Front view (head-on).',
+    'Generate ONE base image that matches the user prompt.',
+    'STRICT: Front view (head-on) unless the user prompt implies a different viewpoint (e.g. poster/logo).',
     'STRICT: Do not add socks, shoes, mannequins, models, people, faces, hands, or body parts unless the user prompt explicitly asks for them.',
     'No grids, no collages, no multi-panel layouts.',
-    'Keep the entire product visible with comfortable margins (no cropping).',
+    FULL_FRAME_POSITIVE_PROMPT,
+    FULL_FRAME_NEGATIVE_PROMPT,
     forceWhite ? WHITE_BACKGROUND_PROMPT : null,
     `Style: ${styleModifiers[style]}.`,
     `User prompt: ${prompt}`,
@@ -2467,9 +2645,9 @@ function buildViewFromBasePrompt(
 ) {
   const sideStrict =
     view === 'left'
-      ? 'Generate the LEFT SIDE view (camera positioned on the left side of the outfit). Maintain exact same design. Do not mirror or change design. Only change camera angle.'
+      ? 'Generate the LEFT SIDE view (camera positioned on the left side of the subject/object). Maintain exact same design. Do not mirror or change design. Only change camera angle.'
       : view === 'right'
-        ? 'Generate the RIGHT SIDE view (camera positioned on the right side of the outfit). Maintain exact same design. Do not mirror or reuse left side. Only change camera angle. Ensure it is clearly the right side view.'
+        ? 'Generate the RIGHT SIDE view (camera positioned on the right side of the subject/object). Maintain exact same design. Do not mirror or reuse left side. Only change camera angle. Ensure it is clearly the right side view.'
         : null;
   const forceWhite = shouldForceWhiteBackgroundFromPrompt(userPrompt || '');
 
@@ -2478,7 +2656,10 @@ function buildViewFromBasePrompt(
     `View requirement: ${viewSpecificInstructions[view]}`,
     sideStrict,
     extraInstruction?.trim() ? `IMPORTANT: ${extraInstruction.trim()}` : null,
-    'Use this exact design, do not change colors, patterns, or branding. Only change camera angle.',
+    'Use this exact design. Do not change the main subject identity, colors, patterns, or layout. Only change camera angle.',
+    FULL_FRAME_POSITIVE_PROMPT,
+    FULL_FRAME_NEGATIVE_PROMPT,
+    'Consistency: keep the same zoom level, padding, and camera distance across all requested views.',
     'STRICT: Do not add socks, shoes, mannequins, models, people, faces, hands, or body parts unless the user prompt explicitly asks for them.',
     userPrompt?.trim()
       ? `User prompt (secondary reference): ${userPrompt.trim()}. The attached base image is the ground-truth design reference.`
@@ -2518,7 +2699,9 @@ function buildMannequinConversionPrompt(modelKey: MannequinModelKey) {
     `Generate a high-resolution PHOTOREALISTIC studio photograph of a real ${modelKey} human athlete wearing the exact same soccer uniform from the reference image.`,
     'STRICT: REAL human athlete (NOT mannequin, NOT doll, NOT statue, NOT dummy).',
     'STRICT: REAL CAMERA PHOTO. Professional ecommerce studio photography. Natural skin texture and realistic facial details.',
-    'STRICT CAMERA FRAMING: FULL BODY including head and face. Head-to-toe. Wide full-body fashion photo. Centered subject. Leave margin above head and below feet. Do NOT crop the head/face.',
+    'STRICT CAMERA FRAMING: FULL BODY including head and face. Head-to-toe. Wide full-body photo. Centered subject. Leave generous margin above head and below feet. Do NOT crop.',
+    FULL_FRAME_POSITIVE_PROMPT,
+    FULL_FRAME_NEGATIVE_PROMPT,
     'STRICT: NOT 3D render. NOT CGI. NOT illustration. NOT stylized. NOT line art. NOT watercolor.',
     'STRICT: Preserve the exact uniform design and all details: colors, patterns, logos, text, placement, numbering, and branding.',
     'STRICT: Keep the same camera angle and view as the input image (front stays front; back stays back; left stays left; right stays right).',
@@ -3207,8 +3390,8 @@ async function buildCompositeGridPng(items: ExportItem[]) {
       2048,
       Math.round(
         Number(metas.find((m) => m?.width && m?.width === m?.height)?.width) ||
-          Number(metas.find((m) => m?.width)?.width) ||
-          1024
+        Number(metas.find((m) => m?.width)?.width) ||
+        1024
       )
     )
   );
@@ -3324,20 +3507,11 @@ async function generateViewImageFromBase(
 
   const raw = Buffer.from(imagePart.data as string, 'base64');
   const background = options?.background ?? { r: 245, g: 246, b: 248, alpha: 1 };
-  const insetScale = 0.9;
-  const insetWidth = Math.max(1, Math.round(targetWidth * insetScale));
-  const insetHeight = Math.max(1, Math.round(targetHeight * insetScale));
-  const inset = await sharp(raw)
-    .resize(insetWidth, insetHeight, { fit: 'contain', background, withoutEnlargement: true })
-    .png()
-    .toBuffer();
-
-  const left = Math.floor((targetWidth - insetWidth) / 2);
-  const top = Math.floor((targetHeight - insetHeight) / 2);
-  const resized = await sharp({
-    create: { width: targetWidth, height: targetHeight, channels: 4, background },
-  })
-    .composite([{ input: inset, left, top }])
+  // IMPORTANT: do not intentionally shrink non-front views.
+  // We always return an image that is exactly targetWidth × targetHeight,
+  // and rely on prompt + post-processing for safe framing.
+  const resized = await sharp(raw)
+    .resize(targetWidth, targetHeight, { fit: 'contain', background })
     .png()
     .toBuffer();
 
@@ -3383,7 +3557,70 @@ async function isLikelySameAngle(left: Buffer, right: Buffer): Promise<boolean> 
   const distSame = hammingDistance64(leftHash, rightHash);
   const distFlip = hammingDistance64(flippedLeftHash, rightHash);
 
-  return distSame <= 6 && distFlip >= distSame + 4;
+  // Orientation-based guard: if "right" is significantly closer to the LEFT image than to the mirrored-left,
+  // it's very likely the same side view was reused (two lefts / two rights), even if not pixel-identical.
+  if (distFlip >= distSame + 2 && distSame <= 28) return true;
+
+  // Fallback: pixel similarity check (more forgiving to minor resampling/compression differences).
+  const sample = async (buf: Buffer) => {
+    const { data } = await sharp(buf)
+      .ensureAlpha()
+      .resize(64, 64, { fit: 'fill' })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    return data;
+  };
+
+  const [a, b, bFlip] = await Promise.all([sample(left), sample(right), sample(flippedLeft)]);
+  const avgAbsDiff = (x: Buffer, y: Buffer) => {
+    const n = Math.min(x.length, y.length) || 1;
+    let acc = 0;
+    for (let i = 0; i < n; i += 1) acc += Math.abs(x[i] - y[i]);
+    return acc / n;
+  };
+
+  const diffSame = avgAbsDiff(a, b);
+  const diffFlip = avgAbsDiff(bFlip, b);
+
+  // If right is much closer to left than to flipped-left, it's likely the same side view reused.
+  return diffSame <= 14 && diffFlip >= diffSame + 1;
+}
+
+async function isOppositeSideOfLeft(left: Buffer, right: Buffer): Promise<boolean> {
+  const leftHash = await computeDHash64(left);
+  const rightHash = await computeDHash64(right);
+  const flippedLeft = await sharp(left).flop().png().toBuffer();
+  const flippedLeftHash = await computeDHash64(flippedLeft);
+
+  const distSame = hammingDistance64(leftHash, rightHash);
+  const distFlip = hammingDistance64(flippedLeftHash, rightHash);
+
+  // If the right view is closer to the mirrored-left than to the left, it is very likely the opposite side.
+  if (distFlip + 1 < distSame) return true;
+
+  // Pixel check as a secondary signal.
+  const sample = async (buf: Buffer) => {
+    const { data } = await sharp(buf)
+      .ensureAlpha()
+      .resize(64, 64, { fit: 'fill' })
+      .grayscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    return data;
+  };
+
+  const [a, b, aFlip] = await Promise.all([sample(left), sample(right), sample(flippedLeft)]);
+  const avgAbsDiff = (x: Buffer, y: Buffer) => {
+    const n = Math.min(x.length, y.length) || 1;
+    let acc = 0;
+    for (let i = 0; i < n; i += 1) acc += Math.abs(x[i] - y[i]);
+    return acc / n;
+  };
+
+  const diffSame = avgAbsDiff(a, b);
+  const diffFlip = avgAbsDiff(aFlip, b);
+  return diffFlip + 0.5 < diffSame;
 }
 
 async function composeComposite(
@@ -3509,9 +3746,77 @@ app.post('/api/generate-views', async (req: Request, res: Response) => {
   }
 });
 
+app.post('/api/generate-product-titles', async (req: Request, res: Response) => {
+  try {
+    const productName = typeof req.body?.productName === 'string' ? req.body.productName.trim() : '';
+    const category = typeof req.body?.category === 'string' ? req.body.category.trim() : '';
+    const countRaw = Number(req.body?.count);
+    const requestedCount = Number.isFinite(countRaw) ? Math.round(countRaw) : 120;
+    const count = Math.min(120, Math.max(50, requestedCount));
+
+    if (!productName) return res.status(400).json({ error: 'productName is required.' });
+
+    const perBatch = Math.max(10, Math.ceil(count / 4));
+    const batches = 4;
+    const all: string[] = [];
+
+    for (let i = 0; i < batches; i += 1) {
+      const prompt = buildTitlesPrompt({ productName, category: category || undefined, count: perBatch });
+      const parsed = await generateTextJsonWithModelFallback<{ titles: unknown }>('generate-product-titles', prompt);
+
+      const titles = normalizeLines(parsed?.titles, 140);
+      all.push(...titles);
+      await sleep(120);
+    }
+
+    const titles = uniqStable(all).slice(0, count);
+    if (titles.length === 0) return res.status(502).json({ error: 'Gemini returned no titles.' });
+    res.json({ titles });
+  } catch (err: any) {
+    console.error('Generate product titles error:', err);
+    res.status(500).json({ error: mapGeminiError(err) });
+  }
+});
+
+app.post('/api/generate-product-keywords', async (req: Request, res: Response) => {
+  try {
+    const productName = typeof req.body?.productName === 'string' ? req.body.productName.trim() : '';
+    const category = typeof req.body?.category === 'string' ? req.body.category.trim() : '';
+    const countRaw = Number(req.body?.count);
+    const requestedCount = Number.isFinite(countRaw) ? Math.round(countRaw) : 350;
+    const count = Math.min(350, Math.max(100, requestedCount));
+
+    if (!productName) return res.status(400).json({ error: 'productName is required.' });
+
+    const perBatch = 100;
+    const batches = 4;
+    const all: string[] = [];
+
+    for (let i = 0; i < batches; i += 1) {
+      const prompt = buildKeywordsPrompt({ productName, category: category || undefined, count: perBatch });
+      const parsed = await generateTextJsonWithModelFallback<{ keywords: unknown }>('generate-product-keywords', prompt);
+
+      const keywords = normalizeLines(parsed?.keywords, 80);
+      all.push(...keywords);
+      await sleep(120);
+    }
+
+    const keywords = uniqStable(all).slice(0, count);
+    if (keywords.length === 0) return res.status(502).json({ error: 'Gemini returned no keywords.' });
+    res.json({ keywords });
+  } catch (err: any) {
+    console.error('Generate product keywords error:', err);
+    res.status(500).json({ error: mapGeminiError(err) });
+  }
+});
+
 app.post('/api/generate-base', async (req: Request, res: Response) => {
-  const { prompt, resolution, referenceImageBase64, referenceImageMimeType } = req.body as GenerateBaseRequestBody;
+  const { prompt, resolution, width, height, referenceImageBase64, referenceImageMimeType } = req.body as GenerateBaseRequestBody;
   const style = normalizeIncomingStyleKey((req.body as any)?.style);
+  const requestedResolution =
+    Number.isFinite(Number(width)) && Number.isFinite(Number(height)) && Number(width) === Number(height) && Number(width) > 0
+      ? Number(width)
+      : resolution;
 
   if (!prompt || !prompt.trim()) {
     return res.status(400).json({ error: 'Prompt is required.' });
@@ -3521,7 +3826,7 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' });
   }
 
-  if (!resolution || !allowedResolutions.has(resolution)) {
+  if (!requestedResolution || !allowedResolutions.has(requestedResolution)) {
     return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
   }
 
@@ -3539,7 +3844,7 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
           parts: [
             {
               text: [
-                buildBasePrompt(prompt.trim(), style, resolution),
+                buildBasePrompt(prompt.trim(), style, requestedResolution),
                 referenceInlineData
                   ? 'Reference image provided: use it as a visual design reference. Preserve the same design identity while generating the front view.'
                   : '',
@@ -3560,7 +3865,7 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
       throw new Error('Gemini response did not include an image.');
     }
 
-    let baseImage = await normalizeGeminiOutputPngBase64(String(imagePart.data), resolution, { background: WHITE_BG });
+    let baseImage = await normalizeGeminiOutputPngBase64(String(imagePart.data), requestedResolution, { background: WHITE_BG });
     if (forceWhite) {
       baseImage = await ensureSolidWhiteBackgroundStrict(baseImage);
     }
@@ -3572,12 +3877,16 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
 });
 
 app.post('/api/generate-views-from-base', async (req: Request, res: Response) => {
-  const { baseImageBase64, resolution, prompt } = req.body as GenerateViewsFromBaseRequestBody;
+  const { baseImageBase64, resolution, width, height, prompt } = req.body as GenerateViewsFromBaseRequestBody;
   const style = normalizeIncomingStyleKey((req.body as any)?.style);
   const viewsRaw = Array.isArray((req.body as any)?.views) ? (req.body as any).views : [];
   const views = viewsRaw
     .map((v: any) => normalizeIncomingViewKey(v))
     .filter((v: ViewKey | null): v is ViewKey => Boolean(v));
+  const requestedResolution =
+    Number.isFinite(Number(width)) && Number.isFinite(Number(height)) && Number(width) === Number(height) && Number(width) > 0
+      ? Number(width)
+      : resolution;
 
   if (!baseImageBase64 || typeof baseImageBase64 !== 'string') {
     return res.status(400).json({ error: 'baseImageBase64 is required.' });
@@ -3595,7 +3904,7 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
   const invalidView = viewsRaw.find((v: any) => !normalizeIncomingViewKey(v));
   if (invalidView) return res.status(400).json({ error: `Invalid view: ${String(invalidView)}` });
 
-  if (!resolution || !allowedResolutions.has(resolution)) {
+  if (!requestedResolution || !allowedResolutions.has(requestedResolution)) {
     return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
   }
 
@@ -3603,64 +3912,120 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
     const forceWhite = shouldForceWhiteBackgroundFromPrompt((prompt || '').trim());
     const tileBackground = WHITE_BG;
     const grid = computeGrid(views.length);
-    const tileWidth = Math.max(64, Math.floor(resolution / grid.columns));
-    const tileHeight = Math.max(64, Math.floor(resolution / grid.rows));
+    const tileWidth = Math.max(64, Math.floor(requestedResolution / grid.columns));
+    const tileHeight = Math.max(64, Math.floor(requestedResolution / grid.rows));
 
     const normalizedBase = normalizePngBase64(baseImageBase64);
-    const frontTileBuffer = await sharp(Buffer.from(normalizedBase, 'base64'))
-      .resize(tileWidth, tileHeight, { fit: 'contain', background: tileBackground })
+    const baseFullBuffer = await sharp(Buffer.from(normalizedBase, 'base64'))
+      .resize(requestedResolution, requestedResolution, { fit: 'contain', background: tileBackground })
       .png()
       .toBuffer();
 
-    const tiles = await Promise.all(
-      views.map(async (view) => {
+    // If both LEFT and RIGHT are requested, we generate LEFT and derive RIGHT by mirroring LEFT.
+    // This guarantees a distinct right-side output even when the model keeps returning two left views.
+    const generateRightFromLeft = views.includes('left') && views.includes('right');
+    const viewsToGenerate = generateRightFromLeft ? views.filter((v) => v !== 'right') : views;
+
+    const generatedMap = new Map<ViewKey, Buffer>();
+    await Promise.all(
+      viewsToGenerate.map(async (view) => {
         if (view === 'front') {
-          if (!forceWhite) return { view, buffer: frontTileBuffer };
-          const white = await ensureSolidWhiteBackgroundStrict(frontTileBuffer.toString('base64'));
-          return { view, buffer: Buffer.from(white, 'base64') };
+          if (!forceWhite) {
+            generatedMap.set(view, baseFullBuffer);
+            return;
+          }
+          const white = await ensureSolidWhiteBackgroundStrict(baseFullBuffer.toString('base64'));
+          generatedMap.set(view, Buffer.from(white, 'base64'));
+          return;
         }
-        const generated = await generateViewImageFromBase(normalizedBase, style, view, tileWidth, tileHeight, prompt, undefined, {
-          background: tileBackground,
-        });
+
+        const generated = await generateViewImageFromBase(
+          normalizedBase,
+          style,
+          view,
+          requestedResolution,
+          requestedResolution,
+          prompt,
+          undefined,
+          { background: tileBackground }
+        );
         const outBuf = forceWhite
           ? Buffer.from(await ensureSolidWhiteBackgroundStrict(generated.buffer.toString('base64')), 'base64')
           : generated.buffer;
-        return { view: generated.view, buffer: outBuf };
+        generatedMap.set(view, outBuf);
       })
     );
 
+    if (generateRightFromLeft) {
+      const leftBuf = generatedMap.get('left') ?? null;
+      if (leftBuf) {
+        const mirrored = await sharp(leftBuf).flop().png().toBuffer();
+        const mirroredOut = forceWhite
+          ? Buffer.from(await ensureSolidWhiteBackgroundStrict(mirrored.toString('base64')), 'base64')
+          : mirrored;
+        generatedMap.set('right', mirroredOut);
+      }
+    }
+
+    const fullImages = views.map((view) => {
+      const buf = generatedMap.get(view);
+      if (!buf) throw new Error(`Missing generated view: ${view}`);
+      return { view, buffer: buf };
+    });
+
     if (views.includes('left') && views.includes('right')) {
-      const leftTile = tiles.find((t) => t.view === 'left') ?? null;
-      const rightIdx = tiles.findIndex((t) => t.view === 'right');
+      const leftTile = fullImages.find((t) => t.view === 'left') ?? null;
+      const rightIdx = fullImages.findIndex((t) => t.view === 'right');
 
       if (leftTile && rightIdx !== -1) {
-        const rightTile = tiles[rightIdx];
-        if (rightTile && (await isLikelySameAngle(leftTile.buffer, rightTile.buffer))) {
+        const rightTile = fullImages[rightIdx];
+        const shouldFix = rightTile && !(await isOppositeSideOfLeft(leftTile.buffer, rightTile.buffer));
+
+        if (rightTile && shouldFix) {
           const regenerated = await generateViewImageFromBase(
             normalizedBase,
             style,
             'right',
-            tileWidth,
-            tileHeight,
+            requestedResolution,
+            requestedResolution,
             prompt,
-            "This MUST be the RIGHT side view (opposite side from the LEFT). Do NOT reuse the left-side angle. Ensure the garment's front points to the LEFT in the frame.",
+            "This MUST be the RIGHT side view (opposite side from the LEFT). Do NOT reuse the left-side angle. Do NOT mirror the design. Only change camera angle. Ensure the garment's front points to the LEFT in the frame.",
             { background: tileBackground }
           );
           const outBuf = forceWhite
             ? Buffer.from(await ensureSolidWhiteBackgroundStrict(regenerated.buffer.toString('base64')), 'base64')
             : regenerated.buffer;
-          tiles[rightIdx] = { view: 'right', buffer: outBuf };
+
+          // If Gemini still returned the left view again, fall back to a mirrored-left image
+          // so the user always gets a distinct right-side view.
+          const stillWrong = !(await isOppositeSideOfLeft(leftTile.buffer, outBuf));
+          if (stillWrong) {
+            const mirrored = await sharp(leftTile.buffer).flop().png().toBuffer();
+            const mirroredOut = forceWhite
+              ? Buffer.from(await ensureSolidWhiteBackgroundStrict(mirrored.toString('base64')), 'base64')
+              : mirrored;
+            fullImages[rightIdx] = { view: 'right', buffer: mirroredOut };
+          } else {
+            fullImages[rightIdx] = { view: 'right', buffer: outBuf };
+          }
         }
       }
     }
 
-    const composite = await composeComposite(tiles, grid.columns, grid.rows, tileWidth, tileHeight, {
+    const compositeTiles = await Promise.all(
+      fullImages.map(async (tile) => ({
+        view: tile.view,
+        buffer: await sharp(tile.buffer).resize(tileWidth, tileHeight, { fit: 'contain', background: tileBackground }).png().toBuffer(),
+      }))
+    );
+
+    const composite = await composeComposite(compositeTiles, grid.columns, grid.rows, tileWidth, tileHeight, {
       background: tileBackground,
     });
 
     return res.json({
       compositeBase64: composite.buffer.toString('base64'),
-      images: tiles.map((tile) => ({ view: tile.view, imageBase64: tile.buffer.toString('base64') })),
+      images: fullImages.map((tile) => ({ view: tile.view, imageBase64: tile.buffer.toString('base64') })),
       meta: {
         dimensions: composite.dimensions,
         grid: { ...grid, tileWidth, tileHeight },
@@ -3931,68 +4296,68 @@ app.post('/api/convert-style', async (req: Request, res: Response) => {
       return await ensureSolidWhiteBackgroundPngBase64(normalized);
     };
 
-	    const retryConversion = async (
-	      originalPngBase64: string,
-	      view: ViewKey,
-	      originalHasAlpha: boolean,
-	      target: { width: number; height: number }
-	    ): Promise<{ view: ViewKey; imageBase64: string }> => {
-	      if (isLineArt) {
-	        const prompt = [
-	          buildStyleConversionPrompt('lineart'),
-	          'STRICT: Keep the exact same framing, zoom, and size as the input image. Do not crop. Do not zoom.',
-	          'STRICT: Do not add any paper texture, dots, grain, halftone, or background noise.',
-	        ].join(' ');
+    const retryConversion = async (
+      originalPngBase64: string,
+      view: ViewKey,
+      originalHasAlpha: boolean,
+      target: { width: number; height: number }
+    ): Promise<{ view: ViewKey; imageBase64: string }> => {
+      if (isLineArt) {
+        const prompt = [
+          buildStyleConversionPrompt('lineart'),
+          'STRICT: Keep the exact same framing, zoom, and size as the input image. Do not crop. Do not zoom.',
+          'STRICT: Do not add any paper texture, dots, grain, halftone, or background noise.',
+        ].join(' ');
 
-	        try {
-	          const outRaw = await convertOne(originalPngBase64, prompt);
-	          const out = await cleanupLineArtOutputToTarget(outRaw, target);
-	          await validateLineArtOutput(out);
-	          return { view, imageBase64: out };
-	        } catch (err) {
-	          try {
-	            const fallback = await fallbackLineArtEdgeDetectPngBase64(originalPngBase64);
-	            const out = await cleanupLineArtOutputToTarget(fallback, target);
-	            return { view, imageBase64: out };
-	          } catch {
-	            // Last resort: don't fail the whole request.
-	            return { view, imageBase64: originalPngBase64 };
-	          }
-	        }
-	      }
-
-	      const maxAttempts = 1;
-	      let lastErr: any = null;
-
-	      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-	        try {
-	          const outRaw = await convertOne(originalPngBase64);
-	          if (!outRaw || typeof outRaw !== 'string' || !outRaw.trim()) throw new Error('Empty converted image.');
-
-	          // Non-lineart conversions should keep consistent dimensions with the original view.
-	          let out = await resizeToMatch(outRaw, target, WHITE_BG);
-	          out = await ensureSolidWhiteBackgroundPngBase64(out);
-	          return { view, imageBase64: out };
-	        } catch (err) {
-	          lastErr = err;
-	          if (attempt < maxAttempts) {
-	            console.warn(`Convert style retry ${attempt}/${maxAttempts - 1} for view "${view}"`);
+        try {
+          const outRaw = await convertOne(originalPngBase64, prompt);
+          const out = await cleanupLineArtOutputToTarget(outRaw, target);
+          await validateLineArtOutput(out);
+          return { view, imageBase64: out };
+        } catch (err) {
+          try {
+            const fallback = await fallbackLineArtEdgeDetectPngBase64(originalPngBase64);
+            const out = await cleanupLineArtOutputToTarget(fallback, target);
+            return { view, imageBase64: out };
+          } catch {
+            // Last resort: don't fail the whole request.
+            return { view, imageBase64: originalPngBase64 };
           }
         }
-	      }
+      }
+
+      const maxAttempts = 1;
+      let lastErr: any = null;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          const outRaw = await convertOne(originalPngBase64);
+          if (!outRaw || typeof outRaw !== 'string' || !outRaw.trim()) throw new Error('Empty converted image.');
+
+          // Non-lineart conversions should keep consistent dimensions with the original view.
+          let out = await resizeToMatch(outRaw, target, WHITE_BG);
+          out = await ensureSolidWhiteBackgroundPngBase64(out);
+          return { view, imageBase64: out };
+        } catch (err) {
+          lastErr = err;
+          if (attempt < maxAttempts) {
+            console.warn(`Convert style retry ${attempt}/${maxAttempts - 1} for view "${view}"`);
+          }
+        }
+      }
 
       console.warn(`Convert style failed for view "${view}", falling back to original.`, lastErr);
       return { view, imageBase64: originalPngBase64 };
     };
 
-	    const converted = await Promise.all(
-	      incoming.map(async (it) => {
-	        const original = normalizePngBase64(it.imageBase64);
-	        const originalHasAlpha = await hasMeaningfulTransparency(original).catch(() => false);
-	        const target = await getPngDimensions(original);
-	        return await retryConversion(original, it.view, originalHasAlpha, target);
-	      })
-	    );
+    const converted = await Promise.all(
+      incoming.map(async (it) => {
+        const original = normalizePngBase64(it.imageBase64);
+        const originalHasAlpha = await hasMeaningfulTransparency(original).catch(() => false);
+        const target = await getPngDimensions(original);
+        return await retryConversion(original, it.view, originalHasAlpha, target);
+      })
+    );
     return res.json({ converted });
   } catch (err: any) {
     console.error('Convert style error:', err);
@@ -4061,65 +4426,65 @@ app.post('/api/convert-model', async (req: Request, res: Response) => {
       return view === 'back' ? modelBackPrompt(modelKey) : modelFrontPrompt(modelKey);
     };
 
-	    const convertOne = async (pngBase64: string, view: ViewKey, target: { width: number; height: number }) => {
-	      const input = normalizePngBase64(pngBase64);
-	      const inlineData = pngBase64ToInlineData(input);
-	      const basePrompt = promptForView(view);
+    const convertOne = async (pngBase64: string, view: ViewKey, target: { width: number; height: number }) => {
+      const input = normalizePngBase64(pngBase64);
+      const inlineData = pngBase64ToInlineData(input);
+      const basePrompt = promptForView(view);
 
-	      const maxAttempts = view === 'back' ? 3 : 2;
-	      let lastErr: any = null;
-	      let bestOut: string | null = null;
-	      let bestScore = Number.POSITIVE_INFINITY;
+      const maxAttempts = view === 'back' ? 3 : 2;
+      let lastErr: any = null;
+      let bestOut: string | null = null;
+      let bestScore = Number.POSITIVE_INFINITY;
 
-	      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-	        try {
-	          const extra =
-	            attempt >= 2
-	              ? [
-	                  'CRITICAL: Zoom OUT. The subject must occupy at most ~70% of image height.',
-	                  'Add extra empty space above the head and below the feet. Feet must be fully visible.',
-	                  'Do NOT crop any body part. Do NOT use a close-up.',
-	                ].join(' ')
-	              : '';
-	          const response = await ai.models.generateContent({
-	            model: 'gemini-2.5-flash-image',
-	            contents: [{ role: 'user', parts: [{ text: [basePrompt, extra].filter(Boolean).join(' ') }, { inlineData }] }],
-	          });
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          const extra =
+            attempt >= 2
+              ? [
+                'CRITICAL: Zoom OUT. The subject must occupy at most ~70% of image height.',
+                'Add extra empty space above the head and below the feet. Feet must be fully visible.',
+                'Do NOT crop any body part. Do NOT use a close-up.',
+              ].join(' ')
+              : '';
+          const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash-image',
+            contents: [{ role: 'user', parts: [{ text: [basePrompt, extra].filter(Boolean).join(' ') }, { inlineData }] }],
+          });
 
-	          const parts = (response as any)?.candidates?.[0]?.content?.parts;
-	          const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
-	          if (!imagePart?.data) throw new Error('Gemini response did not include an image.');
+          const parts = (response as any)?.candidates?.[0]?.content?.parts;
+          const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
+          if (!imagePart?.data) throw new Error('Gemini response did not include an image.');
 
-	          let out = await normalizeGeminiOutputPngBase64(String(imagePart.data), undefined, { background: WHITE_BG });
-	          out = await ensureSolidWhiteBackgroundStrict(out);
-	          out = await resizeToMatch(out, target, WHITE_BG);
+          let out = await normalizeGeminiOutputPngBase64(String(imagePart.data), undefined, { background: WHITE_BG });
+          out = await ensureSolidWhiteBackgroundStrict(out);
+          out = await resizeToMatch(out, target, WHITE_BG);
 
-	          const score = await scoreCroppingRiskOnWhiteBackground(out).catch(() => 9999);
-	          if (score < bestScore) {
-	            bestScore = score;
-	            bestOut = out;
-	          }
-	          // Good enough, stop early.
-	          if (score <= 28) return out;
+          const score = await scoreCroppingRiskOnWhiteBackground(out).catch(() => 9999);
+          if (score < bestScore) {
+            bestScore = score;
+            bestOut = out;
+          }
+          // Good enough, stop early.
+          if (score <= 28) return out;
 
-	          // Otherwise keep trying for a better-framed result.
-	        } catch (err) {
-	          lastErr = err;
-	          if (attempt < maxAttempts) console.warn(`Convert model retry ${attempt}/${maxAttempts - 1} for view "${view}"`);
-	        }
-	      }
+          // Otherwise keep trying for a better-framed result.
+        } catch (err) {
+          lastErr = err;
+          if (attempt < maxAttempts) console.warn(`Convert model retry ${attempt}/${maxAttempts - 1} for view "${view}"`);
+        }
+      }
 
-	      if (bestOut) return bestOut;
-	      throw lastErr instanceof Error ? lastErr : new Error('Model conversion failed.');
-	    };
+      if (bestOut) return bestOut;
+      throw lastErr instanceof Error ? lastErr : new Error('Model conversion failed.');
+    };
 
-	    const converted = await Promise.all(
-	      incomingFrontBack.map(async (it) => {
-	        const input = normalizePngBase64(it.imageBase64);
-	        const target = await getPngDimensions(input);
-	        return { view: it.view, imageBase64: await convertOne(input, it.view, target) };
-	      })
-	    );
+    const converted = await Promise.all(
+      incomingFrontBack.map(async (it) => {
+        const input = normalizePngBase64(it.imageBase64);
+        const target = await getPngDimensions(input);
+        return { view: it.view, imageBase64: await convertOne(input, it.view, target) };
+      })
+    );
     return res.json({ converted });
   } catch (err: any) {
     console.error('Convert model error:', err);
@@ -4143,7 +4508,7 @@ app.post('/api/export', jsonLarge, async (req: Request, res: Response) => {
 
     const exportId = randomUUID();
     exportSessions.set(exportId, { userId, format, items, createdAt: Date.now() });
-    return res.json({ exportId, url: `/api/export?exportId=${exportId}` });
+    return res.json({ exportId, url: `/api/export?exportId=${exportId}&uid=${encodeURIComponent(userId)}` });
   } catch (err: any) {
     console.error('Export init error:', err);
     return res.status(500).json({ error: err?.message || 'Failed to prepare export.' });
@@ -4151,7 +4516,9 @@ app.post('/api/export', jsonLarge, async (req: Request, res: Response) => {
 });
 
 app.get('/api/export', async (req: Request, res: Response) => {
-  const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
+  const headerUserId = (req.headers['x-user-id'] as string | undefined)?.trim();
+  const queryUserId = typeof req.query.uid === 'string' ? req.query.uid.trim() : '';
+  const userId = headerUserId || queryUserId;
   if (!userId) return res.status(401).json({ error: 'Missing user id' });
 
   try {
@@ -4916,10 +5283,10 @@ app.post('/api/image/edit-views', async (req: Request, res: Response) => {
         const needsColorLock = is3dStyle(reqItem.style) && (reqItem.view === 'left' || reqItem.view === 'right');
         const colorLockInstruction = needsColorLock
           ? [
-              'Color lock (strict): preserve the exact colors and materials from the input image.',
-              'Do not shift hues, do not change garment colors, and do not wash out contrast.',
-              'Keep black/white areas and fabric material appearance identical to the original unless explicitly requested.',
-            ].join(' ')
+            'Color lock (strict): preserve the exact colors and materials from the input image.',
+            'Do not shift hues, do not change garment colors, and do not wash out contrast.',
+            'Keep black/white areas and fabric material appearance identical to the original unless explicitly requested.',
+          ].join(' ')
           : '';
         const outputConstraints = [
           'Output constraints:',
@@ -5153,10 +5520,10 @@ app.get('/api/designs/:id', async (req, res) => {
       composite:
         doc.composite?.fileId || doc.composite?.dataUrl
           ? {
-              mime: doc.composite?.mime,
-              url: buildFileUrl(doc.composite?.fileId),
-              dataUrl: doc.composite?.dataUrl,
-            }
+            mime: doc.composite?.mime,
+            url: buildFileUrl(doc.composite?.fileId),
+            dataUrl: doc.composite?.dataUrl,
+          }
           : null,
       images: doc.images.map((img: any) => ({
         view: img.view,
@@ -5826,8 +6193,7 @@ app
   .listen(port)
   .once('listening', () => {
     console.log(
-      `[server] PID=${process.pid} listening on http://localhost:${port} | cwd=${process.cwd()} | loadedRootEnv=${loadedRootEnv} | loadedServerEnv=${loadedServerEnv} | maskedKey=${
-        GEMINI_KEY.length >= 8 ? `${GEMINI_KEY.slice(0, 4)}...${GEMINI_KEY.slice(-4)}` : '(too short)'
+      `[server] PID=${process.pid} listening on http://localhost:${port} | cwd=${process.cwd()} | loadedRootEnv=${loadedRootEnv} | loadedServerEnv=${loadedServerEnv} | maskedKey=${GEMINI_KEY.length >= 8 ? `${GEMINI_KEY.slice(0, 4)}...${GEMINI_KEY.slice(-4)}` : '(too short)'
       } | model=gemini-2.5-flash-image`
     );
   })

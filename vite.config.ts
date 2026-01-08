@@ -54,8 +54,8 @@
     outDir: 'build',
   },
   server: {
-    port: 3000,
-    strictPort: true,
+    port: 3001,
+    strictPort: false,
     open: true,
     proxy: {
       '/api': 'http://localhost:4000',

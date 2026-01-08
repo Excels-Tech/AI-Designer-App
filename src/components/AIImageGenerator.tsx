@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useEffect, useLayoutEffect, type ReactNode } from 'react';
+import { useMemo, useRef, useState, useEffect, useLayoutEffect, type ReactNode, type CSSProperties } from 'react';
 import {
   Sparkles,
   Wand2,
@@ -18,8 +18,9 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { authFetch, getUserId } from '../utils/auth';
+import { authFetch, getUserId, resolveApiAssetUrl } from '../utils/auth';
 import { TOOLBAR_ICON_BTN, TOOLBAR_PILL_BTN } from './ui/toolbarStyles';
+import { ListingAssistantDrawer } from './ListingAssistantDrawer';
 
 type ArtStyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor';
 type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'closeUp' | 'top';
@@ -34,6 +35,8 @@ interface GeneratedImage {
   view: ViewKey;
   src: string;
   imageBase64?: string;
+  width?: number;
+  height?: number;
 }
 
 interface GenerateResponse {
@@ -108,7 +111,6 @@ const VIEW_ORDER: ViewKey[] = ['front', 'back', 'left', 'right', 'threeQuarter',
 function normalizeViews(selectedViews: ViewKey[]): ViewKey[] {
   const normalized = new Set<ViewKey>(selectedViews);
   normalized.add('front');
-  normalized.add('back');
   return VIEW_ORDER.filter((v) => normalized.has(v));
 }
 
@@ -120,6 +122,152 @@ const appendPromptModifier = (prompt: string, modifier: string) => {
   const needsPunctuation = !/[.!?]$/.test(trimmedPrompt);
   return `${trimmedPrompt}${needsPunctuation ? '.' : ''} ${trimmedModifier}`;
 };
+
+function userRequestedBrand(prompt: string): boolean {
+  const p = (prompt || '').toLowerCase();
+  if (!p.trim()) return false;
+
+  // Explicit brand keywords or "in the style of" style requests.
+  const brands = [
+    'adidas',
+    'nike',
+    'puma',
+    'reebok',
+    'under armour',
+    'underarmour',
+    'new balance',
+    'asics',
+    'fila',
+    'converse',
+    'vans',
+    'jordan',
+  ];
+  if (brands.some((b) => p.includes(b))) return true;
+  if (/\b(in the style of|brand(ed)?|logo(ed)?|trademark(ed)?)\b/.test(p)) return true;
+  return false;
+}
+
+type DesignCategory = 'apparel' | 'logo' | 'poster' | 'product' | 'illustration' | 'generic';
+
+function detectDesignCategory(userPrompt: string): DesignCategory {
+  const p = (userPrompt || '').toLowerCase();
+
+  const apparel = [
+    'shirt',
+    't-shirt',
+    'tshirt',
+    'hoodie',
+    'suit',
+    'cap',
+    'hat',
+    'jacket',
+    'pants',
+    'trousers',
+    'dress',
+    'clothing',
+    'apparel',
+    'garment',
+    'uniform',
+  ];
+  const logo = ['logo', 'emblem', 'brandmark', 'icon'];
+  const poster = ['poster', 'flyer', 'banner', 'advertisement', 'ad'];
+  const product = ['packaging', 'label', 'bottle', 'box'];
+  const illustration = ['character', 'illustration', 'drawing', 'art', 'cartoon'];
+
+  const includesAny = (words: string[]) => words.some((w) => p.includes(w));
+
+  if (includesAny(apparel)) return 'apparel';
+  if (includesAny(logo)) return 'logo';
+  if (includesAny(poster)) return 'poster';
+  if (includesAny(product)) return 'product';
+  if (includesAny(illustration)) return 'illustration';
+  return 'generic';
+}
+
+const BRAND_SAFE_NEGATIVE =
+  'No brand names. No trademarked logos. No trademarked stripes or signature brand patterns. No Adidas/Nike/Puma. No sports brand designs.';
+
+function applyBrandSafety(prompt: string): string {
+  if (userRequestedBrand(prompt)) return prompt.trim();
+  return appendPromptModifier(prompt, BRAND_SAFE_NEGATIVE);
+}
+
+function applyCategoryTemplate(userPrompt: string): { prompt: string; category: DesignCategory } {
+  const category = detectDesignCategory(userPrompt);
+  const base = userPrompt.trim();
+
+  const genericGuard =
+    'Generate exactly what the user requests. Do not assume clothing/apparel unless explicitly requested.';
+  const nonApparelNegative = 'No clothing. No t-shirt. No hoodie. No suit. No apparel mockup.';
+
+  if (category === 'apparel') {
+    return {
+      category,
+      prompt: [
+        'High quality apparel/garment design mockup. One garment only, centered, clean background.',
+        'Keep the garment fully visible.',
+        `User request: ${base}`,
+      ].join(' '),
+    };
+  }
+
+  if (category === 'logo') {
+    return {
+      category,
+      prompt: [
+        'High resolution logo design. Vector-like, clean edges, crisp lines.',
+        'Isolated on a plain white background. No mockups.',
+        genericGuard,
+        nonApparelNegative,
+        `User request: ${base}`,
+      ].join(' '),
+    };
+  }
+
+  if (category === 'poster') {
+    return {
+      category,
+      prompt: [
+        'High quality poster/flyer design. Strong typography and layout, clean margins.',
+        'Flat design on a plain background. No clothing mockups.',
+        genericGuard,
+        nonApparelNegative,
+        `User request: ${base}`,
+      ].join(' '),
+    };
+  }
+
+  if (category === 'product') {
+    return {
+      category,
+      prompt: [
+        'High quality product design / packaging concept. Clean presentation.',
+        'Do not place the design on clothing.',
+        genericGuard,
+        nonApparelNegative,
+        `User request: ${base}`,
+      ].join(' '),
+    };
+  }
+
+  if (category === 'illustration') {
+    return {
+      category,
+      prompt: [
+        'High quality illustration. Sharp details, clean lines.',
+        'Do not turn it into clothing or apparel.',
+        genericGuard,
+        nonApparelNegative,
+        `User request: ${base}`,
+      ].join(' '),
+    };
+  }
+
+  return {
+    category,
+    prompt: [genericGuard, nonApparelNegative, `User request: ${base}`].join(' '),
+  };
+}
 
 const framingModeLabel = (mode: FramingMode) => {
   if (mode === 'zoomIn') return 'Zoomed in';
@@ -164,8 +312,469 @@ async function loadImageElement(src: string): Promise<HTMLImageElement> {
   });
 }
 
+type ContentBounds = { left: number; top: number; right: number; bottom: number };
+
+function unionBounds(a: ContentBounds | null, b: ContentBounds | null): ContentBounds | null {
+  if (!a) return b;
+  if (!b) return a;
+  return {
+    left: Math.min(a.left, b.left),
+    top: Math.min(a.top, b.top),
+    right: Math.max(a.right, b.right),
+    bottom: Math.max(a.bottom, b.bottom),
+  };
+}
+
+function cropCanvasToBoundsWithPadding(
+  canvas: HTMLCanvasElement,
+  bounds: ContentBounds,
+  {
+    paddingPercent = 0.25,
+    minPaddingPx = 120,
+    verticalPaddingMultiplier = 1.2,
+  }: { paddingPercent?: number; minPaddingPx?: number; verticalPaddingMultiplier?: number } = {}
+): HTMLCanvasElement {
+  const { width, height } = canvas;
+  const contentW = Math.max(1, bounds.right - bounds.left + 1);
+  const contentH = Math.max(1, bounds.bottom - bounds.top + 1);
+
+  const basePad = Math.max(minPaddingPx, Math.max(contentW, contentH) * paddingPercent);
+  const padX = Math.round(basePad);
+  const padY = Math.round(basePad * verticalPaddingMultiplier);
+
+  let x = Math.floor(bounds.left - padX);
+  let y = Math.floor(bounds.top - padY);
+  let w = Math.ceil(contentW + padX * 2);
+  let h = Math.ceil(contentH + padY * 2);
+
+  x = Math.max(0, x);
+  y = Math.max(0, y);
+  w = Math.min(width - x, w);
+  h = Math.min(height - y, h);
+
+  if (w <= 0 || h <= 0) return canvas;
+  if (x === 0 && y === 0 && w === width && h === height) return canvas;
+
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, w);
+  out.height = Math.max(1, h);
+  const outCtx = out.getContext('2d', { willReadFrequently: true });
+  if (!outCtx) return canvas;
+
+  outCtx.fillStyle = '#ffffff';
+  outCtx.fillRect(0, 0, out.width, out.height);
+  outCtx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
+  return out;
+}
+
+function cropCanvasLoose(canvas: HTMLCanvasElement, paddingPercent = 0.25): HTMLCanvasElement {
+  const b1 = getContentBounds(canvas, { treatNearWhiteAsEmpty: true });
+  const b2 = getContentBounds(canvas, { treatNearWhiteAsEmpty: false });
+  const bounds = unionBounds(b1, b2);
+  if (!bounds) return canvas;
+
+  // First pass (loose).
+  let out = cropCanvasToBoundsWithPadding(canvas, bounds, { paddingPercent, minPaddingPx: 120, verticalPaddingMultiplier: 1.2 });
+
+  // Safeguard: if content still touches edges, increase padding and redo.
+  const postBounds = getContentBounds(out, { treatNearWhiteAsEmpty: false });
+  if (postBounds) {
+    const marginLeft = postBounds.left;
+    const marginTop = postBounds.top;
+    const marginRight = out.width - 1 - postBounds.right;
+    const marginBottom = out.height - 1 - postBounds.bottom;
+
+    const minMargin = 48; // keep some guaranteed whitespace in the final crop
+    if (Math.min(marginLeft, marginTop, marginRight, marginBottom) < minMargin) {
+      out = cropCanvasToBoundsWithPadding(canvas, bounds, {
+        paddingPercent: Math.max(0.35, paddingPercent),
+        minPaddingPx: 160,
+        verticalPaddingMultiplier: 1.3,
+      });
+    }
+  }
+
+  return out;
+}
+
+async function autoCropWhiteBackground(imageUrl: string, paddingPercent = 0.25): Promise<string> {
+  const trimmedSrc = String(imageUrl || '').trim();
+  if (!trimmedSrc) throw new Error('Missing image source.');
+
+  const isDataUrl = /^data:image\//i.test(trimmedSrc);
+  let objectUrlToRevoke: string | null = null;
+
+  try {
+    let img: HTMLImageElement;
+    if (isDataUrl) {
+      img = await loadImageElement(trimmedSrc);
+    } else {
+      const res = trimmedSrc.startsWith('/api/') ? await authFetch(trimmedSrc) : await fetch(trimmedSrc);
+      if (!res.ok) throw new Error('Failed to load image for cropping.');
+      const blob = await res.blob();
+      objectUrlToRevoke = URL.createObjectURL(blob);
+      img = await loadImageElement(objectUrlToRevoke);
+    }
+
+    const width = img.naturalWidth || img.width;
+    const height = img.naturalHeight || img.height;
+    if (!width || !height) return trimmedSrc;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return trimmedSrc;
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+    normalizeCanvasBackgroundToWhite(canvas);
+
+    const b1 = getContentBounds(canvas, { treatNearWhiteAsEmpty: true });
+    const b2 = getContentBounds(canvas, { treatNearWhiteAsEmpty: false });
+    const bounds = unionBounds(b1, b2);
+    if (!bounds) return trimmedSrc;
+
+    const boundsW = Math.max(1, bounds.right - bounds.left + 1);
+    const boundsH = Math.max(1, bounds.bottom - bounds.top + 1);
+
+    const paddingX = Math.max(120, Math.round(boundsW * paddingPercent));
+    const paddingY = Math.max(144, Math.round(boundsH * paddingPercent * 1.2));
+
+    const cropX = Math.max(0, bounds.left - paddingX);
+    const cropY = Math.max(0, bounds.top - paddingY);
+    const cropRight = Math.min(width - 1, bounds.right + paddingX);
+    const cropBottom = Math.min(height - 1, bounds.bottom + paddingY);
+    const cropW = Math.max(1, cropRight - cropX + 1);
+    const cropH = Math.max(1, cropBottom - cropY + 1);
+
+    const out = document.createElement('canvas');
+    out.width = width;
+    out.height = height;
+    const outCtx = out.getContext('2d', { willReadFrequently: true });
+    if (!outCtx) return trimmedSrc;
+
+    outCtx.imageSmoothingEnabled = true;
+    // @ts-expect-error some TS libdom versions type this as limited values
+    outCtx.imageSmoothingQuality = 'high';
+    outCtx.fillStyle = '#ffffff';
+    outCtx.fillRect(0, 0, width, height);
+
+    const scale = Math.min(width / cropW, height / cropH);
+    const destW = cropW * scale;
+    const destH = cropH * scale;
+    const destX = (width - destW) / 2;
+    const destY = (height - destH) / 2;
+
+    outCtx.drawImage(canvas, cropX, cropY, cropW, cropH, destX, destY, destW, destH);
+
+    return out.toDataURL('image/png');
+  } finally {
+    if (objectUrlToRevoke) URL.revokeObjectURL(objectUrlToRevoke);
+  }
+}
+
+async function getImageSize(url: string): Promise<{ width: number; height: number }> {
+  const img = await loadImageElement(url);
+  const width = img.naturalWidth || img.width;
+  const height = img.naturalHeight || img.height;
+  return { width, height };
+}
+
+async function ensurePngDataUrlSquareSize(dataUrl: string, target: number): Promise<string> {
+  const src = String(dataUrl || '').trim();
+  if (!src.startsWith('data:image/')) return src;
+  if (!Number.isFinite(target) || target <= 0) return src;
+
+  const { width, height } = await getImageSize(src);
+  if (width === target && height === target) return src;
+
+  console.warn('[AIImageGenerator] Wrong resolution returned, fixing:', { expected: target, actual: `${width}x${height}` });
+
+  const img = await loadImageElement(src);
+  const canvas = document.createElement('canvas');
+  canvas.width = target;
+  canvas.height = target;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return src;
+
+  ctx.imageSmoothingEnabled = true;
+  // @ts-expect-error some TS libdom versions type this as limited values
+  ctx.imageSmoothingQuality = 'high';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, target, target);
+
+  const iw = img.naturalWidth || img.width;
+  const ih = img.naturalHeight || img.height;
+  const scale = Math.min(target / iw, target / ih);
+  const dw = iw * scale;
+  const dh = ih * scale;
+  const dx = (target - dw) / 2;
+  const dy = (target - dh) / 2;
+  ctx.drawImage(img, 0, 0, iw, ih, dx, dy, dw, dh);
+
+  return canvas.toDataURL('image/png');
+}
+
+async function fitImageToFrame(imageUrl: string, targetSize: number, paddingRatio = 0.06): Promise<string> {
+  const src = String(imageUrl || '').trim();
+  if (!src) throw new Error('Missing image source.');
+  if (!Number.isFinite(targetSize) || targetSize <= 0) throw new Error('Invalid target size.');
+
+  const img = await loadImageElement(src);
+  const width = img.naturalWidth || img.width;
+  const height = img.naturalHeight || img.height;
+  if (!width || !height) throw new Error('Invalid image dimensions.');
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('Canvas not supported.');
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
+  ctx.drawImage(img, 0, 0, width, height);
+  // Reduce “ghost” gray background noise so content bounds are tighter and more consistent.
+  normalizeCanvasBackgroundToWhite(canvas, { bgDistanceThreshold: 40, minBrightness: 150 });
+
+  const detectBounds = () => {
+    // Prefer a density-based bbox (robust to tiny noise specks far from the subject).
+    try {
+      const downsample = 256;
+      const scale = Math.min(1, downsample / Math.max(width, height));
+      const w = Math.max(1, Math.round(width * scale));
+      const h = Math.max(1, Math.round(height * scale));
+      const small = document.createElement('canvas');
+      small.width = w;
+      small.height = h;
+      const sctx = small.getContext('2d', { willReadFrequently: true });
+      if (sctx) {
+        sctx.imageSmoothingEnabled = true;
+        // @ts-expect-error some TS libdom versions type this as limited values
+        sctx.imageSmoothingQuality = 'high';
+        sctx.drawImage(canvas, 0, 0, w, h);
+
+        const data = sctx.getImageData(0, 0, w, h).data;
+        const rowCounts = new Uint32Array(h);
+        const colCounts = new Uint32Array(w);
+        // Treat very light pixels as background so shadows/halos don’t inflate the bbox.
+        const nonWhiteThreshold = 245;
+
+        for (let y = 0; y < h; y += 1) {
+          for (let x = 0; x < w; x += 1) {
+            const idx = (y * w + x) * 4;
+            const r = data[idx];
+            const g = data[idx + 1];
+            const b = data[idx + 2];
+            const a = data[idx + 3];
+            if (a === 0) continue;
+            if (r >= nonWhiteThreshold && g >= nonWhiteThreshold && b >= nonWhiteThreshold) continue;
+            rowCounts[y] += 1;
+            colCounts[x] += 1;
+          }
+        }
+
+        // Ignore sparse specks by requiring a small minimum density per row/column.
+        const minFraction = 0.01;
+        const rowMin = Math.max(2, Math.round(w * minFraction));
+        const colMin = Math.max(2, Math.round(h * minFraction));
+
+        let top = 0;
+        while (top < h && rowCounts[top] < rowMin) top += 1;
+        let bottom = h - 1;
+        while (bottom >= 0 && rowCounts[bottom] < rowMin) bottom -= 1;
+        let left = 0;
+        while (left < w && colCounts[left] < colMin) left += 1;
+        let right = w - 1;
+        while (right >= 0 && colCounts[right] < colMin) right -= 1;
+
+        if (right >= left && bottom >= top) {
+          const inv = 1 / scale;
+          return {
+            left: Math.max(0, Math.floor(left * inv)),
+            top: Math.max(0, Math.floor(top * inv)),
+            right: Math.min(width - 1, Math.ceil((right + 1) * inv) - 1),
+            bottom: Math.min(height - 1, Math.ceil((bottom + 1) * inv) - 1),
+          };
+        }
+      }
+    } catch {
+      // fall back
+    }
+
+    // Fallback: pick the tightest near-white bounds (avoid the non-filtered bounds which becomes full-canvas).
+    const candidates = [
+      getContentBounds(canvas, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 240 }),
+      getContentBounds(canvas, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 245 }),
+      getContentBounds(canvas, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 250 }),
+      getContentBounds(canvas, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 252 }),
+    ].filter(Boolean) as { left: number; top: number; right: number; bottom: number }[];
+
+    if (!candidates.length) return null;
+
+    const minAreaFraction = 0.02; // ignore absurdly tiny detections
+    const fullArea = width * height;
+    const scored = candidates
+      .map((b) => ({
+        b,
+        area: (b.right - b.left + 1) * (b.bottom - b.top + 1),
+      }))
+      .filter((x) => x.area / fullArea >= minAreaFraction)
+      .sort((a, b) => a.area - b.area);
+
+    return (scored[0]?.b ?? candidates[0]) || null;
+  };
+
+  const renderFit = (
+    bounds: { left: number; top: number; right: number; bottom: number },
+    padRatio: number,
+    minPad: number
+  ) => {
+    const bboxW = Math.max(1, bounds.right - bounds.left + 1);
+    const bboxH = Math.max(1, bounds.bottom - bounds.top + 1);
+
+    // Aim for consistent framing across views: subject fills ~92% of the output.
+    const targetFill = 0.92;
+    const desiredSide = Math.ceil(Math.max(bboxW / targetFill, bboxH / targetFill));
+
+    const paddingX = Math.max(minPad, Math.round(bboxW * padRatio));
+    const paddingY = Math.max(minPad, Math.round(bboxH * padRatio * 1.05));
+    const minSide = Math.max(bboxW + paddingX * 2, bboxH + paddingY * 2);
+
+    const cropSide = Math.max(1, Math.min(Math.max(desiredSide, minSide), Math.min(width, height)));
+    const cx = (bounds.left + bounds.right) / 2;
+    const cy = (bounds.top + bounds.bottom) / 2;
+
+    let cropX = Math.round(cx - cropSide / 2);
+    let cropY = Math.round(cy - cropSide / 2);
+    cropX = Math.max(0, Math.min(width - cropSide, cropX));
+    cropY = Math.max(0, Math.min(height - cropSide, cropY));
+    const cropW = cropSide;
+    const cropH = cropSide;
+
+    const out = document.createElement('canvas');
+    out.width = targetSize;
+    out.height = targetSize;
+    const outCtx = out.getContext('2d', { willReadFrequently: true });
+    if (!outCtx) throw new Error('Canvas not supported.');
+
+    outCtx.imageSmoothingEnabled = true;
+    // @ts-expect-error some TS libdom versions type this as limited values
+    outCtx.imageSmoothingQuality = 'high';
+    outCtx.fillStyle = '#ffffff';
+    outCtx.fillRect(0, 0, targetSize, targetSize);
+
+    // Square crop -> square output (no extra letterboxing).
+    outCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, targetSize, targetSize);
+
+    return out;
+  };
+
+  const bounds = detectBounds();
+  if (!bounds) return src;
+
+  // First pass: tight fit.
+  const minPad1 = 0;
+  let out = renderFit(bounds, paddingRatio, minPad1);
+
+  // Auto-tighten: if subject still doesn't fill the frame enough, run a second tighter pass.
+  const postBounds = getContentBounds(out, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 245 });
+  if (postBounds) {
+    const fillW = (postBounds.right - postBounds.left + 1) / targetSize;
+    const fillH = (postBounds.bottom - postBounds.top + 1) / targetSize;
+    if (Math.min(fillW, fillH) < 0.94) {
+      const minPad2 = 0;
+      out = renderFit(bounds, Math.max(0, paddingRatio * 0.25), minPad2);
+    }
+  }
+
+  console.log('Final fitted image size should be:', targetSize);
+  return out.toDataURL('image/png');
+}
+
+function promptRequestsNonWhiteBackgroundClient(promptRaw: string): boolean {
+  const p = (promptRaw || '').toLowerCase().trim();
+  if (!p) return false;
+  if (p.includes('#ffffff') || p.includes('pure white') || p.includes('plain white') || p.includes('white background')) return false;
+  if (p.includes('transparent background') || p.includes('checkerboard')) return true;
+  if (p.includes('gradient background') || p.includes('pattern background') || p.includes('textured background')) return true;
+  if (/\b(background|backdrop)\b/.test(p) && /\b(black|blue|red|green|yellow|pink|purple|orange|grey|gray|color(ed)?|colou?r(ed)?)\b/.test(p)) return true;
+  if (/\b(outdoors?|outdoor)\b/.test(p)) return true;
+  if (/\b(studio scene|studio set|in a studio|in the studio)\b/.test(p)) return true;
+  if (/\b(in|on|at)\s+(a|the)\s+(room|interior|street|city|forest|beach|mountain|park)\b/.test(p)) return true;
+  if (/\b(environment|scene)\b/.test(p) && !/\b(no|without)\s+(environment|scene)\b/.test(p)) return true;
+  return false;
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+async function exportImageAtScale(imageUrl: string, scale: number): Promise<Blob> {
+  const src = String(imageUrl || '').trim();
+  if (!src) throw new Error('Missing image source.');
+
+  const s = Number.isFinite(scale) ? Number(scale) : 1;
+  const safeScale = Math.max(1, Math.min(8, s));
+
+  const img = await loadImageElement(src);
+  const width = img.naturalWidth || img.width;
+  const height = img.naturalHeight || img.height;
+  if (!width || !height) throw new Error('Invalid image dimensions.');
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width * safeScale));
+  canvas.height = Math.max(1, Math.round(height * safeScale));
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('Canvas not supported.');
+
+  ctx.imageSmoothingEnabled = true;
+  // @ts-expect-error some TS libdom versions type this as limited values
+  ctx.imageSmoothingQuality = 'high';
+  ctx.setTransform(safeScale, 0, 0, safeScale, 0, 0);
+  ctx.drawImage(img, 0, 0, width, height);
+
+  console.log('Export size:', canvas.width, canvas.height);
+
+  return await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) reject(new Error('Failed to export image.'));
+      else resolve(blob);
+    }, 'image/png');
+  });
+}
+
+function blobToDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Failed to read blob.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function downloadPng(imageUrl: string, filename: string, scale = 1) {
+  const safeName = filename?.trim() ? filename.trim() : 'image.png';
+  if (scale <= 1) {
+    const link = document.createElement('a');
+    link.href = imageUrl;
+    link.download = safeName;
+    link.click();
+    return;
+  }
+
+  const blob = await exportImageAtScale(imageUrl, scale);
+  const url = URL.createObjectURL(blob);
+  try {
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = safeName;
+    link.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 async function computePreviewScaleFromImageSrc(
@@ -173,7 +782,7 @@ async function computePreviewScaleFromImageSrc(
   {
     targetFillRatio = 0.85,
     nearWhiteThreshold = 250,
-    maxScale = 1.8,
+    maxScale = 2.8,
   }: { targetFillRatio?: number; nearWhiteThreshold?: number; maxScale?: number } = {}
 ): Promise<number> {
   if (!src) return 1;
@@ -201,7 +810,7 @@ async function computePreviewScaleFromImageSrc(
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return 1;
 
     ctx.drawImage(img, 0, 0, width, height);
@@ -209,6 +818,8 @@ async function computePreviewScaleFromImageSrc(
 
     let top = height;
     let bottom = -1;
+    let left = width;
+    let right = -1;
 
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
@@ -221,18 +832,23 @@ async function computePreviewScaleFromImageSrc(
         const isEmpty = a === 0 || (r >= nearWhiteThreshold && g >= nearWhiteThreshold && b >= nearWhiteThreshold);
         if (isEmpty) continue;
 
-        if (y < top) top = y;
-        if (y > bottom) bottom = y;
-      }
-    }
+         if (y < top) top = y;
+         if (y > bottom) bottom = y;
+         if (x < left) left = x;
+         if (x > right) right = x;
+       }
+     }
 
-    if (bottom < top) return 1;
+    if (bottom < top || right < left) return 1;
 
     const bboxHeight = bottom - top + 1;
-    const fillRatio = bboxHeight / height;
-    if (!Number.isFinite(fillRatio) || fillRatio <= 0) return 1;
+    const bboxWidth = right - left + 1;
+    const fillRatioH = bboxHeight / height;
+    const fillRatioW = bboxWidth / width;
+    if (!Number.isFinite(fillRatioH) || !Number.isFinite(fillRatioW) || fillRatioH <= 0 || fillRatioW <= 0) return 1;
 
-    const scale = clamp(targetFillRatio / fillRatio, 1, maxScale);
+    const needed = Math.max(targetFillRatio / fillRatioH, targetFillRatio / fillRatioW);
+    const scale = clamp(needed, 1, maxScale);
     return scale;
   } catch {
     return 1;
@@ -250,33 +866,110 @@ function AutoScaledPreviewImage({
   src: string;
   alt: string;
   className?: string;
-  style?: React.CSSProperties;
+  style?: CSSProperties;
 }) {
-  const [scale, setScale] = useState(1);
-
-  useEffect(() => {
-    let cancelled = false;
-    setScale(1);
-    void (async () => {
-      const next = await computePreviewScaleFromImageSrc(src);
-      if (!cancelled) setScale(next);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [src]);
-
   return (
     <img
       src={src}
       alt={alt}
       className={className}
       style={{
-        transform: scale > 1 ? `scale(${scale})` : undefined,
-        transformOrigin: 'center',
+        width: '100%',
+        height: '100%',
+        objectFit: 'contain',
+        display: 'block',
         ...style,
       }}
     />
+  );
+}
+
+function PreviewFrame({
+  className,
+  maxHeightClassName = 'max-h-[280px]',
+  children,
+}: {
+  className?: string;
+  maxHeightClassName?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={clsx(
+        'w-full aspect-square rounded-xl overflow-hidden border border-slate-200 bg-white flex items-center justify-center',
+        maxHeightClassName,
+        className
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+function previewZoomScaleForView(view?: string) {
+  const v = (view || '').toLowerCase();
+  if (v === 'left' || v === 'right') return 1.45;
+  if (v === 'closeup' || v === 'close_up' || v === 'close-up' || v === 'closeupview') return 1.15;
+  if (v === 'top') return 1.25;
+  if (v === 'threequarter' || v === 'three_quarter' || v === '3/4' || v === 'threequarterview') return 1.35;
+  return 1.35;
+}
+
+function PreviewImage({
+  src,
+  alt,
+  view,
+}: {
+  src: string;
+  alt: string;
+  view?: string;
+}) {
+  const scale = previewZoomScaleForView(view);
+  return (
+    <div className="w-full h-full flex items-center justify-center overflow-hidden">
+      <AutoScaledPreviewImage
+        src={src}
+        alt={alt}
+        className="w-full h-full"
+        style={{ transform: `scale(${scale})`, transformOrigin: 'center' }}
+      />
+    </div>
+  );
+}
+
+function ViewItem({
+  label,
+  url,
+  resolution,
+  viewKey,
+  onDownload,
+}: {
+  label: string;
+  url: string;
+  resolution: number;
+  viewKey?: ViewKey;
+  onDownload: () => void;
+}) {
+  const maxWidth = Number.isFinite(resolution) && resolution > 0 ? resolution : 1024;
+
+  return (
+    <div className="w-full flex flex-col gap-2 items-center">
+      <div className="w-full flex items-center justify-between gap-3" style={{ maxWidth }}>
+        <h3 className="text-sm font-medium text-slate-900">{label}</h3>
+        <button type="button" onClick={onDownload} className="text-purple-600 text-xs hover:underline">
+          Download
+        </button>
+      </div>
+      <div className="w-full aspect-square overflow-hidden rounded-md bg-white" style={{ maxWidth }}>
+        <div className="w-full h-full flex items-center justify-center overflow-hidden">
+          <img
+            src={url}
+            alt={label}
+            className="w-full h-full object-contain"
+          />
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -286,6 +979,11 @@ function isProbablyValidPngDataUrl(src: string) {
   return Boolean(match?.[1] && match[1].length > 1000);
 }
 
+function stripPngDataUrl(dataUrl: string) {
+  const match = /^data:image\/png;base64,(.+)$/i.exec(String(dataUrl || '').trim());
+  return match?.[1] ?? '';
+}
+
 function trimCanvasToContent(
   canvas: HTMLCanvasElement,
   {
@@ -293,7 +991,7 @@ function trimCanvasToContent(
     nearWhiteThreshold = 245,
   }: { treatNearWhiteAsEmpty?: boolean; nearWhiteThreshold?: number } = {}
 ): HTMLCanvasElement {
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) return canvas;
 
   const { width, height } = canvas;
@@ -336,7 +1034,7 @@ function trimCanvasToContent(
   trimmed.width = trimW;
   trimmed.height = trimH;
 
-  const tctx = trimmed.getContext('2d');
+  const tctx = trimmed.getContext('2d', { willReadFrequently: true });
   if (!tctx) return canvas;
   tctx.drawImage(canvas, left, top, trimW, trimH, 0, 0, trimW, trimH);
   return trimmed;
@@ -356,7 +1054,7 @@ function normalizeCanvasBackgroundToWhite(
     minBrightness?: number;
   } = {}
 ): HTMLCanvasElement {
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) return canvas;
 
   const { width, height } = canvas;
@@ -440,7 +1138,7 @@ function getContentBounds(
     nearWhiteThreshold = 245,
   }: { treatNearWhiteAsEmpty?: boolean; nearWhiteThreshold?: number } = {}
 ): { left: number; top: number; right: number; bottom: number } | null {
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) return null;
 
   const { width, height } = canvas;
@@ -522,7 +1220,7 @@ function cropCanvasToContent(
   const out = document.createElement('canvas');
   out.width = Math.max(1, w);
   out.height = Math.max(1, h);
-  const outCtx = out.getContext('2d');
+  const outCtx = out.getContext('2d', { willReadFrequently: true });
   if (!outCtx) return canvas;
 
   outCtx.fillStyle = '#ffffff';
@@ -541,7 +1239,7 @@ async function composeCompositeFromTiles(tiles: GeneratedImage[], resolution: nu
   canvas.width = columns * tileWidth;
   canvas.height = rows * tileHeight;
 
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) throw new Error('Failed to initialize canvas.');
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -579,7 +1277,7 @@ async function addPaddingToImage(file: File, paddingPercent = PADDING_PERCENT): 
     canvas.width = newWidth;
     canvas.height = newHeight;
 
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) throw new Error('Canvas not supported.');
 
     ctx.fillStyle = '#ffffff';
@@ -764,7 +1462,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) throw new Error('Canvas not supported.');
 
       // Force a white background so previews/downloads never show gray/transparent backgrounds.
@@ -775,22 +1473,14 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       // Normalize light neutral backgrounds to pure white.
       normalizeCanvasBackgroundToWhite(canvas);
 
-      // Crop tightly so the object fills the frame consistently across views.
-      // (Helps tiny back views by removing excess background.)
-      let croppedCanvas = cropCanvasToContent(canvas, { targetFillRatio: 0.85, paddingPercent: 0.1 });
-
-      // If cropping got too aggressive (common with white garments), fall back to a safer trim pass.
-      const croppedArea = croppedCanvas.width * croppedCanvas.height;
-      const fullArea = canvas.width * canvas.height;
-      if (croppedArea > 0 && fullArea > 0 && croppedArea / fullArea < 0.15) {
-        croppedCanvas = trimCanvasToContent(canvas, { treatNearWhiteAsEmpty: false });
-      }
+      // Loose crop: remove excess whitespace but keep the full subject safely in frame.
+      const croppedCanvas = cropCanvasLoose(canvas, 0.25);
 
       // Ensure final export is solid white background PNG.
       const out = document.createElement('canvas');
       out.width = croppedCanvas.width;
       out.height = croppedCanvas.height;
-      const outCtx = out.getContext('2d');
+      const outCtx = out.getContext('2d', { willReadFrequently: true });
       if (!outCtx) throw new Error('Canvas not supported.');
       outCtx.fillStyle = '#ffffff';
       outCtx.fillRect(0, 0, out.width, out.height);
@@ -801,6 +1491,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       if (objectUrlToRevoke) URL.revokeObjectURL(objectUrlToRevoke);
     }
   };
+
+  const [isListingDrawerOpen, setIsListingDrawerOpen] = useState(false);
+  const exportScale = 1 as const;
+  const setExportScale = (_value: unknown) => {};
 
   const ensureWhiteBackgroundPngDataUrl = async (src: string) => {
     if (!src) throw new Error('Missing image source.');
@@ -831,7 +1525,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) throw new Error('Canvas not supported.');
 
       ctx.fillStyle = '#ffffff';
@@ -848,7 +1542,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const [prompt, setPrompt] = useState('');
   const [selectedStyle, setSelectedStyle] = useState<ArtStyleKey>('3d');
   const [resolution, setResolution] = useState<number>(1024);
-  const [selectedViews, setSelectedViews] = useState<ViewKey[]>(['front', 'back']);
+  const [selectedViews, setSelectedViews] = useState<ViewKey[]>(['front']);
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -874,10 +1568,42 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const [hasResultFlag, setHasResultFlag] = useState(false);
   const [openMenu, setOpenMenu] = useState<'convertStyle' | 'convertModel' | 'resolution' | 'style' | 'views' | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingResolutionClearRef = useRef(false);
 
   useEffect(() => {
     setUserId(getUserId());
   }, []);
+
+  useEffect(() => {
+    // Clear old results whenever the user changes resolution so we never mix sizes.
+    // IMPORTANT: do NOT clear when generation finishes (isGenerating -> false), only when resolution changes.
+    if (isGenerating) {
+      pendingResolutionClearRef.current = true;
+      return;
+    }
+
+    pendingResolutionClearRef.current = false;
+    setResult(null);
+    setVariants([]);
+    setHasResultFlag(false);
+    setEditedImageDataUrl(null);
+    setEditedViews(null);
+    setStatusMessage('');
+    setError(null);
+  }, [resolution]);
+
+  useEffect(() => {
+    if (!isGenerating && pendingResolutionClearRef.current) {
+      pendingResolutionClearRef.current = false;
+      setResult(null);
+      setVariants([]);
+      setHasResultFlag(false);
+      setEditedImageDataUrl(null);
+      setEditedViews(null);
+      setStatusMessage('');
+      setError(null);
+    }
+  }, [isGenerating]);
 
   const hasResult =
     Boolean(editedImageDataUrl) ||
@@ -967,6 +1693,23 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       setError('Please enter a prompt.');
       return;
     }
+    const templated = applyCategoryTemplate(trimmedPrompt);
+    const safePrompt = applyBrandSafety(templated.prompt);
+    console.info('[ai] category', templated.category);
+    console.log('User selected resolution:', resolution);
+    const shouldForceWhiteBackground = !promptRequestsNonWhiteBackgroundClient(trimmedPrompt);
+
+    const variationPhrases = [
+      'slightly different fabric wrinkles and folds',
+      'slightly different lighting balance while keeping pure white background',
+      'slightly different camera distance while keeping full product visible',
+      'slightly different material texture details',
+      'slightly different highlights and shadows on the product (no background shadows)',
+    ];
+    const variation = variationPhrases[Math.floor(Math.random() * variationPhrases.length)] ?? 'slightly different details';
+    const requestId =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto ? (crypto as any).randomUUID() : `${Date.now()}-${Math.random()}`;
+    const finalPrompt = appendPromptModifier(safePrompt, `Variation: ${variation}. RequestId: ${requestId}.`);
 
     const normalizedViews = normalizeViews(selectedViews);
     if (!normalizedViews.length) {
@@ -999,9 +1742,11 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt: trimmedPrompt,
+          prompt: finalPrompt,
           style: effectiveStyle,
           resolution,
+          width: resolution,
+          height: resolution,
           ...(referenceImageBase64 ? { referenceImageBase64, referenceImageMimeType } : {}),
         }),
       });
@@ -1018,7 +1763,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           views: normalizedViews,
           style: effectiveStyle,
           resolution,
-          prompt: trimmedPrompt,
+          width: resolution,
+          height: resolution,
+          prompt: finalPrompt,
         }),
       });
       const viewsPayload = await viewsResp.json().catch(() => ({}));
@@ -1033,8 +1780,23 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       const orderedImages: GeneratedImage[] = normalizedViews.map((view) => {
         const imageBase64 = viewToBase64.get(view);
         if (!imageBase64) throw new Error(`Missing generated view: ${view}`);
-        return { view, src: `data:image/png;base64,${imageBase64}`, imageBase64 };
+        return { view, src: `data:image/png;base64,${imageBase64}`, imageBase64, width: resolution, height: resolution };
       });
+
+      setStatusMessage(shouldForceWhiteBackground ? 'Fitting images to frame...' : 'Preparing images...');
+      const croppedImages: GeneratedImage[] = await Promise.all(
+        orderedImages.map(async (img) => {
+          const fittedSrc = shouldForceWhiteBackground ? await fitImageToFrame(img.src, resolution, 0.01) : img.src;
+          const fixedSrc = await ensurePngDataUrlSquareSize(fittedSrc, resolution);
+          return {
+            ...img,
+            src: fixedSrc,
+            imageBase64: stripPngDataUrl(fixedSrc) || img.imageBase64,
+            width: resolution,
+            height: resolution,
+          };
+        })
+      );
 
       const composite = `data:image/png;base64,${String(viewsPayload.compositeBase64)}`;
       const baseVariant: GeneratedVariant = {
@@ -1044,13 +1806,30 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         styleKey: effectiveStyle,
         views: normalizedViews,
         composite,
-        images: orderedImages,
+        images: croppedImages,
       };
 
       setVariants([baseVariant]);
       setHasResultFlag(true);
       setStatusMessage('Generated views successfully.');
       onGenerate?.(composite);
+
+      void Promise.all(
+        croppedImages.map(async (img) => {
+          try {
+            const { width, height } = await getImageSize(img.src);
+            if (width !== resolution || height !== resolution) {
+              console.warn('[AIImageGenerator] View size mismatch after generation:', {
+                view: img.view,
+                expected: `${resolution}x${resolution}`,
+                actual: `${width}x${height}`,
+              });
+            }
+          } catch {
+            // ignore
+          }
+        })
+      );
     } catch (err: any) {
       setError(err?.message || 'Something went wrong while generating images.');
       setResult(null);
@@ -1115,7 +1894,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       const orderedImages: GeneratedImage[] = base.views.map((view) => {
         const imageBase64 = viewToBase64.get(view);
         if (!imageBase64) throw new Error(`Missing converted view: ${view}`);
-        return { view, src: `data:image/png;base64,${imageBase64}`, imageBase64 };
+        return { view, src: `data:image/png;base64,${imageBase64}`, imageBase64, width: resolution, height: resolution };
       });
 
       const composite = await composeCompositeFromTiles(orderedImages, resolution);
@@ -1126,7 +1905,19 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         styleKey: target,
         views: base.views,
         composite,
-        images: orderedImages,
+        images: await Promise.all(
+          orderedImages.map(async (img) => {
+            const fittedSrc = await fitImageToFrame(img.src, resolution, 0.01);
+            const fixedSrc = await ensurePngDataUrlSquareSize(fittedSrc, resolution);
+            return {
+              ...img,
+              src: fixedSrc,
+              imageBase64: stripPngDataUrl(fixedSrc) || img.imageBase64,
+              width: resolution,
+              height: resolution,
+            };
+          })
+        ),
       };
 
       setVariants((prev) => {
@@ -1180,7 +1971,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       const orderedImages: GeneratedImage[] = modelSourceImages.map((img) => img.view).map((view) => {
         const imageBase64 = viewToBase64.get(view);
         if (!imageBase64) throw new Error(`Missing model preview view: ${view}`);
-        return { view, src: `data:image/png;base64,${imageBase64}`, imageBase64 };
+        return { view, src: `data:image/png;base64,${imageBase64}`, imageBase64, width: resolution, height: resolution };
       });
 
       const composite = await composeCompositeFromTiles(orderedImages, resolution);
@@ -1193,7 +1984,19 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         modelKey,
         views: orderedImages.map((i) => i.view),
         composite,
-        images: orderedImages,
+        images: await Promise.all(
+          orderedImages.map(async (img) => {
+            const fittedSrc = await fitImageToFrame(img.src, resolution, 0.01);
+            const fixedSrc = await ensurePngDataUrlSquareSize(fittedSrc, resolution);
+            return {
+              ...img,
+              src: fixedSrc,
+              imageBase64: stripPngDataUrl(fixedSrc) || img.imageBase64,
+              width: resolution,
+              height: resolution,
+            };
+          })
+        ),
       };
 
       setVariants((prev) => {
@@ -1286,11 +2089,6 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   };
 
   const handleDownloadAll = async () => {
-    const stripPngDataUrl = (dataUrl: string) => {
-      const match = /^data:image\/png;base64,(.+)$/i.exec(String(dataUrl || '').trim());
-      return match?.[1] ?? '';
-    };
-
     const baseVariant =
       variants.find((v) => v.kind === 'base') ??
       (result
@@ -1325,19 +2123,34 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     if (!items.length) return;
 
     setIsGenerating(true);
-    setStatusMessage('Preparing ZIP export...');
+    setStatusMessage(exportScale > 1 ? `Preparing ${exportScale}× export...` : 'Preparing ZIP export...');
     setError(null);
 
     try {
+      const finalItems =
+        exportScale > 1
+          ? await Promise.all(
+              items.map(async (it) => {
+                const dataUrl = `data:image/png;base64,${it.imageBase64}`;
+                const blob = await exportImageAtScale(dataUrl, exportScale);
+                const scaledDataUrl = await blobToDataUrl(blob);
+                return { ...it, imageBase64: stripPngDataUrl(scaledDataUrl) };
+              })
+            )
+          : items;
+
       const resp = await authFetch('/api/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ format: 'zip', items }),
+        body: JSON.stringify({ format: 'zip', items: finalItems }),
       });
       const payload = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(payload.error || 'Export failed.');
       if (!payload?.url) throw new Error('Export failed.');
-      window.location.href = String(payload.url);
+      const resolved = resolveApiAssetUrl(String(payload.url));
+      const url = new URL(resolved, window.location.origin);
+      if (!url.searchParams.get('uid')) url.searchParams.set('uid', getUserId());
+      window.location.href = url.toString();
       setStatusMessage('Export started.');
     } catch (err: any) {
       setError(err?.message || 'Export failed.');
@@ -1613,6 +2426,17 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	                </div>
 	              </MenuDropdown>
 
+                <button
+                  type="button"
+                  onClick={() => setIsListingDrawerOpen(true)}
+                  className={clsx(TOOLBAR_PILL_BTN, 'max-w-[200px]')}
+                >
+                  <span className="flex flex-row items-center gap-2 min-w-0">
+                    <Sparkles className="w-5 h-5 text-slate-600 shrink-0 block" />
+                    <span className="truncate leading-none">AI Titles &amp; Keywords</span>
+                  </span>
+                </button>
+
 	            </div>
 
             <p className="text-xs text-slate-500">
@@ -1693,10 +2517,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           )}
         </div>
 
-	        {hasAnyResult && (
-	          <div className="bg-white rounded-3xl border border-slate-200 shadow-xl p-6">
-	            <div className="w-full rounded-2xl border border-slate-200 bg-white p-4">
-	              <div className="flex items-center justify-between">
+ 	        {hasAnyResult && (
+ 	          <div className="bg-white rounded-3xl border border-slate-200 shadow-xl p-6">
+	            <div className="w-full">
+	              <div className="flex items-center justify-between gap-3">
 	                <div>
                   <h3 className="text-sm font-semibold">
                     {hasEditedViews || hasSingleEditResult ? 'Edited Preview' : 'Preview'}
@@ -1706,117 +2530,186 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                       ? `Edited from upload · ${globalResolutionValue}`
                       : `${resolution}×${resolution}`}
                   </p>
-                </div>
+                 </div>
+ 
+                <div className="flex items-center gap-2">
+                  <div className="hidden sm:flex flex-col items-end">
+                    <label className="text-[11px] text-slate-500 leading-none">Export</label>
+                    <select
+                      className="h-9 rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-800"
+                      value={exportScale}
+                      onChange={(e) => setExportScale(Number(e.target.value) as any)}
+                    >
+                      <option value={1}>Normal (1×)</option>
+                      <option value={2}>HD (2×)</option>
+                      <option value={4}>4K (4×)</option>
+                      <option value={8}>8K (8×)</option>
+                    </select>
+                  </div>
 
-                <button
+                  <button
                   onClick={() => {
                     if (hasEditedViews) {
                       if (!editedViews?.length) return;
-                      editedViews.forEach((item) => {
+                      void (async () => {
+                        try {
+                          for (const item of editedViews) {
                         if (!item.imageDataUrl) return;
-                        const link = document.createElement('a');
-                        link.href = item.imageDataUrl;
                         const styleSuffix = item.style ? `-${String(item.style).trim()}` : '';
-                        link.download = `${item.view}${styleSuffix}.png`;
-                        link.click();
-                      });
+                            await downloadPng(item.imageDataUrl, `${item.view}${styleSuffix}.png`, exportScale);
+                          }
+                        } catch (err: any) {
+                          setError(err?.message || 'Download failed.');
+                        }
+                      })();
                       return;
                     }
-
+ 
                     if (editedPrimaryImage) {
-                      const link = document.createElement('a');
-                      link.href = editedPrimaryImage;
-                      link.download = 'edited.png';
-                      link.click();
+                      void downloadPng(editedPrimaryImage, 'edited.png', exportScale).catch((err: any) =>
+                        setError(err?.message || 'Download failed.')
+                      );
                       return;
                     }
-
+ 
                     handleDownloadAll();
                   }}
                   className="w-9 h-9 rounded-lg border border-slate-200 hover:bg-slate-100 flex items-center justify-center"
                   title="Download"
                 >
-	                  <ArrowDownToLine className="w-4 h-4" />
-	                </button>
+ 	                  <ArrowDownToLine className="w-4 h-4" />
+ 	                </button>
+                </div>
 	              </div>
 	
-	              <div className="mt-4 grid grid-cols-2 gap-4 w-full">
+	              <div className="mt-6 flex flex-col gap-10 w-full">
 	                {hasEditedViews || hasSingleEditResult ? (
 	                  editedPrimaryImage ? (
-	                    <div className="col-span-2 w-full h-[320px] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center">
-	                      <AutoScaledPreviewImage src={editedPrimaryImage} alt="Preview" className="w-full h-full object-contain bg-white" />
-	                    </div>
+	                    <ViewItem
+	                      label="Edited Preview"
+	                      url={editedPrimaryImage}
+	                      resolution={resolution}
+	                      onDownload={() => {
+	                        void downloadPng(editedPrimaryImage, 'edited.png', exportScale).catch((err: any) =>
+	                          setError(err?.message || 'Download failed.')
+	                        );
+	                      }}
+	                    />
 	                  ) : null
 	                ) : variants.length > 1 ? (
-	                  <div className="col-span-2 space-y-4">
-	                    {variants.map((variant) => (
-	                      <div key={variant.id} className="rounded-2xl border border-slate-200 bg-white p-4">
-	                        <div className="flex flex-wrap items-center gap-2">
-	                          {variant.modelLabel && (
+	                  variants.map((variant) => {
+	                    const suffix =
+	                      variant.kind === 'style_converted'
+	                        ? String(variant.styleKey ?? variant.styleLabel).trim().replace(/\s+/g, '-')
+	                        : variant.kind === 'model_preview'
+	                          ? String(variant.modelKey ?? variant.modelLabel ?? 'model').trim().replace(/\s+/g, '-')
+	                          : '';
+
+	                    return (
+	                      <div key={variant.id} className="w-full flex flex-col gap-6 items-center">
+	                        <div
+	                          className="w-full flex flex-wrap items-center justify-between gap-2"
+	                          style={{ maxWidth: resolution }}
+	                        >
+	                          <div className="flex flex-wrap items-center gap-2">
+	                            {variant.modelLabel && (
+	                              <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
+	                                Model: {variant.modelLabel}
+	                              </span>
+	                            )}
 	                            <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
-	                              Model: {variant.modelLabel}
+	                              Style: {variant.styleLabel}
 	                            </span>
-	                          )}
-	                          <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
-	                            Style: {variant.styleLabel}
-	                          </span>
+	                          </div>
 	                        </div>
-	                        <div className="mt-3 grid grid-cols-2 gap-4">
-	                          {variant.images.map((image) => (
-	                            <div
-	                              key={`${variant.id}-${image.view}`}
-	                              className="w-full h-[260px] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center"
-	                            >
-	                              {isProbablyValidPngDataUrl(image.src) ? (
-	                                <AutoScaledPreviewImage
-	                                  src={image.src}
-	                                  alt={viewLabel(image.view)}
-	                                  className="w-full h-full object-contain bg-white"
-	                                />
-	                              ) : (
-	                                <div className="p-4 text-center">
-	                                  <p className="text-sm text-slate-900">Invalid image</p>
-	                                  <p className="text-xs text-slate-500 mt-1">This view failed to render.</p>
-	                                  {variant.kind === 'style_converted' && variant.styleKey && (
-	                                    <button
-	                                      type="button"
-	                                      className="mt-3 inline-flex items-center justify-center px-3 py-2 rounded-lg bg-purple-600 text-white text-xs hover:bg-purple-700"
-	                                      onClick={() => handleConvertStyle(variant.styleKey as ArtStyleKey)}
-	                                    >
-	                                      Retry conversion
-	                                    </button>
-	                                  )}
+
+	                        <div className="w-full flex flex-col gap-10">
+	                          {variant.views.map((view) => {
+	                            const image = variant.images.find((img) => img.view === view) ?? null;
+	                            if (!image) {
+	                              return (
+	                                <div key={`${variant.id}-${view}`} className="w-full flex flex-col gap-2 items-center">
+	                                  <div className="w-full flex items-center justify-between gap-3" style={{ maxWidth: resolution }}>
+	                                    <h3 className="text-sm font-medium text-slate-900">{viewLabel(view)}</h3>
+	                                  </div>
+	                                  <div className="w-full text-sm text-slate-600" style={{ maxWidth: resolution }}>
+	                                    Missing view.
+	                                  </div>
 	                                </div>
-	                              )}
-	                            </div>
-	                          ))}
+	                              );
+	                            }
+
+	                            if (!isProbablyValidPngDataUrl(image.src)) {
+	                              return (
+	                                <div key={`${variant.id}-${view}`} className="w-full flex flex-col gap-2 items-center">
+	                                  <div className="w-full flex items-center justify-between gap-3" style={{ maxWidth: resolution }}>
+	                                    <h3 className="text-sm font-medium text-slate-900">{viewLabel(view)}</h3>
+	                                    {variant.kind === 'style_converted' && variant.styleKey && (
+	                                      <button
+	                                        type="button"
+	                                        className="text-purple-600 text-xs hover:underline"
+	                                        onClick={() => handleConvertStyle(variant.styleKey as ArtStyleKey)}
+	                                      >
+	                                        Retry conversion
+	                                      </button>
+	                                    )}
+	                                  </div>
+	                                  <div className="w-full text-sm text-slate-600" style={{ maxWidth: resolution }}>
+	                                    Invalid image.
+	                                  </div>
+	                                </div>
+	                              );
+	                            }
+
+	                            return (
+                      <ViewItem
+                        key={`${variant.id}-${view}`}
+                        label={viewLabel(view)}
+                        url={image.src}
+                        resolution={image.width ?? resolution}
+                        viewKey={view}
+                        onDownload={() => {
+                          const file = suffix ? `${view}-${suffix}.png` : `${view}.png`;
+                          void downloadPng(image.src, file, exportScale).catch((err: any) =>
+                            setError(err?.message || 'Download failed.')
+                          );
+                        }}
+                      />
+	                            );
+	                          })}
 	                        </div>
 	                      </div>
-	                    ))}
-	                  </div>
+	                    );
+	                  })
 	                ) : (
-	                  ((variants[0]?.images ?? result?.images) ?? []).map((image) => (
-	                    <div
-	                      key={image.view}
-	                      className="w-full h-[260px] rounded-xl overflow-hidden bg-white border border-slate-200 flex items-center justify-center"
-	                    >
-	                      {isProbablyValidPngDataUrl(image.src) ? (
-	                        <AutoScaledPreviewImage
-	                          src={image.src}
-	                          alt={viewLabel(image.view)}
-	                          className="w-full h-full object-contain bg-white"
-	                        />
-	                      ) : (
-	                        <div className="p-4 text-center">
-	                          <p className="text-sm text-slate-900">Invalid image</p>
-	                          <p className="text-xs text-slate-500 mt-1">This view failed to render.</p>
+	                  ((variants[0]?.images ?? result?.images) ?? []).map((image) =>
+	                    isProbablyValidPngDataUrl(image.src) ? (
+	                      <ViewItem
+	                        key={image.view}
+	                        label={viewLabel(image.view)}
+	                        url={image.src}
+	                        resolution={image.width ?? resolution}
+	                        viewKey={image.view}
+	                        onDownload={() => {
+	                          void downloadPng(image.src, `${image.view}.png`, exportScale).catch((err: any) =>
+	                            setError(err?.message || 'Download failed.')
+	                          );
+	                        }}
+	                      />
+	                    ) : (
+	                      <div key={image.view} className="w-full flex flex-col gap-2 items-center">
+	                        <div className="w-full flex items-center justify-between gap-3" style={{ maxWidth: resolution }}>
+	                          <h3 className="text-sm font-medium text-slate-900">{viewLabel(image.view)}</h3>
 	                        </div>
-	                      )}
-	                    </div>
-	                  ))
+	                        <div className="w-full text-sm text-slate-600" style={{ maxWidth: resolution }}>
+	                          Invalid image.
+	                        </div>
+	                      </div>
+	                    )
+	                  )
 	                )}
 	              </div>
-	            </div>
+  	            </div>
 
             {editedViews && (
               <div className="mt-6">
@@ -1827,19 +2720,17 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                       key={`${item.view}-${item.style ?? ''}`}
                       className="w-full max-w-[420px] rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm"
                     >
-                      <div className="bg-white p-2">
-                        {item.imageDataUrl ? (
-                          <img
-                            src={item.imageDataUrl}
-                            alt={viewLabel(item.view)}
-                            className="w-full h-auto object-contain bg-white rounded-xl shadow-md scale-[1.05]"
-                          />
-                        ) : (
-                          <div className="p-4 text-center">
-                            <p className="text-sm text-slate-900">{viewLabel(item.view)}</p>
-                            <p className="text-xs text-red-600 mt-1">{item.error || 'Failed'}</p>
-                          </div>
-                        )}
+                      <div className="p-2">
+                        <PreviewFrame maxHeightClassName="max-h-[320px]">
+                          {item.imageDataUrl ? (
+                            <PreviewImage src={item.imageDataUrl} alt={viewLabel(item.view)} view={item.view} />
+                          ) : (
+                            <div className="p-4 text-center">
+                              <p className="text-sm text-slate-900">{viewLabel(item.view)}</p>
+                              <p className="text-xs text-red-600 mt-1">{item.error || 'Failed'}</p>
+                            </div>
+                          )}
+                        </PreviewFrame>
                       </div>
                       <div className="p-3 flex items-center justify-between">
                         <div>
@@ -1856,11 +2747,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                         {item.imageDataUrl && (
                           <button
                             onClick={() => {
-                              const link = document.createElement('a');
-                              link.href = item.imageDataUrl as string;
                               const styleSuffix = item.style ? `-${String(item.style).trim()}` : '';
-                              link.download = `${item.view}${styleSuffix}.png`;
-                              link.click();
+                              void downloadPng(item.imageDataUrl as string, `${item.view}${styleSuffix}.png`, exportScale).catch(
+                                (err: any) => setError(err?.message || 'Download failed.')
+                              );
                             }}
                             className="text-purple-600 text-xs hover:underline"
                           >
@@ -1919,126 +2809,15 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                 {saveMessage || saveError}
               </div>
             )}
-
-            {(variants.length > 0 || result) && (
-            <div>
-              <p className="text-slate-900 font-medium mb-3">Cropped Views</p>
-              {variants.length > 0 ? (
-                <div className="space-y-6">
-                  {variants.map((variant) => (
-                    <div key={variant.id}>
-                      <div className="flex flex-wrap gap-2 mb-3">
-                        {variant.modelLabel && (
-                          <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
-                            Model: {variant.modelLabel}
-                          </span>
-                        )}
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
-                          Style: {variant.styleLabel}
-                        </span>
-                      </div>
-                      <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
-                        {variant.images.map((image) => {
-                          const suffix = [variant.modelLabel, variant.styleLabel].filter(Boolean).join('-').replace(/\s+/g, '_');
-                          return (
-                            <div
-                              key={`${variant.id}-${image.view}`}
-                              className="rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm"
-                            >
-                      <div className="w-full h-[260px] flex items-center justify-center bg-white overflow-hidden">
-                                {isProbablyValidPngDataUrl(image.src) ? (
-                                  <AutoScaledPreviewImage
-                                    src={image.src}
-                                    alt={viewLabel(image.view)}
-                                    className="w-full h-full object-contain bg-white"
-                                  />
-                                ) : (
-                                  <div className="p-4 text-center">
-                                    <p className="text-sm text-slate-900">Invalid image</p>
-                                    <p className="text-xs text-slate-500 mt-1">This view failed to render.</p>
-                                    {variant.kind === 'style_converted' && variant.styleKey && (
-                                      <button
-                                        type="button"
-                                        className="mt-3 inline-flex items-center justify-center px-3 py-2 rounded-lg bg-purple-600 text-white text-xs hover:bg-purple-700"
-                                        onClick={() => handleConvertStyle(variant.styleKey as ArtStyleKey)}
-                                      >
-                                        Retry conversion
-                                      </button>
-                                    )}
-                                  </div>
-                                )}
-                      </div>
-                              <div className="p-3 flex items-center justify-between">
-                                <div>
-                                  <p className="text-sm text-slate-900">{viewLabel(image.view)}</p>
-                                  <p className="text-xs text-slate-500">Generated view</p>
-                                </div>
-                                <button
-                                  onClick={() => {
-                                    const link = document.createElement('a');
-                                    link.href = image.src;
-                                    link.download = suffix ? `${image.view}-${suffix}.png` : `${image.view}.png`;
-                                    link.click();
-                                  }}
-                                  className="text-purple-600 text-xs hover:underline"
-                                >
-                                  Download
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : result ? (
-                <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
-                  {result.images.map((image) => (
-                    <div
-                      key={image.view}
-                      className="rounded-2xl border border-slate-200 overflow-hidden bg-white shadow-sm"
-                    >
-                      <div className="w-full h-[260px] flex items-center justify-center bg-white overflow-hidden">
-                        {isProbablyValidPngDataUrl(image.src) ? (
-                          <AutoScaledPreviewImage
-                            src={image.src}
-                            alt={viewLabel(image.view)}
-                            className="w-full h-full object-contain bg-white"
-                          />
-                        ) : (
-                          <div className="p-4 text-center">
-                            <p className="text-sm text-slate-900">Invalid image</p>
-                            <p className="text-xs text-slate-500 mt-1">This view failed to render.</p>
-                          </div>
-                        )}
-                      </div>
-                      <div className="p-3 flex items-center justify-between">
-                        <div>
-                          <p className="text-sm text-slate-900">{viewLabel(image.view)}</p>
-                          <p className="text-xs text-slate-500">Generated view</p>
-                        </div>
-                        <button
-                          onClick={() => {
-                            const link = document.createElement('a');
-                            link.href = image.src;
-                            link.download = `${image.view}.png`;
-                            link.click();
-                          }}
-                          className="text-purple-600 text-xs hover:underline"
-                        >
-                          Download
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-            )}
           </div>
         )}
       </div>
+
+      <ListingAssistantDrawer
+        open={isListingDrawerOpen}
+        onClose={() => setIsListingDrawerOpen(false)}
+        onUseAsPrompt={(value) => setPrompt(value)}
+      />
     </div>
   );
 }
