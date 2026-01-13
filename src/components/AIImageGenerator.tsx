@@ -20,7 +20,7 @@ import {
 import clsx from 'clsx';
 import { authFetch, getUserId, resolveApiAssetUrl } from '../utils/auth';
 import { TOOLBAR_ICON_BTN, TOOLBAR_PILL_BTN } from './ui/toolbarStyles';
-import { ListingAssistantDrawer } from './ListingAssistantDrawer';
+import { ListingAssistantInline } from './ListingAssistantInline';
 
 type ArtStyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor';
 type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'closeUp' | 'top';
@@ -832,12 +832,12 @@ async function computePreviewScaleFromImageSrc(
         const isEmpty = a === 0 || (r >= nearWhiteThreshold && g >= nearWhiteThreshold && b >= nearWhiteThreshold);
         if (isEmpty) continue;
 
-         if (y < top) top = y;
-         if (y > bottom) bottom = y;
-         if (x < left) left = x;
-         if (x > right) right = x;
-       }
-     }
+        if (y < top) top = y;
+        if (y > bottom) bottom = y;
+        if (x < left) left = x;
+        if (x > right) right = x;
+      }
+    }
 
     if (bottom < top || right < left) return 1;
 
@@ -1492,9 +1492,8 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     }
   };
 
-  const [isListingDrawerOpen, setIsListingDrawerOpen] = useState(false);
   const exportScale = 1 as const;
-  const setExportScale = (_value: unknown) => {};
+  const setExportScale = (_value: unknown) => { };
 
   const ensureWhiteBackgroundPngDataUrl = async (src: string) => {
     if (!src) throw new Error('Missing image source.');
@@ -1863,8 +1862,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         const viewKey = view;
         setStyleProgress((prev) => ({ ...prev, [viewKey]: 'converting' }));
         setStatusMessage(
-          `Converting style to ${styleOptions.find((opt) => opt.id === target)?.label ?? target} (${i + 1}/${
-            base.views.length
+          `Converting style to ${styleOptions.find((opt) => opt.id === target)?.label ?? target} (${i + 1}/${base.views.length
           })...`
         );
 
@@ -2016,15 +2014,15 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       ? variants
       : result
         ? [
-            {
-              id: 'single',
-              styleLabel: styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? String(effectiveStyle),
-              styleKey: effectiveStyle,
-              views: result.images.map((i) => i.view),
-              composite: result.composite,
-              images: result.images,
-            } as GeneratedVariant,
-          ]
+          {
+            id: 'single',
+            styleLabel: styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? String(effectiveStyle),
+            styleKey: effectiveStyle,
+            views: result.images.map((i) => i.view),
+            composite: result.composite,
+            images: result.images,
+          } as GeneratedVariant,
+        ]
         : [];
 
     if (!variantsToSave.length) return;
@@ -2042,7 +2040,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       setStatusMessage('Preparing PNGs for saving...');
       const savedIds: string[] = [];
 
-        for (const variant of variantsToSave) {
+      for (const variant of variantsToSave) {
         const styleLabel = variant.styleLabel;
         const modelLabel = variant.modelLabel ?? '';
         const suffix =
@@ -2093,14 +2091,14 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       variants.find((v) => v.kind === 'base') ??
       (result
         ? ({
-            id: 'single',
-            kind: 'base',
-            styleLabel: styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? String(effectiveStyle),
-            styleKey: effectiveStyle,
-            views: result.images.map((i) => i.view),
-            composite: result.composite,
-            images: result.images,
-          } as GeneratedVariant)
+          id: 'single',
+          kind: 'base',
+          styleLabel: styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? String(effectiveStyle),
+          styleKey: effectiveStyle,
+          views: result.images.map((i) => i.view),
+          composite: result.composite,
+          images: result.images,
+        } as GeneratedVariant)
         : null);
 
     if (!baseVariant) return;
@@ -2130,13 +2128,13 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       const finalItems =
         exportScale > 1
           ? await Promise.all(
-              items.map(async (it) => {
-                const dataUrl = `data:image/png;base64,${it.imageBase64}`;
-                const blob = await exportImageAtScale(dataUrl, exportScale);
-                const scaledDataUrl = await blobToDataUrl(blob);
-                return { ...it, imageBase64: stripPngDataUrl(scaledDataUrl) };
-              })
-            )
+            items.map(async (it) => {
+              const dataUrl = `data:image/png;base64,${it.imageBase64}`;
+              const blob = await exportImageAtScale(dataUrl, exportScale);
+              const scaledDataUrl = await blobToDataUrl(blob);
+              return { ...it, imageBase64: stripPngDataUrl(scaledDataUrl) };
+            })
+          )
           : items;
 
       const resp = await authFetch('/api/export', {
@@ -2163,9 +2161,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     <div className="min-h-screen p-8 bg-gradient-to-br from-slate-50 via-white to-slate-100">
       <div className="max-w-6xl mx-auto space-y-6">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500 to-purple-500 flex items-center justify-center">
-            <Sparkles className="w-5 h-5 text-white" />
-          </div>
+	          <div className="app-shimmer-sweep w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500 to-purple-500 flex items-center justify-center">
+	            <Sparkles className="w-5 h-5 text-white" />
+	          </div>
           <div>
             <h2 className="text-slate-900">AI Image Generator</h2>
             <p className="text-slate-600 text-sm">
@@ -2218,22 +2216,22 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                   </div>
                 )}
               </div>
-	              <textarea
-	                value={prompt}
-	                onChange={(e) => setPrompt(e.target.value)}
-	                placeholder="e.g., A futuristic streetwear hoodie design with cyberpunk aesthetics, neon colors, and geometric patterns..."
-	                className="w-full h-32 px-4 py-3 pr-12 pl-14 pb-14 rounded-2xl border-2 border-slate-200 focus:border-purple-500 focus:outline-none resize-none transition-colors"
-	              />
-	              <Wand2 className="absolute right-4 top-4 w-5 h-5 text-slate-400" />
-	            </div>
-	          </div>
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="e.g., A futuristic streetwear hoodie design with cyberpunk aesthetics, neon colors, and geometric patterns..."
+                className="w-full h-32 px-4 py-3 pr-12 pl-14 pb-14 rounded-2xl border-2 border-slate-200 focus:border-purple-500 focus:outline-none resize-none transition-colors"
+              />
+              <Wand2 className="absolute right-4 top-4 w-5 h-5 text-slate-400" />
+            </div>
+          </div>
 
-	          <div className="space-y-3">
-	            <div className="flex flex-wrap items-center gap-2">
-	              <MenuDropdown
-	                open={openMenu === 'resolution'}
-	                onClose={() => setOpenMenu(null)}
-	                button={
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <MenuDropdown
+                open={openMenu === 'resolution'}
+                onClose={() => setOpenMenu(null)}
+                button={
                   <ToolbarDropdownButton
                     label="Resolution"
                     icon={Maximize2}
@@ -2291,7 +2289,6 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                         {styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? effectiveStyle}
                       </span>
                     </div>
-                    <p className="mt-2 text-[12px] text-slate-500">All views will use this style</p>
                   </div>
 
                   <div className="flex flex-col gap-2 p-2">
@@ -2355,93 +2352,99 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                         </button>
                       );
                     })}
-	                  </div>
-	                </div>
+                  </div>
+                </div>
+              </MenuDropdown>
+
+              <MenuDropdown
+                open={openMenu === 'convertStyle'}
+                onClose={() => setOpenMenu(null)}
+                button={
+                  <ToolbarDropdownButton
+                    label="Convert Style"
+                    icon={Palette}
+                    isOpen={openMenu === 'convertStyle'}
+                    disabled={isGenerating || !variants.some((v) => v.kind === 'base')}
+                    onClick={() => setOpenMenu((prev) => (prev === 'convertStyle' ? null : 'convertStyle'))}
+                    className="max-w-[160px]"
+                  />
+                }
+              >
+                <div className="p-1.5">
+                  <div className="flex flex-col gap-2">
+                    {styleOptions.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => {
+                          setOpenMenu(null);
+                          handleConvertStyle(opt.id);
+                        }}
+                        className="w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50"
+                      >
+                        <span className="min-w-0 text-sm truncate">{opt.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </MenuDropdown>
+
+              <MenuDropdown
+                open={openMenu === 'convertModel'}
+                onClose={() => setOpenMenu(null)}
+                button={
+                  <ToolbarDropdownButton
+                    label="Convert Model"
+                    icon={Users}
+                    isOpen={openMenu === 'convertModel'}
+                    disabled={isGenerating || !variants.some((v) => v.kind === 'base')}
+                    onClick={() => setOpenMenu((prev) => (prev === 'convertModel' ? null : 'convertModel'))}
+                    className="max-w-[170px]"
+                  />
+                }
+              >
+                <div className="p-1.5">
+                  <div className="flex flex-col gap-2">
+                    {(['male', 'female'] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => {
+                          setSelectedModel(m);
+                          setOpenMenu(null);
+                          handleConvertModel(m);
+                        }}
+                        className="w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50"
+                      >
+                        <span className="min-w-0 text-sm truncate">{m === 'male' ? 'Male' : 'Female'}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
 	              </MenuDropdown>
 
-	              <MenuDropdown
-	                open={openMenu === 'convertStyle'}
-	                onClose={() => setOpenMenu(null)}
-	                button={
-	                  <ToolbarDropdownButton
-	                    label="Convert Style"
-	                    icon={Palette}
-	                    isOpen={openMenu === 'convertStyle'}
-	                    disabled={isGenerating || !variants.some((v) => v.kind === 'base')}
-	                    onClick={() => setOpenMenu((prev) => (prev === 'convertStyle' ? null : 'convertStyle'))}
-	                    className="max-w-[160px]"
-	                  />
-	                }
-	              >
-	                <div className="p-1.5">
-	                  <div className="flex flex-col gap-2">
-	                    {styleOptions.map((opt) => (
-	                      <button
-	                        key={opt.id}
-	                        type="button"
-	                        onClick={() => {
-	                          setOpenMenu(null);
-	                          handleConvertStyle(opt.id);
-	                        }}
-	                        className="w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50"
-	                      >
-	                        <span className="min-w-0 text-sm truncate">{opt.label}</span>
-	                      </button>
-	                    ))}
-	                  </div>
-	                </div>
-	              </MenuDropdown>
+		              <button
+		                onClick={handleGenerate}
+		                disabled={isGenerating || prompt.trim().length === 0}
+                className="aiig-shimmer ml-auto bg-gradient-to-r from-violet-500 to-purple-500 text-white inline-flex h-14 items-center rounded-full px-10 text-[15px] font-medium leading-none whitespace-nowrap shadow-sm transition-all hover:shadow hover:shadow-purple-500/30 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-200 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+		                {isGenerating ? (
+		                  <span className="flex items-center gap-2 whitespace-nowrap">
+		                    <Loader2 className="w-5 h-5 animate-spin shrink-0 self-center" />
+		                    <span className="whitespace-nowrap self-center">Generating...</span>
+		                  </span>
+		                ) : (
+		                  <span className="flex items-center gap-2 whitespace-nowrap">
+		                    <Sparkles className="w-5 h-5 shrink-0 self-center" />
+		                    <span className="whitespace-nowrap self-center">Generate Image</span>
+		                  </span>
+		                )}
+		              </button>
 
-	              <MenuDropdown
-	                open={openMenu === 'convertModel'}
-	                onClose={() => setOpenMenu(null)}
-	                button={
-	                  <ToolbarDropdownButton
-	                    label="Convert Model"
-	                    icon={Users}
-	                    isOpen={openMenu === 'convertModel'}
-	                    disabled={isGenerating || !variants.some((v) => v.kind === 'base')}
-	                    onClick={() => setOpenMenu((prev) => (prev === 'convertModel' ? null : 'convertModel'))}
-	                    className="max-w-[170px]"
-	                  />
-	                }
-	              >
-	                <div className="p-1.5">
-	                  <div className="flex flex-col gap-2">
-	                    {(['male', 'female'] as const).map((m) => (
-	                      <button
-	                        key={m}
-	                        type="button"
-	                        onClick={() => {
-	                          setSelectedModel(m);
-	                          setOpenMenu(null);
-	                          handleConvertModel(m);
-	                        }}
-	                        className="w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50"
-	                      >
-	                        <span className="min-w-0 text-sm truncate">{m === 'male' ? 'Male' : 'Female'}</span>
-	                      </button>
-	                    ))}
-	                  </div>
-	                </div>
-	              </MenuDropdown>
-
-                <button
-                  type="button"
-                  onClick={() => setIsListingDrawerOpen(true)}
-                  className={clsx(TOOLBAR_PILL_BTN, 'max-w-[200px]')}
-                >
-                  <span className="flex flex-row items-center gap-2 min-w-0">
-                    <Sparkles className="w-5 h-5 text-slate-600 shrink-0 block" />
-                    <span className="truncate leading-none">AI Titles &amp; Keywords</span>
-                  </span>
-                </button>
 
 	            </div>
 
-            <p className="text-xs text-slate-500">
-              Generates a front base design first, then generates the selected views from that base for consistent designs.
-            </p>
+            {/* helper text removed */}
           </div>
 
           {error && (
@@ -2491,23 +2494,36 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             </div>
           )}
 
-          <button
-            onClick={handleGenerate}
-            disabled={isGenerating || prompt.trim().length === 0}
-            className="w-full bg-gradient-to-r from-violet-500 to-purple-500 text-white py-4 rounded-2xl hover:shadow-2xl hover:shadow-purple-500/40 transition-all duration-200 disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-          >
-            {isGenerating ? (
-              <>
-                <Loader2 className="w-5 h-5 animate-spin" />
-                <span>Generating...</span>
-              </>
-            ) : (
-              <>
-                <Sparkles className="w-5 h-5" />
-                <span>Generate Image</span>
-              </>
-            )}
-          </button>
+	          <style>{`
+	            @keyframes aiig-shine {
+	              0% {
+	                transform: translate3d(-140%, 0, 0) skewX(-18deg);
+	              }
+	              100% {
+	                transform: translate3d(240%, 0, 0) skewX(-18deg);
+	              }
+	            }
+            .aiig-shimmer {
+              position: relative;
+              overflow: hidden;
+            }
+	            .aiig-shimmer::after {
+	              content: '';
+	              position: absolute;
+	              inset: -60% -40%;
+	              width: 55%;
+	              left: -60%;
+	              background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.85), transparent);
+	              transform: translate3d(-140%, 0, 0) skewX(-18deg);
+	              opacity: 1;
+	              pointer-events: none;
+	              will-change: transform;
+	              animation: aiig-shine 4s linear infinite;
+	            }
+	            @media (prefers-reduced-motion: reduce) {
+	              .aiig-shimmer::after { animation-duration: 8s; }
+	            }
+	          `}</style>
 
           {statusMessage && !isGenerating && (
             <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-xl px-4 py-2 flex items-center gap-2">
@@ -2515,13 +2531,15 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
               {statusMessage}
             </p>
           )}
+
+          <ListingAssistantInline onUseAsPrompt={(val) => setPrompt(val)} />
         </div>
 
- 	        {hasAnyResult && (
- 	          <div className="bg-white rounded-3xl border border-slate-200 shadow-xl p-6">
-	            <div className="w-full">
-	              <div className="flex items-center justify-between gap-3">
-	                <div>
+        {hasAnyResult && (
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-xl p-6">
+            <div className="w-full">
+              <div className="flex items-center justify-between gap-3">
+                <div>
                   <h3 className="text-sm font-semibold">
                     {hasEditedViews || hasSingleEditResult ? 'Edited Preview' : 'Preview'}
                   </h3>
@@ -2530,8 +2548,8 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                       ? `Edited from upload · ${globalResolutionValue}`
                       : `${resolution}×${resolution}`}
                   </p>
-                 </div>
- 
+                </div>
+
                 <div className="flex items-center gap-2">
                   <div className="hidden sm:flex flex-col items-end">
                     <label className="text-[11px] text-slate-500 leading-none">Export</label>
@@ -2548,168 +2566,168 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                   </div>
 
                   <button
-                  onClick={() => {
-                    if (hasEditedViews) {
-                      if (!editedViews?.length) return;
-                      void (async () => {
-                        try {
-                          for (const item of editedViews) {
-                        if (!item.imageDataUrl) return;
-                        const styleSuffix = item.style ? `-${String(item.style).trim()}` : '';
-                            await downloadPng(item.imageDataUrl, `${item.view}${styleSuffix}.png`, exportScale);
+                    onClick={() => {
+                      if (hasEditedViews) {
+                        if (!editedViews?.length) return;
+                        void (async () => {
+                          try {
+                            for (const item of editedViews) {
+                              if (!item.imageDataUrl) return;
+                              const styleSuffix = item.style ? `-${String(item.style).trim()}` : '';
+                              await downloadPng(item.imageDataUrl, `${item.view}${styleSuffix}.png`, exportScale);
+                            }
+                          } catch (err: any) {
+                            setError(err?.message || 'Download failed.');
                           }
-                        } catch (err: any) {
-                          setError(err?.message || 'Download failed.');
-                        }
-                      })();
-                      return;
-                    }
- 
-                    if (editedPrimaryImage) {
-                      void downloadPng(editedPrimaryImage, 'edited.png', exportScale).catch((err: any) =>
-                        setError(err?.message || 'Download failed.')
-                      );
-                      return;
-                    }
- 
-                    handleDownloadAll();
-                  }}
-                  className="w-9 h-9 rounded-lg border border-slate-200 hover:bg-slate-100 flex items-center justify-center"
-                  title="Download"
-                >
- 	                  <ArrowDownToLine className="w-4 h-4" />
- 	                </button>
+                        })();
+                        return;
+                      }
+
+                      if (editedPrimaryImage) {
+                        void downloadPng(editedPrimaryImage, 'edited.png', exportScale).catch((err: any) =>
+                          setError(err?.message || 'Download failed.')
+                        );
+                        return;
+                      }
+
+                      handleDownloadAll();
+                    }}
+                    className="w-9 h-9 rounded-lg border border-slate-200 hover:bg-slate-100 flex items-center justify-center"
+                    title="Download"
+                  >
+                    <ArrowDownToLine className="w-4 h-4" />
+                  </button>
                 </div>
-	              </div>
-	
-	              <div className="mt-6 flex flex-col gap-10 w-full">
-	                {hasEditedViews || hasSingleEditResult ? (
-	                  editedPrimaryImage ? (
-	                    <ViewItem
-	                      label="Edited Preview"
-	                      url={editedPrimaryImage}
-	                      resolution={resolution}
-	                      onDownload={() => {
-	                        void downloadPng(editedPrimaryImage, 'edited.png', exportScale).catch((err: any) =>
-	                          setError(err?.message || 'Download failed.')
-	                        );
-	                      }}
-	                    />
-	                  ) : null
-	                ) : variants.length > 1 ? (
-	                  variants.map((variant) => {
-	                    const suffix =
-	                      variant.kind === 'style_converted'
-	                        ? String(variant.styleKey ?? variant.styleLabel).trim().replace(/\s+/g, '-')
-	                        : variant.kind === 'model_preview'
-	                          ? String(variant.modelKey ?? variant.modelLabel ?? 'model').trim().replace(/\s+/g, '-')
-	                          : '';
+              </div>
 
-	                    return (
-	                      <div key={variant.id} className="w-full flex flex-col gap-6 items-center">
-	                        <div
-	                          className="w-full flex flex-wrap items-center justify-between gap-2"
-	                          style={{ maxWidth: resolution }}
-	                        >
-	                          <div className="flex flex-wrap items-center gap-2">
-	                            {variant.modelLabel && (
-	                              <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
-	                                Model: {variant.modelLabel}
-	                              </span>
-	                            )}
-	                            <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
-	                              Style: {variant.styleLabel}
-	                            </span>
-	                          </div>
-	                        </div>
+              <div className="mt-6 flex flex-col gap-10 w-full">
+                {hasEditedViews || hasSingleEditResult ? (
+                  editedPrimaryImage ? (
+                    <ViewItem
+                      label="Edited Preview"
+                      url={editedPrimaryImage}
+                      resolution={resolution}
+                      onDownload={() => {
+                        void downloadPng(editedPrimaryImage, 'edited.png', exportScale).catch((err: any) =>
+                          setError(err?.message || 'Download failed.')
+                        );
+                      }}
+                    />
+                  ) : null
+                ) : variants.length > 1 ? (
+                  variants.map((variant) => {
+                    const suffix =
+                      variant.kind === 'style_converted'
+                        ? String(variant.styleKey ?? variant.styleLabel).trim().replace(/\s+/g, '-')
+                        : variant.kind === 'model_preview'
+                          ? String(variant.modelKey ?? variant.modelLabel ?? 'model').trim().replace(/\s+/g, '-')
+                          : '';
 
-	                        <div className="w-full flex flex-col gap-10">
-	                          {variant.views.map((view) => {
-	                            const image = variant.images.find((img) => img.view === view) ?? null;
-	                            if (!image) {
-	                              return (
-	                                <div key={`${variant.id}-${view}`} className="w-full flex flex-col gap-2 items-center">
-	                                  <div className="w-full flex items-center justify-between gap-3" style={{ maxWidth: resolution }}>
-	                                    <h3 className="text-sm font-medium text-slate-900">{viewLabel(view)}</h3>
-	                                  </div>
-	                                  <div className="w-full text-sm text-slate-600" style={{ maxWidth: resolution }}>
-	                                    Missing view.
-	                                  </div>
-	                                </div>
-	                              );
-	                            }
+                    return (
+                      <div key={variant.id} className="w-full flex flex-col gap-6 items-center">
+                        <div
+                          className="w-full flex flex-wrap items-center justify-between gap-2"
+                          style={{ maxWidth: resolution }}
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            {variant.modelLabel && (
+                              <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
+                                Model: {variant.modelLabel}
+                              </span>
+                            )}
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
+                              Style: {variant.styleLabel}
+                            </span>
+                          </div>
+                        </div>
 
-	                            if (!isProbablyValidPngDataUrl(image.src)) {
-	                              return (
-	                                <div key={`${variant.id}-${view}`} className="w-full flex flex-col gap-2 items-center">
-	                                  <div className="w-full flex items-center justify-between gap-3" style={{ maxWidth: resolution }}>
-	                                    <h3 className="text-sm font-medium text-slate-900">{viewLabel(view)}</h3>
-	                                    {variant.kind === 'style_converted' && variant.styleKey && (
-	                                      <button
-	                                        type="button"
-	                                        className="text-purple-600 text-xs hover:underline"
-	                                        onClick={() => handleConvertStyle(variant.styleKey as ArtStyleKey)}
-	                                      >
-	                                        Retry conversion
-	                                      </button>
-	                                    )}
-	                                  </div>
-	                                  <div className="w-full text-sm text-slate-600" style={{ maxWidth: resolution }}>
-	                                    Invalid image.
-	                                  </div>
-	                                </div>
-	                              );
-	                            }
+                        <div className="w-full flex flex-col gap-10">
+                          {variant.views.map((view) => {
+                            const image = variant.images.find((img) => img.view === view) ?? null;
+                            if (!image) {
+                              return (
+                                <div key={`${variant.id}-${view}`} className="w-full flex flex-col gap-2 items-center">
+                                  <div className="w-full flex items-center justify-between gap-3" style={{ maxWidth: resolution }}>
+                                    <h3 className="text-sm font-medium text-slate-900">{viewLabel(view)}</h3>
+                                  </div>
+                                  <div className="w-full text-sm text-slate-600" style={{ maxWidth: resolution }}>
+                                    Missing view.
+                                  </div>
+                                </div>
+                              );
+                            }
 
-	                            return (
+                            if (!isProbablyValidPngDataUrl(image.src)) {
+                              return (
+                                <div key={`${variant.id}-${view}`} className="w-full flex flex-col gap-2 items-center">
+                                  <div className="w-full flex items-center justify-between gap-3" style={{ maxWidth: resolution }}>
+                                    <h3 className="text-sm font-medium text-slate-900">{viewLabel(view)}</h3>
+                                    {variant.kind === 'style_converted' && variant.styleKey && (
+                                      <button
+                                        type="button"
+                                        className="text-purple-600 text-xs hover:underline"
+                                        onClick={() => handleConvertStyle(variant.styleKey as ArtStyleKey)}
+                                      >
+                                        Retry conversion
+                                      </button>
+                                    )}
+                                  </div>
+                                  <div className="w-full text-sm text-slate-600" style={{ maxWidth: resolution }}>
+                                    Invalid image.
+                                  </div>
+                                </div>
+                              );
+                            }
+
+                            return (
+                              <ViewItem
+                                key={`${variant.id}-${view}`}
+                                label={viewLabel(view)}
+                                url={image.src}
+                                resolution={image.width ?? resolution}
+                                viewKey={view}
+                                onDownload={() => {
+                                  const file = suffix ? `${view}-${suffix}.png` : `${view}.png`;
+                                  void downloadPng(image.src, file, exportScale).catch((err: any) =>
+                                    setError(err?.message || 'Download failed.')
+                                  );
+                                }}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  ((variants[0]?.images ?? result?.images) ?? []).map((image) =>
+                    isProbablyValidPngDataUrl(image.src) ? (
                       <ViewItem
-                        key={`${variant.id}-${view}`}
-                        label={viewLabel(view)}
+                        key={image.view}
+                        label={viewLabel(image.view)}
                         url={image.src}
                         resolution={image.width ?? resolution}
-                        viewKey={view}
+                        viewKey={image.view}
                         onDownload={() => {
-                          const file = suffix ? `${view}-${suffix}.png` : `${view}.png`;
-                          void downloadPng(image.src, file, exportScale).catch((err: any) =>
+                          void downloadPng(image.src, `${image.view}.png`, exportScale).catch((err: any) =>
                             setError(err?.message || 'Download failed.')
                           );
                         }}
                       />
-	                            );
-	                          })}
-	                        </div>
-	                      </div>
-	                    );
-	                  })
-	                ) : (
-	                  ((variants[0]?.images ?? result?.images) ?? []).map((image) =>
-	                    isProbablyValidPngDataUrl(image.src) ? (
-	                      <ViewItem
-	                        key={image.view}
-	                        label={viewLabel(image.view)}
-	                        url={image.src}
-	                        resolution={image.width ?? resolution}
-	                        viewKey={image.view}
-	                        onDownload={() => {
-	                          void downloadPng(image.src, `${image.view}.png`, exportScale).catch((err: any) =>
-	                            setError(err?.message || 'Download failed.')
-	                          );
-	                        }}
-	                      />
-	                    ) : (
-	                      <div key={image.view} className="w-full flex flex-col gap-2 items-center">
-	                        <div className="w-full flex items-center justify-between gap-3" style={{ maxWidth: resolution }}>
-	                          <h3 className="text-sm font-medium text-slate-900">{viewLabel(image.view)}</h3>
-	                        </div>
-	                        <div className="w-full text-sm text-slate-600" style={{ maxWidth: resolution }}>
-	                          Invalid image.
-	                        </div>
-	                      </div>
-	                    )
-	                  )
-	                )}
-	              </div>
-  	            </div>
+                    ) : (
+                      <div key={image.view} className="w-full flex flex-col gap-2 items-center">
+                        <div className="w-full flex items-center justify-between gap-3" style={{ maxWidth: resolution }}>
+                          <h3 className="text-sm font-medium text-slate-900">{viewLabel(image.view)}</h3>
+                        </div>
+                        <div className="w-full text-sm text-slate-600" style={{ maxWidth: resolution }}>
+                          Invalid image.
+                        </div>
+                      </div>
+                    )
+                  )
+                )}
+              </div>
+            </div>
 
             {editedViews && (
               <div className="mt-6">
@@ -2765,38 +2783,38 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             )}
 
             {(variants.length > 0 || result) && (
-            <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-4 flex flex-col md:flex-row gap-3 md:items-end md:justify-between">
-              <div className="flex-1">
-                <label className="block text-sm text-slate-700 mb-2">Design name</label>
-                <input
-                  value={designName}
-                  onChange={(e) => setDesignName(e.target.value)}
-                  placeholder="e.g., Shirt Front/Back"
-                  className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 focus:border-purple-500 focus:outline-none text-sm"
-                />
+              <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-4 flex flex-col md:flex-row gap-3 md:items-end md:justify-between">
+                <div className="flex-1">
+                  <label className="block text-sm text-slate-700 mb-2">Design name</label>
+                  <input
+                    value={designName}
+                    onChange={(e) => setDesignName(e.target.value)}
+                    placeholder="e.g., Shirt Front/Back"
+                    className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 focus:border-purple-500 focus:outline-none text-sm"
+                  />
+                </div>
+                <button
+                  onClick={handleSaveDesign}
+                  disabled={isSaving || !!savedDesignId || !designName.trim()}
+                  className={clsx(
+                    'px-5 py-3 rounded-2xl text-sm inline-flex items-center justify-center gap-2 transition-colors whitespace-nowrap md:min-w-[220px]',
+                    isSaving || savedDesignId || !designName.trim()
+                      ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                      : 'bg-gradient-to-r from-violet-500 to-purple-500 text-white hover:shadow-xl hover:shadow-purple-500/30'
+                  )}
+                >
+                  {isSaving ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Saving...
+                    </>
+                  ) : savedDesignId ? (
+                    <>Saved ✓</>
+                  ) : (
+                    <>Save to My Designs</>
+                  )}
+                </button>
               </div>
-              <button
-                onClick={handleSaveDesign}
-                disabled={isSaving || !!savedDesignId || !designName.trim()}
-                className={clsx(
-                  'px-5 py-3 rounded-2xl text-sm inline-flex items-center justify-center gap-2 transition-colors whitespace-nowrap md:min-w-[220px]',
-                  isSaving || savedDesignId || !designName.trim()
-                    ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
-                    : 'bg-gradient-to-r from-violet-500 to-purple-500 text-white hover:shadow-xl hover:shadow-purple-500/30'
-                )}
-              >
-                {isSaving ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Saving...
-                  </>
-                ) : savedDesignId ? (
-                  <>Saved ✓</>
-                ) : (
-                  <>Save to My Designs</>
-                )}
-              </button>
-            </div>
             )}
 
             {(variants.length > 0 || result) && (saveMessage || saveError) && (
@@ -2813,11 +2831,6 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         )}
       </div>
 
-      <ListingAssistantDrawer
-        open={isListingDrawerOpen}
-        onClose={() => setIsListingDrawerOpen(false)}
-        onUseAsPrompt={(value) => setPrompt(value)}
-      />
     </div>
   );
 }

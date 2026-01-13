@@ -2409,3 +2409,51 @@ html {
     overflow-y: scroll;
   }
 }
+
+@keyframes app-shimmer-sweep {
+  0% {
+    transform: translate3d(-140%, 0, 0) skewX(-18deg);
+  }
+  100% {
+    transform: translate3d(240%, 0, 0) skewX(-18deg);
+  }
+}
+
+/* Scoped shimmer utility for logos/hero only (opt-in via class). */
+.app-shimmer-sweep {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.app-shimmer-sweep::after {
+  content: '';
+  position: absolute;
+  inset: -60% -40%;
+  width: 70%;
+  left: -60%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 1), transparent);
+  transform: translate3d(-140%, 0, 0) skewX(-18deg);
+  opacity: 0.9;
+  filter: blur(0.6px);
+  pointer-events: none;
+  will-change: transform;
+  animation: app-shimmer-sweep 2.8s linear infinite;
+  z-index: 5;
+}
+
+.app-shimmer-sweep > * {
+  position: relative;
+  z-index: 10;
+}
+
+/* Optional: mark a background layer to stay behind the shimmer (used on Dashboard CTA). */
+.app-shimmer-sweep .app-shimmer-bg {
+  z-index: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shimmer-sweep::after {
+    animation-duration: 8s;
+  }
+}
