@@ -2426,8 +2426,8 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 		              <button
 		                onClick={handleGenerate}
 		                disabled={isGenerating || prompt.trim().length === 0}
-                className="aiig-shimmer ml-auto bg-gradient-to-r from-violet-500 to-purple-500 text-white inline-flex h-14 items-center rounded-full px-10 text-[15px] font-medium leading-none whitespace-nowrap shadow-sm transition-all hover:shadow hover:shadow-purple-500/30 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-200 disabled:opacity-60 disabled:cursor-not-allowed"
-              >
+	                className="aiig-shimmer ml-auto bg-gradient-to-r from-violet-500 to-purple-500 text-white inline-flex h-14 min-w-[170px] items-center rounded-full px-12 text-[15px] font-medium leading-none whitespace-nowrap shadow-sm transition-all hover:shadow hover:shadow-purple-500/30 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-200 disabled:opacity-60 disabled:cursor-not-allowed"
+	              >
 		                {isGenerating ? (
 		                  <span className="flex items-center gap-2 whitespace-nowrap">
 		                    <Loader2 className="w-5 h-5 animate-spin shrink-0 self-center" />
