@@ -79,9 +79,10 @@
         "dev": "concurrently --kill-others --kill-others-on-fail \"npm:dev:client\" \"npm:dev:server\"",
         "dev:client": "vite",
         "dev:server": "tsx watch server/index.ts",
-        "dev:sam2": "cd sam2_service && python -m uvicorn app:app --host 0.0.0.0 --port 8008",
-        "dev:all": "concurrently --kill-others --kill-others-on-fail \"npm:dev:client\" \"npm:dev:server\" \"npm:dev:sam2\"",
-        "build": "vite build",
-        "start": "tsx server/index.ts"
-    }
+    "dev:sam2": "cd sam2_service && python -m uvicorn app:app --host 0.0.0.0 --port 8008",
+    "dev:all": "concurrently --kill-others --kill-others-on-fail \"npm:dev:client\" \"npm:dev:server\" \"npm:dev:sam2\"",
+    "build": "vite build",
+    "start": "tsx server/index.ts",
+    "test": "node --import tsx --test --test-concurrency=1 server/promptEnhancer/enhance.test.ts server/promptEnhancer/runtime.test.ts server/utils/stripKeysDeep.test.ts server/logging/logLeakScan.test.ts server/logging/responsePolicy.test.ts server/handlers/generateViewsResponse.test.ts server/handlers/saveDesignPayload.test.ts"
+  }
 }

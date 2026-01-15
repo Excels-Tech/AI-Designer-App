@@ -129,43 +129,89 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
             .replace(/\s+/g, ' ')
             .trim();
 
-    const packItemsToRange = (items: string[], separator: string, minChars: number, maxChars: number) => {
+    const stripDanglingTitleTail = (title: string) => {
+        let s = normalizeOneLine(title).replace(/[|,;:\-–—]+$/g, '').trimEnd();
+        const badEnd = new Set(['and', 'or', 'for', 'with', 'to', 'in', 'of', 'the', 'a', 'an']);
+        for (let i = 0; i < 4; i += 1) {
+            const m = /(\s+)([A-Za-z]+)\s*$/.exec(s);
+            if (!m) break;
+            const word = (m[2] || '').toLowerCase();
+            if (!badEnd.has(word)) break;
+            s = s.slice(0, m.index).replace(/[|,;:\-–—]+$/g, '').trimEnd();
+        }
+        return s;
+    };
+
+    const pickBestTitleToRange = (items: string[], minChars: number, maxChars: number) => {
+        const normalized = items.map((t) => stripDanglingTitleTail(normalizeOneLine(t))).filter(Boolean);
+        // Prefer titles already within range.
+        const inRange = normalized.filter((t) => t.length >= minChars && t.length <= maxChars);
+        if (inRange.length) return inRange.sort((a, b) => b.length - a.length)[0]!;
+        // Otherwise pick the longest <= max, then clean tail.
+        const under = normalized.filter((t) => t.length <= maxChars);
+        if (under.length) return under.sort((a, b) => b.length - a.length)[0]!;
+        // Fallback: return first (uncut) normalized title.
+        return normalized[0] ?? '';
+    };
+
+    const packItemsToLimitNoPartial = (items: string[], separator: string, maxChars: number) => {
         const normalized = items.map(normalizeOneLine).filter(Boolean);
         let out = '';
         for (const item of normalized) {
             const next = out ? `${out}${separator}${item}` : item;
-            if (next.length <= maxChars) {
+            if (next.length > maxChars) break; // never cut inside an item
+            out = next;
+        }
+        return out.trimEnd();
+    };
+
+    const packItemsToRange = (
+        items: string[],
+        separator: string,
+        minChars: number,
+        maxChars: number,
+        preferMaxChars: number = maxChars
+    ) => {
+        const truncateAtWordBoundary = (text: string, limit: number) => {
+            const t = normalizeOneLine(text);
+            if (t.length <= limit) return t;
+            const cut = t.slice(0, limit);
+            const lastSpace = cut.lastIndexOf(' ');
+            const lastSep = Math.max(cut.lastIndexOf(','), cut.lastIndexOf('|'));
+            const idx = Math.max(lastSpace, lastSep);
+            const safe = (idx > 0 ? cut.slice(0, idx) : cut).trimEnd();
+            return safe.replace(/[|,]\s*$/g, '').trimEnd();
+        };
+
+        const normalized = items.map(normalizeOneLine).filter(Boolean);
+        let out = '';
+        const effectiveMax = Math.max(minChars, Math.min(maxChars, preferMaxChars));
+        for (const item of normalized) {
+            const next = out ? `${out}${separator}${item}` : item;
+            if (next.length <= effectiveMax) {
                 out = next;
                 continue;
             }
 
             // If we're still below minimum, fill remaining space by truncating the next item.
             if (out.length < minChars) {
-                const remaining = maxChars - (out ? out.length + separator.length : 0);
+                const remaining = effectiveMax - (out ? out.length + separator.length : 0);
                 if (remaining > 0) {
-                    const chunk = item.slice(0, remaining).trimEnd();
+                    const chunk = truncateAtWordBoundary(item, remaining);
                     if (chunk) out = out ? `${out}${separator}${chunk}` : chunk;
                 }
             }
         }
 
-        // If still below minimum and we have some text, pad by repeating (then clamp).
-        // This guarantees the displayed output stays within the requested char range.
-        if (out.length > 0 && out.length < minChars) {
-            while (out.length < minChars && out.length < maxChars) {
-                const remaining = maxChars - out.length;
-                const pad = (separator + out).slice(0, remaining);
-                out += pad;
-            }
-        }
-
-        if (out.length > maxChars) out = out.slice(0, maxChars).trimEnd();
-        return out;
+        if (out.length > effectiveMax) out = truncateAtWordBoundary(out, effectiveMax);
+        // Do NOT pad by repeating; prefer a shorter, complete-word output.
+        return out.replace(/\s+/g, ' ').trimEnd();
     };
 
     // Keep outputs within requested character ranges whenever generated.
-    const titlesResultLimited = packItemsToRange(titles, ' | ', 100, 120);
-    const keywordsResultLimited = packItemsToRange(keywords, ', ', 300, 350);
+    const titlesResultLimited = pickBestTitleToRange(titles, 100, 120);
+    // Keywords: never cut inside a keyword; pack full keywords up to a safe max within range.
+    const keywordsResultLimited = packItemsToLimitNoPartial(keywords, ', ', 340);
 
     const calcChWidth = (value: string) => `${Math.min(600, Math.max(28, normalizeQuery(value).length + 2))}ch`;
 
@@ -267,7 +313,7 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
 		                    disabled={!canOptimizeTitles || titlesLoading}
 		                    className="inline-flex items-center gap-2 text-sm font-medium text-purple-700 border border-purple-200 bg-purple-50 hover:bg-purple-100 px-4 py-2 rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
 		                >
-		                    {titlesLoading ? 'Optimizing...' : 'Title optimization'}
+		                    {titlesLoading ? 'Generating...' : 'Generate Titles'}
 		                </button>
 	                {titles.length > 0 && (
 	                    <button
@@ -318,7 +364,7 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
 		                    disabled={!canOptimizeKeywords || keywordsLoading}
 		                    className="inline-flex items-center gap-2 text-sm font-medium text-purple-700 border border-purple-200 bg-purple-50 hover:bg-purple-100 px-4 py-2 rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
 		                >
-		                    {keywordsLoading ? 'Expanding...' : 'Keywords expansion'}
+		                    {keywordsLoading ? 'Generating...' : 'Generate Keywords'}
 		                </button>
 	                {keywords.length > 0 && (
 	                    <button

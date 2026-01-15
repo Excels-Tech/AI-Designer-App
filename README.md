@@ -71,6 +71,12 @@ You can store these files anywhere locally (for example `sam2_service/weights/`)
 - `SAM2_SERVICE_URL` - Base URL for the SAM2 FastAPI service (default `http://127.0.0.1:8008`).
 - `SAM2_CONFIG` - (optional) Path to SAM2 config file for the Python service.
 - `SAM2_CHECKPOINT` - (optional) Path to SAM2 checkpoint weights for the Python service.
+- **Prompt Enhancer (backend-only, privacy-safe)**
+  - Enhanced endpoints: `POST /api/generate-base`, `POST /api/generate-views-from-base`, `POST /api/generate-views`
+  - Privacy guarantee: the refined prompt is used only for the model call and is never returned to the client, never stored, and never logged in production.
+- `PROMPT_ENHANCER_ENABLED` - Enable backend-only prompt enhancement (default `true`; set to `false` to disable).
+- `PROMPT_ENHANCER_DEBUG` - If `true` and `NODE_ENV` is not `production`, logs enhanced prompt for debugging (default `false`).
+- `PROMPT_ENHANCER_MODEL_FORMAT` - Optional formatting hint: `sdxl` (default), `midjourney`, or `generic`.
 
 ## Key Features Added
 

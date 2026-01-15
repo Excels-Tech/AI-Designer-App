@@ -31,6 +31,12 @@ import { createVideoJob, getJobOutputPath, getVideoJob, hasJobOutput } from './v
 import multer from 'multer';
 import os from 'node:os';
 import { getAssetInfo, saveUploadedAsset, startAssetCleanup } from './videoAssets';
+import { buildTryOnModelViewConstraints, deriveModelFormatFromEnv, inferAspectRatio, isProductionEnv, isPromptEnhancerDebug, maybeEnhancePrompt } from './promptEnhancer/runtime';
+import { assertPromptEnhancerSelectionDevOnly } from './promptEnhancer/assertions';
+import { buildGenerateViewsResponse } from './handlers/generateViewsResponse';
+import { buildSaveDesignPayload } from './handlers/saveDesignPayload';
+import { safeJson } from './utils/safeJson';
+import { stripKeysDeep } from './utils/stripKeysDeep';
 
 type StyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor' | 'modelMale' | 'modelFemale' | 'modelKid';
 type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'closeUp' | 'top';
@@ -154,6 +160,16 @@ const MAX_VIDEO_SLIDES = 20;
 const MAX_VIDEO_UPLOAD_BYTES = 12 * 1024 * 1024;
 
 const app = express();
+const JSON_LEAK_KEYS = ['enhancedPrompt', 'negativePrompt'] as const;
+
+// Safety net: ensure *any* JSON response emitted by routes/middleware can't leak enhancer fields,
+// even if a future handler accidentally bypasses `safeJson`.
+app.use((_req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = ((payload: any) => originalJson(stripKeysDeep(payload, JSON_LEAK_KEYS))) as any;
+  next();
+});
+
 const normalizeOrigin = (origin: string) => origin.replace(/\/+$/, '');
 const allowedOrigins = (process.env.CLIENT_ORIGIN || '')
   .split(',')
@@ -207,14 +223,27 @@ function mapGeminiError(err: any) {
     return 'Gemini model is unavailable.';
   }
 
+  if (isRateLimitOrExhaustedError(err)) {
+    return 'Gemini rate limit/quota exhausted. Please wait a bit and try again.';
+  }
+
   if (msg.toLowerCase().includes('quota')) {
-    return 'Gemini quota exceeded.';
+    return 'Gemini quota exceeded. Please try again later.';
   }
 
   return 'Gemini request failed. Check server logs.';
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+function isRateLimitOrExhaustedError(err: any): boolean {
+  const msg = String(err?.message || err).toLowerCase();
+  if (msg.includes('429')) return true;
+  if (msg.includes('resource_exhausted')) return true;
+  if (msg.includes('resource exhausted')) return true;
+  if (msg.includes('too many requests')) return true;
+  return false;
+}
 
 async function generateContentWithRetry<T>(
   label: string,
@@ -231,6 +260,7 @@ async function generateContentWithRetry<T>(
     } catch (err: any) {
       lastErr = err;
       const msg = String(err?.message || err);
+      const isRateLimit = isRateLimitOrExhaustedError(err);
       const shouldRetry =
         attempt < attempts &&
         !msg.includes('API key not valid') &&
@@ -238,8 +268,14 @@ async function generateContentWithRetry<T>(
         !msg.toLowerCase().includes('invalid_argument');
 
       if (!shouldRetry) break;
-      console.warn(`[gemini] ${label} failed (attempt ${attempt}/${attempts}), retrying...`);
-      await sleep(baseDelayMs * attempt);
+      const jitter = 0.8 + Math.random() * 0.6;
+      const delayMs = isRateLimit
+        ? Math.round(baseDelayMs * Math.pow(2, attempt - 1) * jitter)
+        : Math.round(baseDelayMs * attempt);
+      console.warn(
+        `[gemini] ${label} failed (attempt ${attempt}/${attempts})${isRateLimit ? ' [rate-limit]' : ''}, retrying in ${delayMs}ms...`
+      );
+      await sleep(delayMs);
     }
   }
 
@@ -311,14 +347,87 @@ function uniqStable(values: string[]): string[] {
   return out;
 }
 
+const COMMON_SHORT_TAIL_WORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'as',
+  'at',
+  'by',
+  'for',
+  'from',
+  'in',
+  'is',
+  'it',
+  'of',
+  'on',
+  'or',
+  'to',
+  'with',
+]);
+
+const TITLE_DANGLING_TAIL_WORDS = new Set(['and', 'or', 'for', 'with', 'to', 'in', 'of', 'the', 'a', 'an']);
+
+function trimToWordBoundary(input: string, maxLen: number): string {
+  const s = String(input ?? '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  if (s.length <= maxLen) return s;
+  const cut = s.slice(0, maxLen).trimEnd();
+  const idx = Math.max(cut.lastIndexOf(' '), cut.lastIndexOf(','), cut.lastIndexOf('|'));
+  return (idx > 0 ? cut.slice(0, idx) : cut).replace(/[|,]\s*$/g, '').trimEnd();
+}
+
+function trimDanglingTailWordsForTitle(input: string): string {
+  let s = String(input ?? '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  // Trim any trailing punctuation/separators first.
+  s = s.replace(/[|,;:\-–—]+$/g, '').trimEnd();
+  // Remove trailing stopword(s) like "... play or".
+  for (let i = 0; i < 3; i += 1) {
+    const m = /(\s+)([A-Za-z]+)\s*$/.exec(s);
+    if (!m) break;
+    const word = (m[2] || '').toLowerCase();
+    if (!TITLE_DANGLING_TAIL_WORDS.has(word)) break;
+    s = s.slice(0, m.index).trimEnd();
+    s = s.replace(/[|,;:\-–—]+$/g, '').trimEnd();
+  }
+  return s;
+}
+
+function trimIfLooksCutAtLimit(input: string, maxLen: number): string {
+  const s = String(input ?? '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  if (s.length > maxLen) return trimToWordBoundary(s, maxLen);
+
+  // If the model hit the exact limit and ended with a suspiciously short trailing word (e.g. "Mult"),
+  // trim to the previous word boundary to avoid cut-off endings.
+  if (s.length >= maxLen - 1) {
+    const parts = s.split(/\s+/);
+    const last = parts[parts.length - 1] ?? '';
+    const lastClean = last.replace(/[^A-Za-z]/g, '');
+    const lower = lastClean.toLowerCase();
+    const endsWithPunct = /[.?!,:;)]$/.test(s);
+    const looksShort = /^[A-Za-z]{2,4}$/.test(lastClean) && !COMMON_SHORT_TAIL_WORDS.has(lower);
+    if (!endsWithPunct && looksShort) {
+      const idx = s.lastIndexOf(' ');
+      if (idx > 0) return s.slice(0, idx).replace(/[|,]\s*$/g, '').trimEnd();
+    }
+  }
+
+  return s;
+}
+
 function buildTitlesPrompt(input: { productName: string; category?: string; count: number }) {
   return [
     'You are an ecommerce SEO assistant. Generate product listing titles.',
     `Product name: "${input.productName}".`,
-    input.category ? `Category constraint: "${input.category}".` : '',
+    input.category ? `Category context (optional): "${input.category}".` : '',
     `Generate exactly ${input.count} unique titles.`,
-    'Rules: each title must be 60–120 characters; include buyer-intent keywords; include material/style/season/audience when relevant;',
-    'MUST ONLY be relevant to the product name (do NOT invent unrelated apparel types); avoid duplicates; no numbering; no extra commentary.',
+    'Rules: each title MUST be 100–120 characters (inclusive) and MUST NOT exceed 120; end on a complete word (no cut-off last word).',
+    "Do NOT end with a dangling connector/article (e.g. don't end with: and, or, for, with, to, in, of, the, a, an).",
+    'Include buyer-intent keywords and (when relevant) material, style, season, audience, gift intent, and use case.',
+    'Keep titles relevant to the product; do not invent a different primary product type (e.g. do not turn a hoodie into a t-shirt).',
+    'Avoid duplicates; no numbering; no extra commentary.',
     'Return ONLY valid JSON in this exact shape: {"titles":["..."]}',
   ]
     .filter(Boolean)
@@ -329,9 +438,12 @@ function buildKeywordsPrompt(input: { productName: string; category?: string; co
   return [
     'You are an ecommerce SEO assistant. Generate search keywords for a product listing.',
     `Product name: "${input.productName}".`,
-    input.category ? `Category constraint: "${input.category}".` : '',
+    input.category ? `Category context (optional): "${input.category}".` : '',
     `Generate exactly ${input.count} unique keywords.`,
-    'Rules: mix short + long-tail; high-intent ecommerce phrases; MUST ONLY be relevant to the product name; avoid duplicates; no numbering; no extra commentary.',
+    'Rules: mix short + long-tail; include generic + broad search intents plus specific buyer-intent phrases.',
+    'Include synonyms, themes, style descriptors, audience/recipient, occasions, and use-cases when relevant.',
+    'Keep keywords relevant to the product; do not invent a different primary product type (e.g. do not turn a hoodie into a t-shirt).',
+    'Avoid duplicates; no numbering; no extra commentary.',
     'Return ONLY valid JSON in this exact shape: {"keywords":["..."]}',
   ]
     .filter(Boolean)
@@ -345,11 +457,14 @@ async function generateTextJsonWithModelFallback<T>(label: string, prompt: strin
 
   for (const model of TEXT_MODEL_CANDIDATES) {
     try {
-      const response = await generateContentWithRetry(`${label} | ${model}`, () =>
-        ai.models.generateContent({
-          model,
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        })
+      const response = await generateContentWithRetry(
+        `${label} | ${model}`,
+        () =>
+          ai.models.generateContent({
+            model,
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          }),
+        { attempts: 6, baseDelayMs: 900 }
       );
 
       const raw = extractGeminiText(response);
@@ -358,11 +473,14 @@ async function generateTextJsonWithModelFallback<T>(label: string, prompt: strin
 
       // One strict retry for non-JSON responses.
       const retryPrompt = `${prompt} Return ONLY valid JSON.`;
-      const retry = await generateContentWithRetry(`${label}-json-retry | ${model}`, () =>
-        ai.models.generateContent({
-          model,
-          contents: [{ role: 'user', parts: [{ text: retryPrompt }] }],
-        })
+      const retry = await generateContentWithRetry(
+        `${label}-json-retry | ${model}`,
+        () =>
+          ai.models.generateContent({
+            model,
+            contents: [{ role: 'user', parts: [{ text: retryPrompt }] }],
+          }),
+        { attempts: 4, baseDelayMs: 900 }
       );
       const retryParsed = safeParseJsonObject<T>(extractGeminiText(retry));
       if (retryParsed) return retryParsed;
@@ -370,6 +488,7 @@ async function generateTextJsonWithModelFallback<T>(label: string, prompt: strin
       lastErr = new Error('Gemini returned non-JSON output.');
     } catch (err: any) {
       lastErr = err;
+      if (isRateLimitOrExhaustedError(err)) break;
       const msg = String(err?.message || err);
       const isModelNotFound = msg.toLowerCase().includes('model') && msg.toLowerCase().includes('not found');
       if (!isModelNotFound) break;
@@ -475,6 +594,8 @@ const WHITE_BACKGROUND_PROMPT = [
   'NO frames, NO borders, NO boxes, NO mockups.',
   'NO shadows, NO floor shadows, NO reflections, NO gradients, NO vignette.',
 ].join(' ');
+
+const NO_SHADOWS_PROMPT = 'NO shadows. NO cast shadows. NO floor shadows. NO drop shadows.';
 
 const FULL_FRAME_POSITIVE_PROMPT = [
   'FRAMING: Full-length shot. Entire main subject fully visible head-to-toe (top-to-bottom).',
@@ -2613,14 +2734,16 @@ function buildViewPrompt(basePrompt: string, style: StyleKey, view: ViewKey, wid
     `Keep lighting, materials, and colors identical to every other view.`,
     `Do not mirror or flip the subject. Do not swap left/right. Each requested view must be distinct and match its angle.`,
     WHITE_BACKGROUND_PROMPT,
+    NO_SHADOWS_PROMPT,
     `Style: ${styleModifiers[style]}.`,
     `Base prompt: ${basePrompt}`,
     `Target output size close to ${width}x${height}px (square crop friendly).`,
   ].join(' ');
 }
 
-function buildBasePrompt(prompt: string, style: StyleKey, resolution: number) {
-  const forceWhite = shouldForceWhiteBackgroundFromPrompt(prompt);
+function buildBasePrompt(prompt: string, style: StyleKey, resolution: number, forceWhiteOverride?: boolean) {
+  const forceWhite =
+    typeof forceWhiteOverride === 'boolean' ? forceWhiteOverride : shouldForceWhiteBackgroundFromPrompt(prompt);
   return [
     'Generate ONE base image that matches the user prompt.',
     'STRICT: Front view (head-on) unless the user prompt implies a different viewpoint (e.g. poster/logo).',
@@ -2628,6 +2751,7 @@ function buildBasePrompt(prompt: string, style: StyleKey, resolution: number) {
     'No grids, no collages, no multi-panel layouts.',
     FULL_FRAME_POSITIVE_PROMPT,
     FULL_FRAME_NEGATIVE_PROMPT,
+    NO_SHADOWS_PROMPT,
     forceWhite ? WHITE_BACKGROUND_PROMPT : null,
     `Style: ${styleModifiers[style]}.`,
     `User prompt: ${prompt}`,
@@ -2642,6 +2766,7 @@ function buildViewFromBasePrompt(
   height: number,
   userPrompt?: string,
   extraInstruction?: string,
+  forceWhiteOverride?: boolean,
 ) {
   const sideStrict =
     view === 'left'
@@ -2649,7 +2774,10 @@ function buildViewFromBasePrompt(
       : view === 'right'
         ? 'Generate the RIGHT SIDE view (camera positioned on the right side of the subject/object). Maintain exact same design. Do not mirror or reuse left side. Only change camera angle. Ensure it is clearly the right side view.'
         : null;
-  const forceWhite = shouldForceWhiteBackgroundFromPrompt(userPrompt || '');
+  const forceWhite =
+    typeof forceWhiteOverride === 'boolean'
+      ? forceWhiteOverride
+      : shouldForceWhiteBackgroundFromPrompt(userPrompt || '');
 
   return [
     `Create a single image of the SAME design from the ${viewLabels[view]} angle.`,
@@ -2664,6 +2792,7 @@ function buildViewFromBasePrompt(
     userPrompt?.trim()
       ? `User prompt (secondary reference): ${userPrompt.trim()}. The attached base image is the ground-truth design reference.`
       : null,
+    NO_SHADOWS_PROMPT,
     forceWhite ? WHITE_BACKGROUND_PROMPT : null,
     'No grids, no collages, no multi-panel layouts. One centered subject.',
     'Do not mirror or flip the subject. Do not swap left/right.',
@@ -2711,40 +2840,40 @@ function buildMannequinConversionPrompt(modelKey: MannequinModelKey) {
   ].join(' ');
 }
 
-function modelFrontPrompt(modelKey: MannequinModelKey) {
+function modelFrontPrompt(modelKey: MannequinModelKey, extraConstraints?: string) {
   return [
-    `Generate a high-resolution PHOTOREALISTIC studio photograph of a real ${modelKey} human athlete wearing the exact same soccer uniform from the reference image.`,
+    `Generate a high-resolution PHOTOREALISTIC studio photograph of a real adult ${modelKey} model wearing the exact same garment/apparel product from the reference image.`,
     'VIEW: FRONT view. Keep the same orientation as the input.',
     'STRICT: REAL human athlete (NOT mannequin, NOT doll, NOT statue, NOT dummy).',
-    'STRICT: REAL CAMERA PHOTO. Professional ecommerce studio fashion photography (NOT 3D, NOT CGI).',
+    'STRICT: REAL CAMERA PHOTO. Professional studio fashion photography (NOT 3D, NOT CGI).',
     'REALISM: natural skin microtexture, pores, fine hair strands, subtle imperfections. Avoid overly smooth/plastic skin.',
-    'STRICT CAMERA FRAMING: FULL BODY including head and face. Head-to-toe. Wide full-body fashion photo. Centered subject.',
-    'Leave clear margin above the head and below the feet. Do NOT crop any body part.',
+    'STRICT CAMERA FRAMING: FULL BODY head-to-toe including head and face. Wide full-body photo.',
+    'Leave clear margin above the head and below the feet. Do NOT crop any body part or any clothing.',
     'STRICT: Do NOT zoom in. Use a consistent wide camera distance.',
-    'STRICT: Preserve the exact uniform design and all details: colors, patterns, logos, text, placement, numbering, and branding.',
+    'STRICT: Preserve the exact garment design and all details: colors, patterns, logos/prints/text, placement, and branding.',
     'STRICT: Do not invent new design elements. Do not mirror or flip.',
-    'STRICT: Do NOT add socks or shoes. Barefoot only, unless socks/shoes are clearly present in the reference image.',
-    'STRICT: Do not add gloves, hats, or accessories unless they are clearly present in the input image.',
-    WHITE_BACKGROUND_PROMPT,
+    'Avoid adding extra accessories (hats, gloves, bags, jewelry) unless clearly present in the reference image.',
+    extraConstraints?.trim() ? `IMPORTANT: ${extraConstraints.trim()}` : null,
+    'Background: clean studio backdrop with even lighting. Do not let background choices override garment preservation.',
   ].join(' ');
 }
 
-function modelBackPrompt(modelKey: MannequinModelKey) {
+function modelBackPrompt(modelKey: MannequinModelKey, extraConstraints?: string) {
   return [
-    `Generate a high-resolution PHOTOREALISTIC studio photograph of a real ${modelKey} human athlete wearing the exact same soccer uniform from the reference image.`,
+    `Generate a high-resolution PHOTOREALISTIC studio photograph of a real adult ${modelKey} model wearing the exact same garment/apparel product from the reference image.`,
     'VIEW: BACK view (rear view). Keep the same orientation as the input.',
     'CRITICAL: Match the SAME camera distance and framing as the front view output (wide full-body).',
     'STRICT: REAL human athlete (NOT mannequin, NOT doll, NOT statue, NOT dummy).',
-    'STRICT: REAL CAMERA PHOTO. Professional ecommerce studio fashion photography (NOT 3D, NOT CGI).',
+    'STRICT: REAL CAMERA PHOTO. Professional studio fashion photography (NOT 3D, NOT CGI).',
     'REALISM: natural skin microtexture, pores, fine hair strands, subtle imperfections. Avoid overly smooth/plastic skin.',
-    'STRICT CAMERA FRAMING (NO EXCEPTIONS): FULL BODY including head and face. Head-to-toe. Wide full-body fashion photo. Centered subject.',
+    'STRICT CAMERA FRAMING (NO EXCEPTIONS): FULL BODY head-to-toe including head and face. Wide full-body photo.',
     'Leave clear margin above the head and below the feet (extra padding).',
     'STRICT: Do NOT crop. Do NOT zoom. Do NOT use a close-up. Do NOT change focal length to crop the subject.',
-    'STRICT: Preserve the exact uniform design and all details: colors, patterns, logos, text, placement, numbering, and branding.',
+    'STRICT: Preserve the exact garment design and all details: colors, patterns, logos/prints/text, placement, and branding.',
     'STRICT: Do not invent new design elements. Do not mirror or flip.',
-    'STRICT: Do NOT add socks or shoes. Barefoot only, unless socks/shoes are clearly present in the reference image.',
-    'STRICT: Do not add gloves, hats, or accessories unless they are clearly present in the input image.',
-    WHITE_BACKGROUND_PROMPT,
+    'Avoid adding extra accessories (hats, gloves, bags, jewelry) unless clearly present in the reference image.',
+    extraConstraints?.trim() ? `IMPORTANT: ${extraConstraints.trim()}` : null,
+    'Background: clean studio backdrop with even lighting. Do not let background choices override garment preservation.',
   ].join(' ');
 }
 
@@ -3418,6 +3547,39 @@ async function buildCompositeGridPng(items: ExportItem[]) {
     .toBuffer();
 }
 
+function extractGeminiInlineImagePart(response: any): { data: string; mimeType?: string } | null {
+  const candidates = response?.candidates;
+  const first = Array.isArray(candidates) ? candidates[0] : null;
+  const parts = first?.content?.parts;
+  if (!Array.isArray(parts)) return null;
+
+  for (const part of parts) {
+    const inlineData = part?.inlineData ?? part?.inline_data;
+    if (inlineData?.data) {
+      return { data: String(inlineData.data), mimeType: inlineData.mimeType ?? inlineData.mime_type };
+    }
+  }
+
+  return null;
+}
+
+function extractGeminiTextParts(response: any): string {
+  const candidates = response?.candidates;
+  const first = Array.isArray(candidates) ? candidates[0] : null;
+  const parts = first?.content?.parts;
+  if (!Array.isArray(parts)) return '';
+  return parts
+    .map((p: any) => (typeof p?.text === 'string' ? p.text.trim() : ''))
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function stripNegativePromptLine(prompt: string): string {
+  const s = String(prompt ?? '');
+  return s.replace(/\n\s*Negative prompt:\s*[\s\S]*$/i, '').trim();
+}
+
 async function generateViewImage(
   prompt: string,
   style: StyleKey,
@@ -3426,7 +3588,7 @@ async function generateViewImage(
   targetHeight: number,
   options?: { background?: { r: number; g: number; b: number; alpha: number } }
 ) {
-  const response = await generateContentWithRetry(
+    const response = await generateContentWithRetry(
     `generateViewImage:${view}`,
     async () =>
       await ai.models.generateContent({
@@ -3437,7 +3599,7 @@ async function generateViewImage(
   );
 
   const parts = (response as any)?.candidates?.[0]?.content?.parts;
-  const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
+  const imagePart = extractGeminiInlineImagePart(response);
 
   if (!imagePart?.data) {
     throw new Error(`Gemini response did not include an image for view "${view}".`);
@@ -3477,7 +3639,7 @@ async function generateViewImageFromBase(
   targetHeight: number,
   userPrompt?: string,
   extraInstruction?: string,
-  options?: { background?: { r: number; g: number; b: number; alpha: number } }
+  options?: { background?: { r: number; g: number; b: number; alpha: number }; forceWhiteOverride?: boolean }
 ) {
   const inlineData = pngBase64ToInlineData(baseImageBase64);
   const response = await generateContentWithRetry(
@@ -3489,7 +3651,17 @@ async function generateViewImageFromBase(
           {
             role: 'user',
             parts: [
-              { text: buildViewFromBasePrompt(style, view, targetWidth, targetHeight, userPrompt, extraInstruction) },
+              {
+                text: buildViewFromBasePrompt(
+                  style,
+                  view,
+                  targetWidth,
+                  targetHeight,
+                  userPrompt,
+                  extraInstruction,
+                  options?.forceWhiteOverride
+                ),
+              },
               { inlineData },
             ],
           },
@@ -3499,7 +3671,7 @@ async function generateViewImageFromBase(
   );
 
   const parts = (response as any)?.candidates?.[0]?.content?.parts;
-  const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
+  const imagePart = extractGeminiInlineImagePart(response);
 
   if (!imagePart?.data) {
     throw new Error(`Gemini response did not include an image for view "${view}".`);
@@ -3668,41 +3840,50 @@ app.post('/api/generate-views', async (req: Request, res: Response) => {
   const userId = req.headers['x-user-id'] as string | undefined;
 
   if (!prompt || !prompt.trim()) {
-    return res.status(400).json({ error: 'Prompt is required.' });
+    return safeJson(res, { error: 'Prompt is required.' }, 400);
   }
 
   if (!style || !(style in styleModifiers)) {
-    return res.status(400).json({ error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' });
+    return safeJson(res, { error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' }, 400);
   }
 
   if (!Array.isArray(views) || views.length < 1) {
-    return res.status(400).json({ error: 'At least one view must be selected.' });
+    return safeJson(res, { error: 'At least one view must be selected.' }, 400);
   }
 
   const unknownView = views.find((v) => !(v in viewLabels));
   if (unknownView) {
-    return res.status(400).json({ error: `Invalid view: ${unknownView}` });
+    return safeJson(res, { error: `Invalid view: ${unknownView}` }, 400);
   }
 
   if (!resolution || !allowedResolutions.has(resolution)) {
-    return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
+    return safeJson(res, { error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` }, 400);
   }
 
   if (autoSave && (!userId || !userId.trim())) {
-    return res.status(401).json({ error: 'Missing user id' });
+    return safeJson(res, { error: 'Missing user id' }, 401);
   }
 
   if (!process.env.GEMINI_API_KEY) {
-    return res.status(500).json({ error: 'GEMINI_API_KEY is not configured on the server.' });
+    return safeJson(res, { error: 'GEMINI_API_KEY is not configured on the server.' }, 500);
   }
 
   try {
+    const userPrompt = prompt.trim();
+    const enhanceOptions = {
+      creativity: Number((req.body as any)?.creativity ?? 0.3),
+      modelFormat: deriveModelFormatFromEnv(),
+      aspectRatio: '1:1' as const,
+    };
+    const { promptForModel } = maybeEnhancePrompt(userPrompt, enhanceOptions, 'generate-views');
     const grid = computeGrid(views.length);
     const tileWidth = Math.max(64, Math.floor(resolution / grid.columns));
     const tileHeight = Math.max(64, Math.floor(resolution / grid.rows));
+    const sampleModelText = buildViewPrompt(promptForModel, style, views[0], tileWidth, tileHeight);
+    assertPromptEnhancerSelectionDevOnly({ label: 'generate-views', userPrompt, promptForModel, modelText: sampleModelText });
 
     const tiles = await Promise.all(
-      views.map((view) => generateViewImage(prompt.trim(), style, view, tileWidth, tileHeight))
+      views.map((view) => generateViewImage(promptForModel, style, view, tileWidth, tileHeight))
     );
 
     const composite = await composeComposite(tiles, grid.columns, grid.rows, tileWidth, tileHeight);
@@ -3710,39 +3891,35 @@ app.post('/api/generate-views', async (req: Request, res: Response) => {
     let designId: string | undefined;
 
     if (autoSave) {
-      designId = await saveDesign({
-        title,
-        userId: userId!.trim(),
-        prompt: prompt.trim(),
-        style,
-        resolution,
-        views,
-        composite: composite.dataUrl,
-        images: tiles.map((tile) => ({ view: tile.view, src: tile.dataUrl })),
-      });
+      designId = await saveDesign(
+        buildSaveDesignPayload({
+          title,
+          userId: userId!.trim(),
+          prompt: userPrompt,
+          style,
+          resolution,
+          views,
+          composite: composite.dataUrl,
+          images: tiles.map((tile) => ({ view: tile.view, src: tile.dataUrl })),
+        }) as any
+      );
     }
 
-    res.json({
-      composite: composite.dataUrl,
-      images: tiles.map((tile) => ({
-        view: tile.view,
-        src: tile.dataUrl,
-      })),
-      compositePngBase64: composite.buffer.toString('base64'),
-      parts: tiles.map((tile) => ({
-        view: tile.view,
-        base64: tile.dataUrl.replace(/^data:image\/png;base64,/, ''),
-      })),
-      meta: {
-        dimensions: composite.dimensions,
-        grid: { ...grid, tileWidth, tileHeight },
+    return safeJson(
+      res,
+      buildGenerateViewsResponse({
+        composite,
+        tiles,
+        grid,
+        tileWidth,
+        tileHeight,
         viewOrder: views,
-      },
-      designId,
-    });
+        designId,
+      })
+    );
   } catch (err: any) {
     console.error('Gemini error:', err);
-    res.status(500).json({ error: mapGeminiError(err) });
+    return safeJson(res, { error: mapGeminiError(err) }, 500);
   }
 });
 
@@ -3754,27 +3931,30 @@ app.post('/api/generate-product-titles', async (req: Request, res: Response) => 
     const requestedCount = Number.isFinite(countRaw) ? Math.round(countRaw) : 120;
     const count = Math.min(120, Math.max(50, requestedCount));
 
-    if (!productName) return res.status(400).json({ error: 'productName is required.' });
+    if (!productName) return safeJson(res, { error: 'productName is required.' }, 400);
 
-    const perBatch = Math.max(10, Math.ceil(count / 4));
-    const batches = 4;
+    const batches = 2;
+    const perBatch = Math.max(10, Math.ceil(count / batches));
     const all: string[] = [];
 
     for (let i = 0; i < batches; i += 1) {
       const prompt = buildTitlesPrompt({ productName, category: category || undefined, count: perBatch });
       const parsed = await generateTextJsonWithModelFallback<{ titles: unknown }>('generate-product-titles', prompt);
 
-      const titles = normalizeLines(parsed?.titles, 140);
+      const titlesRaw = normalizeLines(parsed?.titles, 180);
+      const titles = titlesRaw
+        .map((t) => trimDanglingTailWordsForTitle(trimIfLooksCutAtLimit(t, 120)))
+        .filter((t) => t.length >= 60);
       all.push(...titles);
-      await sleep(120);
+      await sleep(900);
     }
 
     const titles = uniqStable(all).slice(0, count);
-    if (titles.length === 0) return res.status(502).json({ error: 'Gemini returned no titles.' });
-    res.json({ titles });
+    if (titles.length === 0) return safeJson(res, { error: 'Gemini returned no titles.' }, 502);
+    return safeJson(res, { titles });
   } catch (err: any) {
     console.error('Generate product titles error:', err);
-    res.status(500).json({ error: mapGeminiError(err) });
+    return safeJson(res, { error: mapGeminiError(err) }, 500);
   }
 });
 
@@ -3786,27 +3966,28 @@ app.post('/api/generate-product-keywords', async (req: Request, res: Response) =
     const requestedCount = Number.isFinite(countRaw) ? Math.round(countRaw) : 350;
     const count = Math.min(350, Math.max(100, requestedCount));
 
-    if (!productName) return res.status(400).json({ error: 'productName is required.' });
+    if (!productName) return safeJson(res, { error: 'productName is required.' }, 400);
 
-    const perBatch = 100;
-    const batches = 4;
+    const batches = 2;
+    const perBatch = Math.max(50, Math.ceil(count / batches));
     const all: string[] = [];
 
     for (let i = 0; i < batches; i += 1) {
       const prompt = buildKeywordsPrompt({ productName, category: category || undefined, count: perBatch });
       const parsed = await generateTextJsonWithModelFallback<{ keywords: unknown }>('generate-product-keywords', prompt);
 
-      const keywords = normalizeLines(parsed?.keywords, 80);
+      const keywordsRaw = normalizeLines(parsed?.keywords, 120);
+      const keywords = keywordsRaw.map((k) => trimIfLooksCutAtLimit(k, 60)).filter(Boolean);
       all.push(...keywords);
-      await sleep(120);
+      await sleep(900);
     }
 
     const keywords = uniqStable(all).slice(0, count);
-    if (keywords.length === 0) return res.status(502).json({ error: 'Gemini returned no keywords.' });
-    res.json({ keywords });
+    if (keywords.length === 0) return safeJson(res, { error: 'Gemini returned no keywords.' }, 502);
+    return safeJson(res, { keywords });
   } catch (err: any) {
     console.error('Generate product keywords error:', err);
-    res.status(500).json({ error: mapGeminiError(err) });
+    return safeJson(res, { error: mapGeminiError(err) }, 500);
   }
 });
 
@@ -3819,60 +4000,93 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
       : resolution;
 
   if (!prompt || !prompt.trim()) {
-    return res.status(400).json({ error: 'Prompt is required.' });
+    return safeJson(res, { error: 'Prompt is required.' }, 400);
   }
 
   if (!style || !(style in styleModifiers) || !allowedBaseStyles.has(style)) {
-    return res.status(400).json({ error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' });
+    return safeJson(res, { error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' }, 400);
   }
 
   if (!requestedResolution || !allowedResolutions.has(requestedResolution)) {
-    return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
+    return safeJson(res, { error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` }, 400);
   }
 
   try {
+    const userPrompt = prompt.trim();
     const referenceInlineData = referenceImageBase64
       ? inlineDataFromAnyImageBase64({ base64: referenceImageBase64, mimeType: referenceImageMimeType })
       : null;
-    const forceWhite = shouldForceWhiteBackgroundFromPrompt(prompt.trim());
+    const forceWhite = shouldForceWhiteBackgroundFromPrompt(userPrompt);
+    const enhanceOptions = {
+      creativity: Number((req.body as any)?.creativity ?? 0.3),
+      modelFormat: deriveModelFormatFromEnv(),
+      aspectRatio: inferAspectRatio(Number(width), Number(height)),
+    };
+    const { promptForModel } = maybeEnhancePrompt(userPrompt, enhanceOptions, 'generate-base');
+    const modelTextPrimary = [
+      buildBasePrompt(promptForModel, style, requestedResolution, forceWhite),
+      referenceInlineData
+        ? 'Reference image provided: use it as a visual design reference. Preserve the same design identity while generating the front view.'
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+    assertPromptEnhancerSelectionDevOnly({ label: 'generate-base', userPrompt, promptForModel, modelText: modelTextPrimary });
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: [
-                buildBasePrompt(prompt.trim(), style, requestedResolution),
-                referenceInlineData
-                  ? 'Reference image provided: use it as a visual design reference. Preserve the same design identity while generating the front view.'
-                  : '',
-              ]
-                .filter(Boolean)
-                .join(' '),
-            },
-            ...(referenceInlineData ? [{ inlineData: referenceInlineData }] : []),
-          ],
-        },
-      ],
+    const promptForModelFallback = stripNegativePromptLine(promptForModel);
+    const modelTextFallback = [
+      buildBasePrompt(promptForModelFallback, style, requestedResolution, forceWhite),
+      'IMPORTANT: Return an IMAGE only (no text).',
+      referenceInlineData
+        ? 'Reference image provided: use it as a visual design reference. Preserve the same design identity while generating the front view.'
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+    const callGemini = async (modelText: string) =>
+      await ai.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        // Hint to the API that we expect an image response.
+        // (If unsupported, the SDK will ignore unknown config fields.)
+        config: { responseModalities: ['IMAGE'] } as any,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              ...(referenceInlineData ? [{ inlineData: referenceInlineData }] : []),
+              { text: modelText },
+            ],
+          },
+        ],
+      });
+
+    const primaryResponse = await generateContentWithRetry('generate-base', () => callGemini(modelTextPrimary), {
+      attempts: 2,
+      baseDelayMs: 450,
     });
 
-    const parts = (response as any)?.candidates?.[0]?.content?.parts;
-    const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
-
+    let imagePart = extractGeminiInlineImagePart(primaryResponse);
     if (!imagePart?.data) {
-      throw new Error('Gemini response did not include an image.');
+      const fallbackResponse = await generateContentWithRetry('generate-base:fallback', () => callGemini(modelTextFallback), {
+        attempts: 2,
+        baseDelayMs: 650,
+      });
+      imagePart = extractGeminiInlineImagePart(fallbackResponse);
+      if (!imagePart?.data) {
+        const text = extractGeminiTextParts(fallbackResponse) || extractGeminiTextParts(primaryResponse);
+        throw new Error(`Gemini response did not include an image.${text ? ` Model said: ${text}` : ''}`);
+      }
     }
 
     let baseImage = await normalizeGeminiOutputPngBase64(String(imagePart.data), requestedResolution, { background: WHITE_BG });
     if (forceWhite) {
       baseImage = await ensureSolidWhiteBackgroundStrict(baseImage);
     }
-    return res.json({ baseImage });
+    return safeJson(res, { baseImage });
   } catch (err: any) {
     console.error('Generate base error:', err);
-    return res.status(500).json({ error: mapGeminiError(err) });
+    return safeJson(res, { error: mapGeminiError(err) }, 500);
   }
 });
 
@@ -3889,27 +4103,53 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
       : resolution;
 
   if (!baseImageBase64 || typeof baseImageBase64 !== 'string') {
-    return res.status(400).json({ error: 'baseImageBase64 is required.' });
+    return safeJson(res, { error: 'baseImageBase64 is required.' }, 400);
   }
 
   if (!style || !(style in styleModifiers) || !allowedBaseStyles.has(style)) {
-    return res.status(400).json({ error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' });
+    return safeJson(res, { error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' }, 400);
   }
 
   if (!views.length) {
-    return res.status(400).json({ error: 'At least one view must be selected.' });
+    return safeJson(res, { error: 'At least one view must be selected.' }, 400);
   }
 
   // Ensure every incoming view is supported (normalized from UI labels/variants).
   const invalidView = viewsRaw.find((v: any) => !normalizeIncomingViewKey(v));
-  if (invalidView) return res.status(400).json({ error: `Invalid view: ${String(invalidView)}` });
+  if (invalidView) return safeJson(res, { error: `Invalid view: ${String(invalidView)}` }, 400);
 
   if (!requestedResolution || !allowedResolutions.has(requestedResolution)) {
-    return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
+    return safeJson(res, { error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` }, 400);
   }
 
   try {
-    const forceWhite = shouldForceWhiteBackgroundFromPrompt((prompt || '').trim());
+    const userPrompt = (prompt || '').trim();
+    const forceWhite = shouldForceWhiteBackgroundFromPrompt(userPrompt);
+    const enhanceOptions = {
+      creativity: Number((req.body as any)?.creativity ?? 0.3),
+      modelFormat: deriveModelFormatFromEnv(),
+      aspectRatio: inferAspectRatio(Number(width), Number(height)),
+    };
+    const { promptForModel } = userPrompt
+      ? maybeEnhancePrompt(userPrompt, enhanceOptions, 'generate-views-from-base')
+      : { promptForModel: userPrompt };
+    if (userPrompt) {
+      const sampleModelText = buildViewFromBasePrompt(
+        style,
+        views[0],
+        requestedResolution,
+        requestedResolution,
+        promptForModel,
+        undefined,
+        forceWhite
+      );
+      assertPromptEnhancerSelectionDevOnly({
+        label: 'generate-views-from-base',
+        userPrompt,
+        promptForModel,
+        modelText: sampleModelText,
+      });
+    }
     const tileBackground = WHITE_BG;
     const grid = computeGrid(views.length);
     const tileWidth = Math.max(64, Math.floor(requestedResolution / grid.columns));
@@ -3945,9 +4185,9 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
           view,
           requestedResolution,
           requestedResolution,
-          prompt,
+          promptForModel,
           undefined,
-          { background: tileBackground }
+          { background: tileBackground, forceWhiteOverride: forceWhite }
         );
         const outBuf = forceWhite
           ? Buffer.from(await ensureSolidWhiteBackgroundStrict(generated.buffer.toString('base64')), 'base64')
@@ -3988,9 +4228,9 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
             'right',
             requestedResolution,
             requestedResolution,
-            prompt,
+            promptForModel,
             "This MUST be the RIGHT side view (opposite side from the LEFT). Do NOT reuse the left-side angle. Do NOT mirror the design. Only change camera angle. Ensure the garment's front points to the LEFT in the frame.",
-            { background: tileBackground }
+            { background: tileBackground, forceWhiteOverride: forceWhite }
           );
           const outBuf = forceWhite
             ? Buffer.from(await ensureSolidWhiteBackgroundStrict(regenerated.buffer.toString('base64')), 'base64')
@@ -4023,7 +4263,7 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
       background: tileBackground,
     });
 
-    return res.json({
+    return safeJson(res, {
       compositeBase64: composite.buffer.toString('base64'),
       images: fullImages.map((tile) => ({ view: tile.view, imageBase64: tile.buffer.toString('base64') })),
       meta: {
@@ -4034,7 +4274,7 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
     });
   } catch (err: any) {
     console.error('Generate views from base error:', err);
-    return res.status(500).json({ error: mapGeminiError(err) });
+    return safeJson(res, { error: mapGeminiError(err) }, 500);
   }
 });
 
@@ -4042,11 +4282,11 @@ app.post('/api/generate-uniform', async (req: Request, res: Response) => {
   const { prompt, resolution } = req.body as GenerateUniformRequestBody;
 
   if (!prompt || !prompt.trim()) {
-    return res.status(400).json({ error: 'Prompt is required.' });
+    return safeJson(res, { error: 'Prompt is required.' }, 400);
   }
 
   if (!resolution || !allowedResolutions.has(resolution)) {
-    return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
+    return safeJson(res, { error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` }, 400);
   }
 
   try {
@@ -4078,10 +4318,10 @@ app.post('/api/generate-uniform', async (req: Request, res: Response) => {
     if (!backInline?.data) throw new Error('Gemini response did not include a back image.');
     const back = await normalizeGeminiOutputPngBase64(String(backInline.data), resolution);
 
-    return res.json({ front, back });
+    return safeJson(res, { front, back });
   } catch (err: any) {
     console.error('Generate uniform error:', err);
-    return res.status(500).json({ error: mapGeminiError(err) });
+    return safeJson(res, { error: mapGeminiError(err) }, 500);
   }
 });
 
@@ -4097,15 +4337,15 @@ app.post('/api/uniform/generate-composite', async (req: Request, res: Response) 
     .map((v: string) => v.trim() as UniformViewKey)
     .filter((v: UniformViewKey) => allowedUniformViews.has(v));
 
-  if (!prompt) return res.status(400).json({ error: 'Prompt is required.' });
+  if (!prompt) return safeJson(res, { error: 'Prompt is required.' }, 400);
   if (!resolution || !allowedResolutions.has(resolution)) {
-    return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
+    return safeJson(res, { error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` }, 400);
   }
   if (!allowedBaseStyles.has(styleKey)) {
-    return res.status(400).json({ error: 'Invalid styleKey. Allowed: line_art, watercolor, realistic, 3d_render.' });
+    return safeJson(res, { error: 'Invalid styleKey. Allowed: line_art, watercolor, realistic, 3d_render.' }, 400);
   }
-  if (!views.length) return res.status(400).json({ error: 'Select at least one view.' });
-  if (views.length > 4) return res.status(400).json({ error: 'Maximum 4 views supported.' });
+  if (!views.length) return safeJson(res, { error: 'Select at least one view.' }, 400);
+  if (views.length > 4) return safeJson(res, { error: 'Maximum 4 views supported.' }, 400);
 
   try {
     const referenceInlineData = referenceImageBase64 ? pngBase64ToInlineData(referenceImageBase64) : null;
@@ -4149,10 +4389,10 @@ app.post('/api/uniform/generate-composite', async (req: Request, res: Response) 
 
     const normalizedComposite = await normalizeGeminiOutputPngBase64(String(imagePart.data), resolution);
     const out = await cropCompositeToTiles({ compositePngBase64: normalizedComposite, resolution, views });
-    return res.json(out);
+    return safeJson(res, out);
   } catch (err: any) {
     console.error('Uniform composite generation error:', err);
-    return res.status(500).json({ error: mapGeminiError(err) });
+    return safeJson(res, { error: mapGeminiError(err) }, 500);
   }
 });
 
@@ -4166,14 +4406,14 @@ app.post('/api/uniform/convert-style', async (req: Request, res: Response) => {
     .map((v: string) => v.trim() as UniformViewKey)
     .filter((v: UniformViewKey) => allowedUniformViews.has(v));
 
-  if (!compositeBase64) return res.status(400).json({ error: 'compositeBase64 is required.' });
+  if (!compositeBase64) return safeJson(res, { error: 'compositeBase64 is required.' }, 400);
   if (!resolution || !allowedResolutions.has(resolution)) {
-    return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
+    return safeJson(res, { error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` }, 400);
   }
   if (!styleKey || !allowedBaseStyles.has(styleKey)) {
-    return res.status(400).json({ error: 'Invalid styleKey. Allowed: line_art, watercolor, realistic, 3d_render.' });
+    return safeJson(res, { error: 'Invalid styleKey. Allowed: line_art, watercolor, realistic, 3d_render.' }, 400);
   }
-  if (!views.length) return res.status(400).json({ error: 'views is required.' });
+  if (!views.length) return safeJson(res, { error: 'views is required.' }, 400);
 
   try {
     const inlineData = pngBase64ToInlineData(compositeBase64);
@@ -4188,10 +4428,10 @@ app.post('/api/uniform/convert-style', async (req: Request, res: Response) => {
 
     const normalizedComposite = await normalizeGeminiOutputPngBase64(String(imagePart.data), resolution);
     const out = await cropCompositeToTiles({ compositePngBase64: normalizedComposite, resolution, views });
-    return res.json(out);
+    return safeJson(res, out);
   } catch (err: any) {
     console.error('Uniform convert style error:', err);
-    return res.status(500).json({ error: mapGeminiError(err) });
+    return safeJson(res, { error: mapGeminiError(err) }, 500);
   }
 });
 
@@ -4205,14 +4445,14 @@ app.post('/api/uniform/convert-model', async (req: Request, res: Response) => {
     .map((v: string) => v.trim() as UniformViewKey)
     .filter((v: UniformViewKey) => allowedUniformViews.has(v));
 
-  if (!compositeBase64) return res.status(400).json({ error: 'compositeBase64 is required.' });
+  if (!compositeBase64) return safeJson(res, { error: 'compositeBase64 is required.' }, 400);
   if (!resolution || !allowedResolutions.has(resolution)) {
-    return res.status(400).json({ error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` });
+    return safeJson(res, { error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` }, 400);
   }
   if (modelKey !== 'male' && modelKey !== 'female') {
-    return res.status(400).json({ error: 'Invalid modelKey. Allowed: male, female.' });
+    return safeJson(res, { error: 'Invalid modelKey. Allowed: male, female.' }, 400);
   }
-  if (!views.length) return res.status(400).json({ error: 'views is required.' });
+  if (!views.length) return safeJson(res, { error: 'views is required.' }, 400);
 
   try {
     const inlineData = pngBase64ToInlineData(compositeBase64);
@@ -4229,10 +4469,10 @@ app.post('/api/uniform/convert-model', async (req: Request, res: Response) => {
 
     const normalizedComposite = await normalizeGeminiOutputPngBase64(String(imagePart.data), resolution);
     const out = await cropCompositeToTiles({ compositePngBase64: normalizedComposite, resolution, views });
-    return res.json(out);
+    return safeJson(res, out);
   } catch (err: any) {
     console.error('Uniform convert model error:', err);
-    return res.status(500).json({ error: mapGeminiError(err) });
+    return safeJson(res, { error: mapGeminiError(err) }, 500);
   }
 });
 
@@ -4241,7 +4481,7 @@ app.post('/api/convert-style', async (req: Request, res: Response) => {
   const normalizedStyle = normalizeIncomingStyleKey(styleKey);
 
   if (!normalizedStyle || !allowedBaseStyles.has(normalizedStyle)) {
-    return res.status(400).json({ error: 'Invalid styleKey. Allowed: line_art, watercolor, realistic, 3d_render.' });
+    return safeJson(res, { error: 'Invalid styleKey. Allowed: line_art, watercolor, realistic, 3d_render.' }, 400);
   }
 
   const fallbackImages: Array<{ view: ViewKey; imageBase64: string }> = [];
@@ -4257,16 +4497,16 @@ app.post('/api/convert-style', async (req: Request, res: Response) => {
       imageBase64: String(it.imageBase64 || '').trim(),
     }));
 
-  if (!incomingParsed.length) return res.status(400).json({ error: 'images is required.' });
+  if (!incomingParsed.length) return safeJson(res, { error: 'images is required.' }, 400);
 
   const invalidViews = incomingParsed.filter((it) => !it.view).map((it) => String(it.rawView));
   if (invalidViews.length) {
-    return res.status(400).json({ error: `Invalid view(s): ${invalidViews.join(', ')}` });
+    return safeJson(res, { error: `Invalid view(s): ${invalidViews.join(', ')}` }, 400);
   }
 
   const emptyImages = incomingParsed.filter((it) => !it.imageBase64).map((it) => String(it.view));
   if (emptyImages.length) {
-    return res.status(400).json({ error: `Missing imageBase64 for view(s): ${emptyImages.join(', ')}` });
+    return safeJson(res, { error: `Missing imageBase64 for view(s): ${emptyImages.join(', ')}` }, 400);
   }
 
   const incoming = incomingParsed.map((it) => ({ view: it.view as ViewKey, imageBase64: it.imageBase64 }));
@@ -4358,10 +4598,10 @@ app.post('/api/convert-style', async (req: Request, res: Response) => {
         return await retryConversion(original, it.view, originalHasAlpha, target);
       })
     );
-    return res.json({ converted });
+    return safeJson(res, { converted });
   } catch (err: any) {
     console.error('Convert style error:', err);
-    return res.status(500).json({ error: mapGeminiError(err) });
+    return safeJson(res, { error: mapGeminiError(err) }, 500);
   }
 });
 
@@ -4376,7 +4616,7 @@ app.post('/api/convert-model', async (req: Request, res: Response) => {
   const style = styleRaw.trim().toLowerCase();
 
   if (!modelKey || (modelKey !== 'male' && modelKey !== 'female')) {
-    return res.status(400).json({ error: 'Invalid modelKey. Allowed: male, female.' });
+    return safeJson(res, { error: 'Invalid modelKey. Allowed: male, female.' }, 400);
   }
   if (
     style &&
@@ -4386,7 +4626,7 @@ app.post('/api/convert-model', async (req: Request, res: Response) => {
     style !== 'lineart' &&
     style !== 'watercolor'
   ) {
-    return res.status(400).json({ error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' });
+    return safeJson(res, { error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' }, 400);
   }
 
   const fallbackImages: Array<{ view: ViewKey; imageBase64: string }> = [];
@@ -4402,28 +4642,35 @@ app.post('/api/convert-model', async (req: Request, res: Response) => {
       imageBase64: String(it.imageBase64 || '').trim(),
     }));
 
-  if (!incomingParsed.length) return res.status(400).json({ error: 'images is required.' });
+  if (!incomingParsed.length) return safeJson(res, { error: 'images is required.' }, 400);
 
   const invalidViews = incomingParsed.filter((it) => !it.view).map((it) => String(it.rawView));
   if (invalidViews.length) {
-    return res.status(400).json({ error: `Invalid view(s): ${invalidViews.join(', ')}` });
+    return safeJson(res, { error: `Invalid view(s): ${invalidViews.join(', ')}` }, 400);
   }
 
   const emptyImages = incomingParsed.filter((it) => !it.imageBase64).map((it) => String(it.view));
   if (emptyImages.length) {
-    return res.status(400).json({ error: `Missing imageBase64 for view(s): ${emptyImages.join(', ')}` });
+    return safeJson(res, { error: `Missing imageBase64 for view(s): ${emptyImages.join(', ')}` }, 400);
   }
 
   const incoming = incomingParsed.map((it) => ({ view: it.view as ViewKey, imageBase64: it.imageBase64 }));
 
   try {
     const incomingFrontBack = incoming.filter((it) => it?.view === 'front' || it?.view === 'back');
-    if (!incomingFrontBack.length) return res.status(400).json({ error: 'images must include front and/or back.' });
+    if (!incomingFrontBack.length) return safeJson(res, { error: 'images must include front and/or back.' }, 400);
 
     const promptForView = (view: ViewKey) => {
       // Model previews should always be generated as realistic photography (never CGI/3D),
       // regardless of the selected generation/style in the UI.
-      return view === 'back' ? modelBackPrompt(modelKey) : modelFrontPrompt(modelKey);
+      const constraints =
+        (view === 'front' || view === 'back')
+          ? buildTryOnModelViewConstraints(view)
+          : '';
+      if (constraints && isPromptEnhancerDebug() && !isProductionEnv()) {
+        console.log('[ConvertModel]', { modelKey, view, referenceImageIncluded: true, constraints });
+      }
+      return view === 'back' ? modelBackPrompt(modelKey, constraints) : modelFrontPrompt(modelKey, constraints);
     };
 
     const convertOne = async (pngBase64: string, view: ViewKey, target: { width: number; height: number }) => {
@@ -4448,7 +4695,12 @@ app.post('/api/convert-model', async (req: Request, res: Response) => {
               : '';
           const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash-image',
-            contents: [{ role: 'user', parts: [{ text: [basePrompt, extra].filter(Boolean).join(' ') }, { inlineData }] }],
+            contents: [
+              {
+                role: 'user',
+                parts: [{ inlineData }, { text: [basePrompt, extra].filter(Boolean).join(' ') }],
+              },
+            ],
           });
 
           const parts = (response as any)?.candidates?.[0]?.content?.parts;
@@ -4485,16 +4737,16 @@ app.post('/api/convert-model', async (req: Request, res: Response) => {
         return { view: it.view, imageBase64: await convertOne(input, it.view, target) };
       })
     );
-    return res.json({ converted });
+    return safeJson(res, { converted });
   } catch (err: any) {
     console.error('Convert model error:', err);
-    return res.status(500).json({ error: mapGeminiError(err) });
+    return safeJson(res, { error: mapGeminiError(err) }, 500);
   }
 });
 
 app.post('/api/export', jsonLarge, async (req: Request, res: Response) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   try {
     cleanupExportSessions();
@@ -4502,16 +4754,16 @@ app.post('/api/export', jsonLarge, async (req: Request, res: Response) => {
     const format: ExportFormat = formatRaw === 'pdf' ? 'pdf' : formatRaw === 'composite' ? 'composite' : 'zip';
     const items: ExportItem[] = Array.isArray(req.body?.items) ? req.body.items : [];
 
-    if (!items.length) return res.status(400).json({ error: 'items must be a non-empty array.' });
+    if (!items.length) return safeJson(res, { error: 'items must be a non-empty array.' }, 400);
     const invalid = items.find((it: any) => !it?.name || typeof it.name !== 'string' || typeof it.imageBase64 !== 'string');
-    if (invalid) return res.status(400).json({ error: 'Each item must include { name, imageBase64 }.' });
+    if (invalid) return safeJson(res, { error: 'Each item must include { name, imageBase64 }.' }, 400);
 
     const exportId = randomUUID();
     exportSessions.set(exportId, { userId, format, items, createdAt: Date.now() });
-    return res.json({ exportId, url: `/api/export?exportId=${exportId}&uid=${encodeURIComponent(userId)}` });
+    return safeJson(res, { exportId, url: `/api/export?exportId=${exportId}&uid=${encodeURIComponent(userId)}` });
   } catch (err: any) {
     console.error('Export init error:', err);
-    return res.status(500).json({ error: err?.message || 'Failed to prepare export.' });
+    return safeJson(res, { error: err?.message || 'Failed to prepare export.' }, 500);
   }
 });
 
@@ -4519,15 +4771,15 @@ app.get('/api/export', async (req: Request, res: Response) => {
   const headerUserId = (req.headers['x-user-id'] as string | undefined)?.trim();
   const queryUserId = typeof req.query.uid === 'string' ? req.query.uid.trim() : '';
   const userId = headerUserId || queryUserId;
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   try {
     cleanupExportSessions();
     const exportId = typeof req.query.exportId === 'string' ? req.query.exportId.trim() : '';
-    if (!exportId) return res.status(400).json({ error: 'exportId is required.' });
+    if (!exportId) return safeJson(res, { error: 'exportId is required.' }, 400);
 
     const sess = exportSessions.get(exportId);
-    if (!sess || sess.userId !== userId) return res.status(404).json({ error: 'Export not found.' });
+    if (!sess || sess.userId !== userId) return safeJson(res, { error: 'Export not found.' }, 404);
 
     const items = sess.items;
 
@@ -4600,7 +4852,7 @@ app.get('/api/export', async (req: Request, res: Response) => {
     res.end(Buffer.from(bytes));
   } catch (err: any) {
     console.error('Export error:', err);
-    if (!res.headersSent) res.status(500).json({ error: err?.message || 'Export failed.' });
+    if (!res.headersSent) safeJson(res, { error: err?.message || 'Export failed.' }, 500);
   }
 });
 
@@ -4608,9 +4860,9 @@ app.get('/api/sam2/health', async (_req: Request, res: Response) => {
   try {
     const response = await fetchWithTimeout(`${SAM2_SERVICE_URL}/health`, {}, 5000);
     const payload = await response.json().catch(() => ({}));
-    res.status(response.ok ? 200 : 500).json(payload);
+    return safeJson(res, payload, response.ok ? 200 : 500);
   } catch (err) {
-    res.status(502).json({ ok: false, error: 'SAM2 service offline' });
+    return safeJson(res, { ok: false, error: 'SAM2 service offline' }, 502);
   }
 });
 
@@ -4630,7 +4882,7 @@ app.post('/api/sam2/color-layers-dynamic', async (req: Request, res: Response) =
     const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
 
     if (!isImageDataUrl(imageDataUrl)) {
-      return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
+      return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' }, 400);
     }
     assertDataUrlSize(imageDataUrl);
 
@@ -4652,13 +4904,13 @@ app.post('/api/sam2/color-layers-dynamic', async (req: Request, res: Response) =
 
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      return res.status(502).json({
+      return safeJson(res, {
         ok: false,
         error: payload?.detail || payload?.error || 'Layer detection failed.',
-      });
+      }, 502);
     }
 
-    return res.json({
+    return safeJson(res, {
       ok: true,
       width: payload?.width,
       height: payload?.height,
@@ -4679,7 +4931,7 @@ app.post('/api/sam2/color-layers-dynamic', async (req: Request, res: Response) =
       const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
 
       if (!isImageDataUrl(imageDataUrl)) {
-        return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
+        return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' }, 400);
       }
       assertDataUrlSize(imageDataUrl);
 
@@ -4691,7 +4943,7 @@ app.post('/api/sam2/color-layers-dynamic', async (req: Request, res: Response) =
         seed,
       });
 
-      return res.json({
+      return safeJson(res, {
         ok: true,
         width: fallback.width,
         height: fallback.height,
@@ -4706,7 +4958,7 @@ app.post('/api/sam2/color-layers-dynamic', async (req: Request, res: Response) =
             ? 'SAM2 service is offline. Run `npm run dev:all` or start `sam2_service`.'
             : err?.message || 'Failed to reach SAM2 service.';
       const details = fallbackErr?.message ? ` Fallback also failed: ${fallbackErr.message}` : '';
-      return res.status(502).json({ ok: false, error: `${message}${details}`.trim() });
+      return safeJson(res, { ok: false, error: `${message}${details}`.trim() }, 502);
     }
   }
 });
@@ -4727,7 +4979,7 @@ app.post('/api/sam2/color-layers', async (req: Request, res: Response) => {
     const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
 
     if (!isImageDataUrl(imageDataUrl)) {
-      return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
+      return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' }, 400);
     }
     assertDataUrlSize(imageDataUrl);
 
@@ -4739,13 +4991,13 @@ app.post('/api/sam2/color-layers', async (req: Request, res: Response) => {
 
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      return res.status(502).json({
+      return safeJson(res, {
         ok: false,
         error: payload?.detail || payload?.error || 'Layer detection failed. Try a simpler image or increase contrast.',
-      });
+      }, 502);
     }
 
-    res.json({
+    return safeJson(res, {
       ok: true,
       width: payload?.width,
       height: payload?.height,
@@ -4764,12 +5016,12 @@ app.post('/api/sam2/color-layers', async (req: Request, res: Response) => {
       const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
 
       if (!isImageDataUrl(imageDataUrl)) {
-        return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
+        return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' }, 400);
       }
       assertDataUrlSize(imageDataUrl);
 
       const fallback = await fallbackKmeansColorLayers({ imageDataUrl, numLayers, blur, seed });
-      return res.json({
+      return safeJson(res, {
         ok: true,
         width: fallback.width,
         height: fallback.height,
@@ -4784,7 +5036,7 @@ app.post('/api/sam2/color-layers', async (req: Request, res: Response) => {
             ? 'SAM2 service is offline. Run `npm run dev:all` or start `sam2_service`.'
             : err?.message || 'Failed to reach SAM2 service.';
       const details = fallbackErr?.message ? ` Fallback also failed: ${fallbackErr.message}` : '';
-      return res.status(502).json({ ok: false, error: `${message}${details}`.trim() });
+      return safeJson(res, { ok: false, error: `${message}${details}`.trim() }, 502);
     }
   }
 });
@@ -4793,7 +5045,7 @@ app.post('/api/sam2/auto', async (req: Request, res: Response) => {
   try {
     const imageDataUrl = typeof req.body?.imageDataUrl === 'string' ? req.body.imageDataUrl.trim() : '';
     if (!isImageDataUrl(imageDataUrl)) {
-      return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
+      return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' }, 400);
     }
     assertDataUrlSize(imageDataUrl);
 
@@ -4805,19 +5057,19 @@ app.post('/api/sam2/auto', async (req: Request, res: Response) => {
 
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      return res.status(502).json({
+      return safeJson(res, {
         ok: false,
         error: payload?.detail || payload?.error || 'Automatic segmentation failed.',
-      });
+      }, 502);
     }
 
-    res.json({ ok: true, masks: Array.isArray(payload?.masks) ? payload.masks : [] });
+    return safeJson(res, { ok: true, masks: Array.isArray(payload?.masks) ? payload.masks : [] });
   } catch (err: any) {
     console.error('SAM2 auto proxy error:', err);
     const message = err?.name === 'AbortError'
       ? 'SAM2 service timed out. Is the Python service running?'
       : err?.message || 'Failed to reach SAM2 service.';
-    res.status(502).json({ ok: false, error: message });
+    return safeJson(res, { ok: false, error: message }, 502);
   }
 });
 
@@ -4828,10 +5080,10 @@ app.post('/api/sam2/object-from-point', async (req: Request, res: Response) => {
     const y = Number(req.body?.y);
 
     if (!isImageDataUrl(imageDataUrl)) {
-      return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
+      return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' }, 400);
     }
     if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) {
-      return res.status(400).json({ ok: false, error: 'x and y must be normalized coordinates (0..1).' });
+      return safeJson(res, { ok: false, error: 'x and y must be normalized coordinates (0..1).' }, 400);
     }
     assertDataUrlSize(imageDataUrl);
 
@@ -4847,13 +5099,13 @@ app.post('/api/sam2/object-from-point', async (req: Request, res: Response) => {
 
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      return res.status(502).json({
+      return safeJson(res, {
         ok: false,
         error: payload?.detail || payload?.error || 'Object selection failed.',
-      });
+      }, 502);
     }
 
-    res.json({ ok: true, objectMaskDataUrl: payload?.objectMaskDataUrl });
+    return safeJson(res, { ok: true, objectMaskDataUrl: payload?.objectMaskDataUrl });
   } catch (err: any) {
     console.error('SAM2 object-from-point proxy error:', err);
     try {
@@ -4861,14 +5113,14 @@ app.post('/api/sam2/object-from-point', async (req: Request, res: Response) => {
       const x = Number(req.body?.x);
       const y = Number(req.body?.y);
       if (!isImageDataUrl(imageDataUrl)) {
-        return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
+        return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' }, 400);
       }
       if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) {
-        return res.status(400).json({ ok: false, error: 'x and y must be normalized coordinates (0..1).' });
+        return safeJson(res, { ok: false, error: 'x and y must be normalized coordinates (0..1).' }, 400);
       }
       assertDataUrlSize(imageDataUrl);
       const objectMaskDataUrl = await fallbackObjectMaskFromPoint({ imageDataUrl, x, y });
-      return res.json({ ok: true, objectMaskDataUrl, sam2: { mode: 'node-region-grow', used: false } });
+      return safeJson(res, { ok: true, objectMaskDataUrl, sam2: { mode: 'node-region-grow', used: false } });
     } catch (fallbackErr: any) {
       const message =
         err?.name === 'AbortError'
@@ -4877,7 +5129,7 @@ app.post('/api/sam2/object-from-point', async (req: Request, res: Response) => {
             ? 'SAM2 service is offline. Run `npm run dev:all` or start `sam2_service`.'
             : err?.message || 'Failed to reach SAM2 service.';
       const details = fallbackErr?.message ? ` Fallback also failed: ${fallbackErr.message}` : '';
-      return res.status(502).json({ ok: false, error: `${message}${details}`.trim() });
+      return safeJson(res, { ok: false, error: `${message}${details}`.trim() }, 502);
     }
   }
 });
@@ -4894,10 +5146,10 @@ app.post('/api/sam2/split-colors-in-mask', async (req: Request, res: Response) =
     const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
 
     if (!isImageDataUrl(imageDataUrl)) {
-      return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
+      return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' }, 400);
     }
     if (!isPngDataUrl(objectMaskDataUrl)) {
-      return res.status(400).json({ ok: false, error: 'objectMaskDataUrl must be a PNG data URL.' });
+      return safeJson(res, { ok: false, error: 'objectMaskDataUrl must be a PNG data URL.' }, 400);
     }
     assertDataUrlSize(imageDataUrl);
     assertDataUrlSize(objectMaskDataUrl);
@@ -4914,13 +5166,13 @@ app.post('/api/sam2/split-colors-in-mask', async (req: Request, res: Response) =
 
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      return res.status(502).json({
+      return safeJson(res, {
         ok: false,
         error: payload?.detail || payload?.error || 'Color splitting failed.',
-      });
+      }, 502);
     }
 
-    res.json({ ok: true, layers: Array.isArray(payload?.layers) ? payload.layers : [] });
+    return safeJson(res, { ok: true, layers: Array.isArray(payload?.layers) ? payload.layers : [] });
   } catch (err: any) {
     console.error('SAM2 split-colors-in-mask proxy error:', err);
     try {
@@ -4934,10 +5186,10 @@ app.post('/api/sam2/split-colors-in-mask', async (req: Request, res: Response) =
       const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
 
       if (!isImageDataUrl(imageDataUrl)) {
-        return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' });
+        return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' }, 400);
       }
       if (!isPngDataUrl(objectMaskDataUrl)) {
-        return res.status(400).json({ ok: false, error: 'objectMaskDataUrl must be a PNG data URL.' });
+        return safeJson(res, { ok: false, error: 'objectMaskDataUrl must be a PNG data URL.' }, 400);
       }
       assertDataUrlSize(imageDataUrl);
       assertDataUrlSize(objectMaskDataUrl);
@@ -4949,7 +5201,7 @@ app.post('/api/sam2/split-colors-in-mask', async (req: Request, res: Response) =
         minAreaRatio,
         seed,
       });
-      return res.json({ ok: true, layers, sam2: { mode: 'node-kmeans', used: false } });
+      return safeJson(res, { ok: true, layers, sam2: { mode: 'node-kmeans', used: false } });
     } catch (fallbackErr: any) {
       const message =
         err?.name === 'AbortError'
@@ -4958,7 +5210,7 @@ app.post('/api/sam2/split-colors-in-mask', async (req: Request, res: Response) =
             ? 'SAM2 service is offline. Run `npm run dev:all` or start `sam2_service`.'
             : err?.message || 'Failed to reach SAM2 service.';
       const details = fallbackErr?.message ? ` Fallback also failed: ${fallbackErr.message}` : '';
-      return res.status(502).json({ ok: false, error: `${message}${details}`.trim() });
+      return safeJson(res, { ok: false, error: `${message}${details}`.trim() }, 502);
     }
   }
 });
@@ -4969,7 +5221,7 @@ app.post('/api/realistic/render', async (req: Request, res: Response) => {
     const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
 
     if (!isPngDataUrl(imageDataUrl)) {
-      return res.status(400).json({ ok: false, error: 'imageDataUrl must be a PNG data URL.' });
+      return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG data URL.' }, 400);
     }
     assertDataUrlSize(imageDataUrl);
 
@@ -5003,10 +5255,10 @@ app.post('/api/realistic/render', async (req: Request, res: Response) => {
       throw new Error('Gemini response did not include an image.');
     }
 
-    res.json({ imageDataUrl: `data:image/png;base64,${imagePart.data}` });
+    return safeJson(res, { imageDataUrl: `data:image/png;base64,${imagePart.data}` });
   } catch (err: any) {
     console.error('Realistic render error:', err);
-    res.status(500).json({ ok: false, error: mapGeminiError(err) });
+    return safeJson(res, { ok: false, error: mapGeminiError(err) }, 500);
   }
 });
 
@@ -5026,15 +5278,15 @@ app.post('/api/image/edit', async (req: Request, res: Response) => {
       .slice(0, 6);
 
     if (!imageDataUrl.startsWith('data:image/')) {
-      return res.status(400).json({ error: 'imageDataUrl must be a data:image/* data URL.' });
+      return safeJson(res, { error: 'imageDataUrl must be a data:image/* data URL.' }, 400);
     }
     if (!isImageDataUrl(imageDataUrl)) {
-      return res.status(400).json({ error: 'imageDataUrl must be a PNG, JPG, or WEBP data URL.' });
+      return safeJson(res, { error: 'imageDataUrl must be a PNG, JPG, or WEBP data URL.' }, 400);
     }
     assertEditDataUrlSize(imageDataUrl);
 
     if (!prompt) {
-      return res.status(400).json({ error: 'Prompt is required.' });
+      return safeJson(res, { error: 'Prompt is required.' }, 400);
     }
 
     const inlineData = dataUrlToInlineImageData(imageDataUrl);
@@ -5086,10 +5338,10 @@ app.post('/api/image/edit', async (req: Request, res: Response) => {
     }
 
     const cropped = await autoCropAndFitPng(Buffer.from(String(imagePart.data), 'base64'), targetSize, { mode: cropMode });
-    res.json({ imageDataUrl: `data:image/png;base64,${cropped.toString('base64')}` });
+    return safeJson(res, { imageDataUrl: `data:image/png;base64,${cropped.toString('base64')}` });
   } catch (err: any) {
     console.error('Image edit error:', err);
-    res.status(500).json({ error: mapGeminiError(err) });
+    return safeJson(res, { error: mapGeminiError(err) }, 500);
   }
 });
 
@@ -5102,15 +5354,15 @@ app.post('/api/image/edit-views', async (req: Request, res: Response) => {
     const resolutionRaw = req.body?.resolution;
 
     if (!imageDataUrl.startsWith('data:image/')) {
-      return res.status(400).json({ error: 'imageDataUrl must be a data:image/* data URL.' });
+      return safeJson(res, { error: 'imageDataUrl must be a data:image/* data URL.' }, 400);
     }
     if (!isImageDataUrl(imageDataUrl)) {
-      return res.status(400).json({ error: 'imageDataUrl must be a PNG, JPG, or WEBP data URL.' });
+      return safeJson(res, { error: 'imageDataUrl must be a PNG, JPG, or WEBP data URL.' }, 400);
     }
     assertEditDataUrlSize(imageDataUrl);
 
     if (!prompt) {
-      return res.status(400).json({ error: 'Prompt is required.' });
+      return safeJson(res, { error: 'Prompt is required.' }, 400);
     }
 
     type EditViewKey = 'front' | 'back' | 'left' | 'right';
@@ -5219,10 +5471,10 @@ app.post('/api/image/edit-views', async (req: Request, res: Response) => {
 
     const requestsRaw = parseRequests();
     if (!requestsRaw.length) {
-      return res.status(400).json({ error: 'requests is required (at least 1).' });
+      return safeJson(res, { error: 'requests is required (at least 1).' }, 400);
     }
     if (requestsRaw.length > 4) {
-      return res.status(400).json({ error: 'Maximum 4 requests are allowed.' });
+      return safeJson(res, { error: 'Maximum 4 requests are allowed.' }, 400);
     }
 
     const normalizedRequests: EditViewRequest[] = [];
@@ -5234,16 +5486,16 @@ app.post('/api/image/edit-views', async (req: Request, res: Response) => {
       const resolutionValue = typeof raw?.resolution === 'string' ? raw.resolution.trim() : '';
 
       if (!allowedEditViews.has(view as EditViewKey)) {
-        return res.status(400).json({ error: 'Invalid view value in requests.' });
+        return safeJson(res, { error: 'Invalid view value in requests.' }, 400);
       }
       const viewKey = view as EditViewKey;
       if (seenViews.has(viewKey)) {
-        return res.status(400).json({ error: 'Duplicate view entries are not allowed.' });
+        return safeJson(res, { error: 'Duplicate view entries are not allowed.' }, 400);
       }
       seenViews.add(viewKey);
 
       if (!styleValue) {
-        return res.status(400).json({ error: 'Each request must include a style.' });
+        return safeJson(res, { error: 'Each request must include a style.' }, 400);
       }
 
       const normalizedResolution =
@@ -5359,25 +5611,25 @@ app.post('/api/image/edit-views', async (req: Request, res: Response) => {
       return { view: reqItem.view, style: reqItem.style, error: mapGeminiError(item.reason) };
     });
 
-    res.json({ results });
+    return safeJson(res, { results });
   } catch (err: any) {
     console.error('Image edit-views error:', err);
-    res.status(500).json({ error: mapGeminiError(err) });
+    return safeJson(res, { error: mapGeminiError(err) }, 500);
   }
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok' });
+  return safeJson(res, { status: 'ok' });
 });
 
 app.post('/api/designs', async (req, res) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   try {
     const validation = validateDesignPayload({ ...req.body, userId });
     if (!validation.ok) {
-      return res.status(400).json({ error: validation.error });
+      return safeJson(res, { error: validation.error }, 400);
     }
     const resolveInternalUrl = (url: string) => {
       if (!url.startsWith('/api/')) return url;
@@ -5449,16 +5701,16 @@ app.post('/api/designs', async (req, res) => {
         fileId: imageFileIds[idx].toString(),
       })),
     });
-    res.json({ id: doc._id.toString() });
+    return safeJson(res, { id: doc._id.toString() });
   } catch (err) {
     console.error('Failed to save design', err);
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to save design.' });
+    return safeJson(res, { error: err instanceof Error ? err.message : 'Failed to save design.' }, 500);
   }
 });
 
 app.get('/api/designs', async (req, res) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
   try {
     const limitRaw = Number(req.query.limit) || 24;
     const limit = Math.min(Math.max(limitRaw, 1), 50);
@@ -5488,28 +5740,28 @@ app.get('/api/designs', async (req, res) => {
 
     const nextCursor = docs.length > limit ? docs[limit]._id.toString() : null;
 
-    res.json({ items, nextCursor });
+    return safeJson(res, { items, nextCursor });
   } catch (err) {
     console.error('Failed to list designs', err);
-    res.status(500).json({ error: 'Failed to load designs.' });
+    return safeJson(res, { error: 'Failed to load designs.' }, 500);
   }
 });
 
 app.get('/api/designs/:id', async (req, res) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
   try {
     const { id } = req.params;
     if (!Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ error: 'Invalid design id.' });
+      return safeJson(res, { error: 'Invalid design id.' }, 400);
     }
 
     const doc = await Design.findOne({ _id: id, userId });
     if (!doc) {
-      return res.status(404).json({ error: 'Design not found.' });
+      return safeJson(res, { error: 'Design not found.' }, 404);
     }
 
-    res.json({
+    return safeJson(res, {
       id: doc._id.toString(),
       name: doc.name || doc.title,
       title: doc.title || doc.name,
@@ -5536,17 +5788,17 @@ app.get('/api/designs/:id', async (req, res) => {
     });
   } catch (err) {
     console.error('Failed to fetch design', err);
-    res.status(500).json({ error: 'Failed to load design.' });
+    return safeJson(res, { error: 'Failed to load design.' }, 500);
   }
 });
 
 app.delete('/api/designs/:id', async (req, res) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
   try {
     const { id } = req.params;
     if (!Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ error: 'Invalid design id.' });
+      return safeJson(res, { error: 'Invalid design id.' }, 400);
     }
     const doc = await Design.findOneAndDelete({ _id: id, userId });
     if (doc) {
@@ -5556,26 +5808,26 @@ app.delete('/api/designs/:id', async (req, res) => {
       ].filter(Boolean) as string[];
       await Promise.all(fileIds.map((fid) => deleteGridFSFile(fid)));
     }
-    res.json({ ok: true });
+    return safeJson(res, { ok: true });
   } catch (err) {
     console.error('Failed to delete design', err);
-    res.status(500).json({ error: 'Failed to delete design.' });
+    return safeJson(res, { error: 'Failed to delete design.' }, 500);
   }
 });
 
 app.get('/api/designs/:id/download.zip', async (req, res) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   try {
     const { id } = req.params;
     if (!Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ error: 'Invalid design id.' });
+      return safeJson(res, { error: 'Invalid design id.' }, 400);
     }
 
     const doc = await Design.findOne({ _id: id, userId });
     if (!doc) {
-      return res.status(404).json({ error: 'Design not found.' });
+      return safeJson(res, { error: 'Design not found.' }, 404);
     }
 
     res.setHeader('Content-Type', 'application/zip');
@@ -5614,34 +5866,34 @@ app.get('/api/designs/:id/download.zip', async (req, res) => {
   } catch (err) {
     console.error('Failed to download zip', err);
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Failed to download zip.' });
+      safeJson(res, { error: 'Failed to download zip.' }, 500);
     }
   }
 });
 
 app.post('/api/video/render', jsonLarge, async (req, res) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   try {
     const project = req.body?.project;
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const jobId = await createVideoJob(project, userId, baseUrl);
-    res.json({ jobId });
+    return safeJson(res, { jobId });
   } catch (err: any) {
     console.error('Video render failed', err);
-    res.status(400).json({ error: err?.message || 'Failed to render video.' });
+    return safeJson(res, { error: err?.message || 'Failed to render video.' }, 400);
   }
 });
 
 app.get('/api/video/status/:id', (req, res) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   const job = getVideoJob(req.params.id);
-  if (!job) return res.status(404).json({ error: 'Job not found.' });
-  if (job.userId && job.userId !== userId) return res.status(404).json({ error: 'Job not found.' });
-  res.json({ status: job.status, error: job.error, progress: job.progress });
+  if (!job) return safeJson(res, { error: 'Job not found.' }, 404);
+  if (job.userId && job.userId !== userId) return safeJson(res, { error: 'Job not found.' }, 404);
+  return safeJson(res, { status: job.status, error: job.error, progress: job.progress });
 });
 
 app.get('/api/video/download/:id', (req, res) => {
@@ -5649,14 +5901,14 @@ app.get('/api/video/download/:id', (req, res) => {
     ((req.headers['x-user-id'] as string | undefined)?.trim() ||
       (typeof req.query.uid === 'string' ? req.query.uid.trim() : '')) ??
     '';
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   const { id } = req.params;
   const job = getVideoJob(id);
-  if (!job) return res.status(404).json({ error: 'Job not found.' });
-  if (job.userId && job.userId !== userId) return res.status(404).json({ error: 'Job not found.' });
+  if (!job) return safeJson(res, { error: 'Job not found.' }, 404);
+  if (job.userId && job.userId !== userId) return safeJson(res, { error: 'Job not found.' }, 404);
   if (job.status !== 'done' || !hasJobOutput(id)) {
-    return res.status(409).json({ error: 'Video not ready.' });
+    return safeJson(res, { error: 'Video not ready.' }, 409);
   }
 
   const outputPath = getJobOutputPath(id)!;
@@ -5725,23 +5977,23 @@ app.get('/api/video/download/:id', (req, res) => {
 
 app.post('/api/video-designs', async (req, res) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   try {
     const title = String(req.body?.title || '').trim();
     const jobId = String(req.body?.jobId || '').trim();
     const project = req.body?.project;
 
-    if (!title) return res.status(400).json({ error: 'Missing title.' });
-    if (title.length > 80) return res.status(400).json({ error: 'Title is too long.' });
-    if (!jobId) return res.status(400).json({ error: 'Missing jobId.' });
+    if (!title) return safeJson(res, { error: 'Missing title.' }, 400);
+    if (title.length > 80) return safeJson(res, { error: 'Title is too long.' }, 400);
+    if (!jobId) return safeJson(res, { error: 'Missing jobId.' }, 400);
 
     const job = getVideoJob(jobId);
     if (!job || (job.userId && job.userId !== userId)) {
-      return res.status(404).json({ error: 'Job not found.' });
+      return safeJson(res, { error: 'Job not found.' }, 404);
     }
     if (job.status !== 'done' || !hasJobOutput(jobId)) {
-      return res.status(409).json({ error: 'Video not ready.' });
+      return safeJson(res, { error: 'Video not ready.' }, 409);
     }
 
     const outputPath = getJobOutputPath(jobId)!;
@@ -5754,20 +6006,20 @@ app.post('/api/video-designs', async (req, res) => {
       project,
     });
 
-    res.json({
+    return safeJson(res, {
       id: doc._id.toString(),
       title: doc.title,
       downloadUrl: `/api/video-designs/${doc._id.toString()}/download.mp4`,
     });
   } catch (err: any) {
     console.error('Failed to save video design', err);
-    res.status(500).json({ error: err?.message || 'Failed to save video.' });
+    return safeJson(res, { error: err?.message || 'Failed to save video.' }, 500);
   }
 });
 
 app.get('/api/video-designs', async (req, res) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   try {
     const limit = Math.min(50, Math.max(1, Number(req.query.limit || 24)));
@@ -5786,27 +6038,27 @@ app.get('/api/video-designs', async (req, res) => {
     }));
 
     const nextCursor = docs.length > limit ? docs[limit]._id.toString() : null;
-    res.json({ items, nextCursor });
+    return safeJson(res, { items, nextCursor });
   } catch (err) {
     console.error('Failed to list video designs', err);
-    res.status(500).json({ error: 'Failed to load videos.' });
+    return safeJson(res, { error: 'Failed to load videos.' }, 500);
   }
 });
 
 app.get('/api/video-designs/:id', async (req, res) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   try {
     const { id } = req.params;
     if (!Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ error: 'Invalid video id.' });
+      return safeJson(res, { error: 'Invalid video id.' }, 400);
     }
 
     const doc = await VideoDesign.findOne({ _id: id, userId });
-    if (!doc) return res.status(404).json({ error: 'Video not found.' });
+    if (!doc) return safeJson(res, { error: 'Video not found.' }, 404);
 
-    res.json({
+    return safeJson(res, {
       id: doc._id.toString(),
       title: doc.title,
       createdAt: doc.createdAt,
@@ -5814,43 +6066,43 @@ app.get('/api/video-designs/:id', async (req, res) => {
     });
   } catch (err) {
     console.error('Failed to fetch video design', err);
-    res.status(500).json({ error: 'Failed to load video.' });
+    return safeJson(res, { error: 'Failed to load video.' }, 500);
   }
 });
 
 app.delete('/api/video-designs/:id', async (req, res) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   try {
     const { id } = req.params;
     if (!Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ error: 'Invalid video id.' });
+      return safeJson(res, { error: 'Invalid video id.' }, 400);
     }
 
     const doc = await VideoDesign.findOneAndDelete({ _id: id, userId });
     if (doc?.video?.fileId) {
       await deleteGridFSFile(doc.video.fileId);
     }
-    res.json({ ok: true });
+    return safeJson(res, { ok: true });
   } catch (err) {
     console.error('Failed to delete video design', err);
-    res.status(500).json({ error: 'Failed to delete video.' });
+    return safeJson(res, { error: 'Failed to delete video.' }, 500);
   }
 });
 
 app.get('/api/video-designs/:id/download.mp4', async (req, res) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   try {
     const { id } = req.params;
     if (!Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ error: 'Invalid video id.' });
+      return safeJson(res, { error: 'Invalid video id.' }, 400);
     }
 
     const doc = await VideoDesign.findOne({ _id: id, userId });
-    if (!doc) return res.status(404).json({ error: 'Video not found.' });
+    if (!doc) return safeJson(res, { error: 'Video not found.' }, 404);
 
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="video-${id}.mp4"`);
@@ -5865,7 +6117,7 @@ app.get('/api/video-designs/:id/download.mp4', async (req, res) => {
     stream.pipe(res);
   } catch (err) {
     console.error('Failed to download video', err);
-    if (!res.headersSent) res.status(500).json({ error: 'Failed to download video.' });
+    if (!res.headersSent) safeJson(res, { error: 'Failed to download video.' }, 500);
   }
 });
 
@@ -5874,19 +6126,19 @@ app.get('/api/video-designs/:id/stream.mp4', async (req, res) => {
     ((req.headers['x-user-id'] as string | undefined)?.trim() ||
       (typeof req.query.uid === 'string' ? req.query.uid.trim() : '')) ??
     '';
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   try {
     const { id } = req.params;
     if (!Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ error: 'Invalid video id.' });
+      return safeJson(res, { error: 'Invalid video id.' }, 400);
     }
 
     const doc = await VideoDesign.findOne({ _id: id, userId });
-    if (!doc) return res.status(404).json({ error: 'Video not found.' });
+    if (!doc) return safeJson(res, { error: 'Video not found.' }, 404);
 
     const fileInfo = await getFileInfo(doc.video.fileId);
-    if (!fileInfo) return res.status(404).json({ error: 'Video file not found.' });
+    if (!fileInfo) return safeJson(res, { error: 'Video file not found.' }, 404);
 
     const size = Number(fileInfo.length || 0);
     const range = req.headers.range;
@@ -5948,7 +6200,7 @@ app.get('/api/video-designs/:id/stream.mp4', async (req, res) => {
     stream.pipe(res);
   } catch (err) {
     console.error('Failed to stream video', err);
-    if (!res.headersSent) res.status(500).json({ error: 'Failed to stream video.' });
+    if (!res.headersSent) safeJson(res, { error: 'Failed to stream video.' }, 500);
   }
 });
 
@@ -5975,12 +6227,12 @@ const upload = multer({
 
 app.post('/api/video/upload', upload.array('files', MAX_VIDEO_SLIDES), async (req, res) => {
   const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   try {
     const files = (req.files as Express.Multer.File[]) || [];
     if (!files.length) {
-      return res.status(400).json({ error: 'No files uploaded.' });
+      return safeJson(res, { error: 'No files uploaded.' }, 400);
     }
     const assets = await Promise.all(
       files.map(async (file) => {
@@ -5991,7 +6243,7 @@ app.post('/api/video/upload', upload.array('files', MAX_VIDEO_SLIDES), async (re
         return { assetId: saved.assetId, url: `/api/video/assets/${saved.assetId}` };
       })
     );
-    res.json({ assets });
+    return safeJson(res, { assets });
   } catch (err: any) {
     const files = (req.files as Express.Multer.File[]) || [];
     await Promise.all(
@@ -6005,7 +6257,7 @@ app.post('/api/video/upload', upload.array('files', MAX_VIDEO_SLIDES), async (re
         }
       })
     );
-    res.status(400).json({ error: err?.message || 'Upload failed.' });
+    return safeJson(res, { error: err?.message || 'Upload failed.' }, 400);
   }
 });
 
@@ -6014,10 +6266,10 @@ app.get('/api/video/assets/:id', (req, res) => {
     ((req.headers['x-user-id'] as string | undefined)?.trim() ||
       (typeof req.query.uid === 'string' ? req.query.uid.trim() : '')) ??
     '';
-  if (!userId) return res.status(401).json({ error: 'Missing user id' });
+  if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
   const info = getAssetInfo(req.params.id, userId);
-  if (!info) return res.status(404).json({ error: 'Asset not found.' });
+  if (!info) return safeJson(res, { error: 'Asset not found.' }, 404);
   res.setHeader('Content-Type', info.mime);
   res.setHeader('Content-Length', info.size.toString());
   res.setHeader('Cache-Control', 'private, max-age=86400');
@@ -6030,10 +6282,10 @@ app.get('/api/video/files/:fileId', async (req: Request, res: Response) => {
       ((req.headers['x-user-id'] as string | undefined)?.trim() ||
         (typeof req.query.uid === 'string' ? req.query.uid.trim() : '')) ??
       '';
-    if (!userId) return res.status(401).json({ error: 'Missing user id' });
+    if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
     const { fileId } = req.params;
-    if (!Types.ObjectId.isValid(fileId)) return res.status(400).json({ error: 'Invalid file id.' });
+    if (!Types.ObjectId.isValid(fileId)) return safeJson(res, { error: 'Invalid file id.' }, 400);
     const fileObjectId = new Types.ObjectId(fileId);
 
     const owner = await Design.findOne({
@@ -6046,11 +6298,11 @@ app.get('/api/video/files/:fileId', async (req: Request, res: Response) => {
       ],
     }).select({ _id: 1 });
     if (!owner) {
-      return res.status(404).json({ error: 'File not found.' });
+      return safeJson(res, { error: 'File not found.' }, 404);
     }
 
     const fileInfo = await getFileInfo(fileId);
-    if (!fileInfo) return res.status(404).json({ error: 'File not found.' });
+    if (!fileInfo) return safeJson(res, { error: 'File not found.' }, 404);
 
     const etag = `"${fileInfo._id.toString()}-${fileInfo.length}-${fileInfo.uploadDate?.getTime() || ''}"`;
     const lastModified = fileInfo.uploadDate ? new Date(fileInfo.uploadDate).toUTCString() : undefined;
@@ -6081,22 +6333,26 @@ app.get('/api/video/files/:fileId', async (req: Request, res: Response) => {
     stream.pipe(res);
   } catch (err) {
     console.error('Failed to read file', err);
-    if (!res.headersSent) res.status(404).json({ error: 'File not found.' });
+    if (!res.headersSent) safeJson(res, { error: 'File not found.' }, 404);
   }
 });
 
 app.use((err: any, _req: Request, res: Response, next: () => void) => {
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({ error: `File too large (max ${(MAX_VIDEO_UPLOAD_BYTES / 1024 / 1024).toFixed(0)}MB).` });
+      return safeJson(
+        res,
+        { error: `File too large (max ${(MAX_VIDEO_UPLOAD_BYTES / 1024 / 1024).toFixed(0)}MB).` },
+        413
+      );
     }
     if (err.code === 'LIMIT_FILE_COUNT') {
-      return res.status(413).json({ error: `Too many files (max ${MAX_VIDEO_SLIDES}).` });
+      return safeJson(res, { error: `Too many files (max ${MAX_VIDEO_SLIDES}).` }, 413);
     }
-    return res.status(400).json({ error: err.message });
+    return safeJson(res, { error: err.message }, 400);
   }
   if (err?.message?.includes('Only PNG')) {
-    return res.status(415).json({ error: err.message });
+    return safeJson(res, { error: err.message }, 415);
   }
   next();
 });
@@ -6105,15 +6361,15 @@ app.get('/api/ping-db', async (_req, res) => {
   try {
     const db = await getDb();
     const info = await db.admin().serverInfo();
-    res.json({ ok: true, version: info.version });
+    return safeJson(res, { ok: true, version: info.version });
   } catch (err) {
     console.error('Mongo ping failed', err);
-    res.status(500).json({ ok: false, error: 'Mongo unavailable' });
+    return safeJson(res, { ok: false, error: 'Mongo unavailable' }, 500);
   }
 });
 
 app.get('/api/health/gemini-key', (_req, res) => {
-  res.json({
+  return safeJson(res, {
     cwd: process.cwd(),
     loadedRootEnv,
     loadedServerEnv,
@@ -6126,21 +6382,21 @@ app.get('/api/health/gemini-key', (_req, res) => {
 const fileHandler = async (req: Request, res: Response) => {
   try {
     const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
-    if (!userId) return res.status(401).json({ error: 'Missing user id' });
+    if (!userId) return safeJson(res, { error: 'Missing user id' }, 401);
 
     const { fileId } = req.params;
-    if (!Types.ObjectId.isValid(fileId)) return res.status(400).json({ error: 'Invalid file id.' });
+    if (!Types.ObjectId.isValid(fileId)) return safeJson(res, { error: 'Invalid file id.' }, 400);
 
     const owner = await Design.findOne({
       userId,
       $or: [{ 'composite.fileId': fileId }, { 'images.fileId': fileId }],
     }).select({ _id: 1 });
     if (!owner) {
-      return res.status(404).json({ error: 'File not found.' });
+      return safeJson(res, { error: 'File not found.' }, 404);
     }
 
     const fileInfo = await getFileInfo(fileId);
-    if (!fileInfo) return res.status(404).json({ error: 'File not found.' });
+    if (!fileInfo) return safeJson(res, { error: 'File not found.' }, 404);
 
     const etag = `"${fileInfo._id.toString()}-${fileInfo.length}-${fileInfo.uploadDate?.getTime() || ''}"`;
     const lastModified = fileInfo.uploadDate ? new Date(fileInfo.uploadDate).toUTCString() : undefined;
@@ -6171,7 +6427,7 @@ const fileHandler = async (req: Request, res: Response) => {
     stream.pipe(res);
   } catch (err) {
     console.error('Failed to read file', err);
-    if (!res.headersSent) res.status(404).json({ error: 'File not found.' });
+    if (!res.headersSent) safeJson(res, { error: 'File not found.' }, 404);
   }
 };
 
