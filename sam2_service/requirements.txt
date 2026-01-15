@@ -1,9 +1,0 @@
-fastapi
-uvicorn
-pillow
-numpy
-opencv-python
-torch
-torchvision
-scikit-learn
-python-multipart

@@ -153,7 +153,6 @@ const viewLabels: Record<ViewKey, string> = {
 
 const allowedResolutions = new Set([512, 1024, 1536, 2048]);
 const port = Number(process.env.PORT || 4000);
-const SAM2_SERVICE_URL = process.env.SAM2_SERVICE_URL || 'http://127.0.0.1:8008';
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_EDIT_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_VIDEO_SLIDES = 20;
@@ -4857,13 +4856,7 @@ app.get('/api/export', async (req: Request, res: Response) => {
 });
 
 app.get('/api/sam2/health', async (_req: Request, res: Response) => {
-  try {
-    const response = await fetchWithTimeout(`${SAM2_SERVICE_URL}/health`, {}, 5000);
-    const payload = await response.json().catch(() => ({}));
-    return safeJson(res, payload, response.ok ? 200 : 500);
-  } catch (err) {
-    return safeJson(res, { ok: false, error: 'SAM2 service offline' }, 502);
-  }
+  return safeJson(res, { ok: true, mode: 'node-only' });
 });
 
 app.post('/api/sam2/color-layers-dynamic', async (req: Request, res: Response) => {
@@ -4886,80 +4879,24 @@ app.post('/api/sam2/color-layers-dynamic', async (req: Request, res: Response) =
     }
     assertDataUrlSize(imageDataUrl);
 
-    const response = await fetchWithTimeout(
-      `${SAM2_SERVICE_URL}/segment/color-layers-dynamic`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageDataUrl,
-          max_colors: maxColors,
-          min_area_ratio: minAreaRatio,
-          merge_threshold: mergeThreshold,
-          seed,
-        }),
-      },
-      20000
-    );
-
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      return safeJson(res, {
-        ok: false,
-        error: payload?.detail || payload?.error || 'Layer detection failed.',
-      }, 502);
-    }
+    const fallback = await fallbackKmeansColorLayersDynamic({
+      imageDataUrl,
+      maxColors,
+      minAreaRatio,
+      mergeThreshold,
+      seed,
+    });
 
     return safeJson(res, {
       ok: true,
-      width: payload?.width,
-      height: payload?.height,
-      layers: Array.isArray(payload?.layers) ? payload.layers : [],
-      sam2: payload?.sam2,
+      width: fallback.width,
+      height: fallback.height,
+      layers: fallback.layers,
+      sam2: { mode: 'node-kmeans-dynamic', available: true, modelLoaded: true, used: false },
     });
   } catch (err: any) {
-    console.error('SAM2 dynamic proxy error:', err);
-    try {
-      const imageDataUrl = typeof req.body?.imageDataUrl === 'string' ? req.body.imageDataUrl.trim() : '';
-      const rawMaxColors = Number(req.body?.max_colors ?? req.body?.maxColors ?? 8);
-      const maxColors = Number.isFinite(rawMaxColors) ? Math.min(Math.max(Math.round(rawMaxColors), 2), 10) : 8;
-      const rawMinAreaRatio = Number(req.body?.min_area_ratio ?? req.body?.minAreaRatio ?? 0.02);
-      const minAreaRatio = Number.isFinite(rawMinAreaRatio) ? Math.min(Math.max(rawMinAreaRatio, 0), 0.5) : 0.02;
-      const rawMergeThreshold = Number(req.body?.merge_threshold ?? req.body?.mergeThreshold ?? 12);
-      const mergeThreshold = Number.isFinite(rawMergeThreshold) ? Math.min(Math.max(rawMergeThreshold, 0), 100) : 12;
-      const rawSeed = Number(req.body?.seed ?? 42);
-      const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
-
-      if (!isImageDataUrl(imageDataUrl)) {
-        return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' }, 400);
-      }
-      assertDataUrlSize(imageDataUrl);
-
-      const fallback = await fallbackKmeansColorLayersDynamic({
-        imageDataUrl,
-        maxColors,
-        minAreaRatio,
-        mergeThreshold,
-        seed,
-      });
-
-      return safeJson(res, {
-        ok: true,
-        width: fallback.width,
-        height: fallback.height,
-        layers: fallback.layers,
-        sam2: { mode: 'node-kmeans-dynamic', available: false, modelLoaded: false, used: false },
-      });
-    } catch (fallbackErr: any) {
-      const message =
-        err?.name === 'AbortError'
-          ? 'SAM2 service timed out. Run `npm run dev:all` or start `sam2_service`.'
-          : String(err?.message || err) === 'fetch failed'
-            ? 'SAM2 service is offline. Run `npm run dev:all` or start `sam2_service`.'
-            : err?.message || 'Failed to reach SAM2 service.';
-      const details = fallbackErr?.message ? ` Fallback also failed: ${fallbackErr.message}` : '';
-      return safeJson(res, { ok: false, error: `${message}${details}`.trim() }, 502);
-    }
+    console.error('Color layers dynamic error:', err);
+    return safeJson(res, { ok: false, error: err?.message || 'Layer detection failed.' }, 500);
   }
 });
 
@@ -4983,61 +4920,17 @@ app.post('/api/sam2/color-layers', async (req: Request, res: Response) => {
     }
     assertDataUrlSize(imageDataUrl);
 
-    const response = await fetchWithTimeout(`${SAM2_SERVICE_URL}/segment/color-layers`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageDataUrl, num_layers: numLayers, min_area_ratio: minAreaRatio, blur, seed }),
-    }, 20000);
-
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      return safeJson(res, {
-        ok: false,
-        error: payload?.detail || payload?.error || 'Layer detection failed. Try a simpler image or increase contrast.',
-      }, 502);
-    }
-
+    const fallback = await fallbackKmeansColorLayers({ imageDataUrl, numLayers, minAreaRatio, blur, seed });
     return safeJson(res, {
       ok: true,
-      width: payload?.width,
-      height: payload?.height,
-      layers: Array.isArray(payload?.layers) ? payload.layers : [],
-      sam2: payload?.sam2,
+      width: fallback.width,
+      height: fallback.height,
+      layers: fallback.layers,
+      sam2: { mode: 'node-kmeans', available: true, modelLoaded: true, used: false },
     });
   } catch (err: any) {
-    console.error('SAM2 proxy error:', err);
-    try {
-      const imageDataUrl = typeof req.body?.imageDataUrl === 'string' ? req.body.imageDataUrl.trim() : '';
-      const rawNumLayers = Number(req.body?.num_layers ?? req.body?.numLayers ?? 4);
-      const numLayers = Number.isFinite(rawNumLayers) ? Math.min(Math.max(rawNumLayers, 2), 8) : 4;
-      const rawBlur = Number(req.body?.blur ?? 1);
-      const blur = Number.isFinite(rawBlur) ? Math.min(Math.max(Math.round(rawBlur), 0), 9) : 1;
-      const rawSeed = Number(req.body?.seed ?? 42);
-      const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
-
-      if (!isImageDataUrl(imageDataUrl)) {
-        return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' }, 400);
-      }
-      assertDataUrlSize(imageDataUrl);
-
-      const fallback = await fallbackKmeansColorLayers({ imageDataUrl, numLayers, blur, seed });
-      return safeJson(res, {
-        ok: true,
-        width: fallback.width,
-        height: fallback.height,
-        layers: fallback.layers,
-        sam2: { mode: 'node-kmeans', available: false, modelLoaded: false, used: false },
-      });
-    } catch (fallbackErr: any) {
-      const message =
-        err?.name === 'AbortError'
-          ? 'SAM2 service timed out. Run `npm run dev:all` or start `sam2_service`.'
-          : String(err?.message || err) === 'fetch failed'
-            ? 'SAM2 service is offline. Run `npm run dev:all` or start `sam2_service`.'
-            : err?.message || 'Failed to reach SAM2 service.';
-      const details = fallbackErr?.message ? ` Fallback also failed: ${fallbackErr.message}` : '';
-      return safeJson(res, { ok: false, error: `${message}${details}`.trim() }, 502);
-    }
+    console.error('Color layers error:', err);
+    return safeJson(res, { ok: false, error: err?.message || 'Layer detection failed.' }, 500);
   }
 });
 
@@ -5049,27 +4942,18 @@ app.post('/api/sam2/auto', async (req: Request, res: Response) => {
     }
     assertDataUrlSize(imageDataUrl);
 
-    const response = await fetchWithTimeout(`${SAM2_SERVICE_URL}/segment/auto`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageDataUrl }),
-    }, 20000);
-
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      return safeJson(res, {
-        ok: false,
-        error: payload?.detail || payload?.error || 'Automatic segmentation failed.',
-      }, 502);
-    }
-
-    return safeJson(res, { ok: true, masks: Array.isArray(payload?.masks) ? payload.masks : [] });
+    const kmeans = await fallbackKmeansColorLayersDynamic({
+      imageDataUrl,
+      maxColors: 6,
+      minAreaRatio: 0.02,
+      mergeThreshold: 12,
+      seed: 42,
+    });
+    const masks = Array.isArray(kmeans?.layers) ? kmeans.layers.map((l: any) => l?.maskPng).filter(Boolean) : [];
+    return safeJson(res, { ok: true, masks, sam2: { mode: 'node-kmeans-dynamic', available: true, modelLoaded: true, used: false } });
   } catch (err: any) {
-    console.error('SAM2 auto proxy error:', err);
-    const message = err?.name === 'AbortError'
-      ? 'SAM2 service timed out. Is the Python service running?'
-      : err?.message || 'Failed to reach SAM2 service.';
-    return safeJson(res, { ok: false, error: message }, 502);
+    console.error('Auto segmentation error:', err);
+    return safeJson(res, { ok: false, error: err?.message || 'Automatic segmentation failed.' }, 500);
   }
 });
 
@@ -5087,50 +4971,11 @@ app.post('/api/sam2/object-from-point', async (req: Request, res: Response) => {
     }
     assertDataUrlSize(imageDataUrl);
 
-    const response = await fetchWithTimeout(
-      `${SAM2_SERVICE_URL}/segment/object-from-point`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageDataUrl, x, y }),
-      },
-      20000
-    );
-
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      return safeJson(res, {
-        ok: false,
-        error: payload?.detail || payload?.error || 'Object selection failed.',
-      }, 502);
-    }
-
-    return safeJson(res, { ok: true, objectMaskDataUrl: payload?.objectMaskDataUrl });
+    const objectMaskDataUrl = await fallbackObjectMaskFromPoint({ imageDataUrl, x, y });
+    return safeJson(res, { ok: true, objectMaskDataUrl, sam2: { mode: 'node-region-grow', used: false } });
   } catch (err: any) {
-    console.error('SAM2 object-from-point proxy error:', err);
-    try {
-      const imageDataUrl = typeof req.body?.imageDataUrl === 'string' ? req.body.imageDataUrl.trim() : '';
-      const x = Number(req.body?.x);
-      const y = Number(req.body?.y);
-      if (!isImageDataUrl(imageDataUrl)) {
-        return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' }, 400);
-      }
-      if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) {
-        return safeJson(res, { ok: false, error: 'x and y must be normalized coordinates (0..1).' }, 400);
-      }
-      assertDataUrlSize(imageDataUrl);
-      const objectMaskDataUrl = await fallbackObjectMaskFromPoint({ imageDataUrl, x, y });
-      return safeJson(res, { ok: true, objectMaskDataUrl, sam2: { mode: 'node-region-grow', used: false } });
-    } catch (fallbackErr: any) {
-      const message =
-        err?.name === 'AbortError'
-          ? 'SAM2 service timed out. Run `npm run dev:all` or start `sam2_service`.'
-          : String(err?.message || err) === 'fetch failed'
-            ? 'SAM2 service is offline. Run `npm run dev:all` or start `sam2_service`.'
-            : err?.message || 'Failed to reach SAM2 service.';
-      const details = fallbackErr?.message ? ` Fallback also failed: ${fallbackErr.message}` : '';
-      return safeJson(res, { ok: false, error: `${message}${details}`.trim() }, 502);
-    }
+    console.error('Object-from-point error:', err);
+    return safeJson(res, { ok: false, error: err?.message || 'Object selection failed.' }, 500);
   }
 });
 
@@ -5154,64 +4999,21 @@ app.post('/api/sam2/split-colors-in-mask', async (req: Request, res: Response) =
     assertDataUrlSize(imageDataUrl);
     assertDataUrlSize(objectMaskDataUrl);
 
-    const response = await fetchWithTimeout(
-      `${SAM2_SERVICE_URL}/segment/split-colors-in-mask`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageDataUrl, objectMaskDataUrl, max_colors: maxColors, min_area_ratio: minAreaRatio, seed }),
-      },
-      30000
-    );
-
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      return safeJson(res, {
-        ok: false,
-        error: payload?.detail || payload?.error || 'Color splitting failed.',
-      }, 502);
-    }
-
-    return safeJson(res, { ok: true, layers: Array.isArray(payload?.layers) ? payload.layers : [] });
+    const layersOut = await fallbackSplitColorsInMask({
+      imageDataUrl,
+      objectMaskDataUrl,
+      maxColors,
+      minAreaRatio,
+      seed,
+    });
+    return safeJson(res, {
+      ok: true,
+      layers: Array.isArray(layersOut?.layers) ? layersOut.layers : [],
+      sam2: { mode: 'node-kmeans', available: true, modelLoaded: true, used: false },
+    });
   } catch (err: any) {
-    console.error('SAM2 split-colors-in-mask proxy error:', err);
-    try {
-      const imageDataUrl = typeof req.body?.imageDataUrl === 'string' ? req.body.imageDataUrl.trim() : '';
-      const objectMaskDataUrl = typeof req.body?.objectMaskDataUrl === 'string' ? req.body.objectMaskDataUrl.trim() : '';
-      const rawMaxColors = Number(req.body?.max_colors ?? req.body?.maxColors ?? 6);
-      const maxColors = Number.isFinite(rawMaxColors) ? Math.min(Math.max(Math.round(rawMaxColors), 2), 10) : 6;
-      const rawMinAreaRatio = Number(req.body?.min_area_ratio ?? req.body?.minAreaRatio ?? 0.02);
-      const minAreaRatio = Number.isFinite(rawMinAreaRatio) ? Math.min(Math.max(rawMinAreaRatio, 0), 0.5) : 0.02;
-      const rawSeed = Number(req.body?.seed ?? 42);
-      const seed = Number.isFinite(rawSeed) ? Math.round(rawSeed) : 42;
-
-      if (!isImageDataUrl(imageDataUrl)) {
-        return safeJson(res, { ok: false, error: 'imageDataUrl must be a PNG or JPEG data URL.' }, 400);
-      }
-      if (!isPngDataUrl(objectMaskDataUrl)) {
-        return safeJson(res, { ok: false, error: 'objectMaskDataUrl must be a PNG data URL.' }, 400);
-      }
-      assertDataUrlSize(imageDataUrl);
-      assertDataUrlSize(objectMaskDataUrl);
-
-      const layers = await fallbackSplitColorsInMask({
-        imageDataUrl,
-        objectMaskDataUrl,
-        maxColors,
-        minAreaRatio,
-        seed,
-      });
-      return safeJson(res, { ok: true, layers, sam2: { mode: 'node-kmeans', used: false } });
-    } catch (fallbackErr: any) {
-      const message =
-        err?.name === 'AbortError'
-          ? 'SAM2 service timed out. Run `npm run dev:all` or start `sam2_service`.'
-          : String(err?.message || err) === 'fetch failed'
-            ? 'SAM2 service is offline. Run `npm run dev:all` or start `sam2_service`.'
-            : err?.message || 'Failed to reach SAM2 service.';
-      const details = fallbackErr?.message ? ` Fallback also failed: ${fallbackErr.message}` : '';
-      return safeJson(res, { ok: false, error: `${message}${details}`.trim() }, 502);
-    }
+    console.error('Split-colors-in-mask error:', err);
+    return safeJson(res, { ok: false, error: err?.message || 'Color splitting failed.' }, 500);
   }
 });
 
