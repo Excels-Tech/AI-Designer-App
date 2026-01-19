@@ -15,7 +15,8 @@ const recentProjects = [
 ];
 
 const quickActions = [
-  { id: 'ai-generator' as Screen, icon: Image, label: 'Generate AI Image', description: 'Create unique images from prompts', gradient: 'from-violet-500 to-purple-500' },
+  { id: 'ai-generator' as Screen, icon: Image, label: 'AI Product Generator', description: 'Generate product visuals from prompts', gradient: 'from-violet-500 to-purple-500' },
+  { id: 'ai-image-generator' as Screen, icon: Image, label: 'AI Image Generator', description: 'Social Media Designer presets + live preview', gradient: 'from-violet-500 to-purple-500' },
   { id: 'editor' as Screen, icon: Palette, label: 'Edit Design', description: 'Layer-based design editor', gradient: 'from-blue-500 to-cyan-500' },
   { id: 'product-preview' as Screen, icon: Package, label: 'Product Mockup', description: 'Preview on real products', gradient: 'from-pink-500 to-rose-500' },
   { id: 'video-creator' as Screen, icon: Video, label: 'Create Video', description: 'Transform images to videos', gradient: 'from-amber-500 to-orange-500' },

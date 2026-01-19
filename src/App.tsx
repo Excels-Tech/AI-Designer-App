@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { Dashboard } from './components/Dashboard';
 import { AIImageGenerator } from './components/AIImageGenerator';
+import { AISocialImageGenerator } from './components/AISocialImageGenerator';
 import { DesignEditor } from './components/DesignEditor';
 import { ProductMockup } from './components/ProductMockup';
 import { VideoCreator } from './components/VideoCreator';
@@ -12,6 +13,7 @@ import { Toaster } from './components/ui/sonner';
 export type Screen = 
   | 'dashboard' 
   | 'ai-generator' 
+  | 'ai-image-generator'
   | 'my-designs' 
   | 'editor' 
   | 'product-preview' 
@@ -27,11 +29,19 @@ export default function App() {
   const handleDesignComplete = (designUrl: string) => {
     setEditedDesign(designUrl);
   };
+  const handleUseInEditor = (imageDataUrl: string) => {
+    setCroppedImages([imageDataUrl]);
+    setEditedDesign(null);
+    setCurrentScreen('editor');
+  };
 
   const renderContent = () => {
     // Workflow screens
     if (currentScreen === 'ai-generator') {
       return <AIImageGenerator />;
+    }
+    if (currentScreen === 'ai-image-generator') {
+      return <AISocialImageGenerator onUseInEditor={handleUseInEditor} />;
     }
 
     // Individual screens

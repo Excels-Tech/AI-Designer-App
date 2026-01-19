@@ -196,6 +196,7 @@ const jsonSmall = express.json({ limit: '5mb' });
 const jsonLarge = express.json({ limit: '50mb' });
 app.use('/api/designs', jsonLarge);
 app.use('/api/realistic/render', jsonLarge);
+app.use('/api/image/generate', jsonLarge);
 app.use('/api/image/edit', jsonLarge);
 app.use('/api/image/edit-views', jsonLarge);
 app.use('/api/sam2', jsonLarge);
@@ -5436,6 +5437,141 @@ app.post('/api/image/edit-views', async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('Image edit-views error:', err);
     return safeJson(res, { error: mapGeminiError(err) }, 500);
+  }
+});
+
+app.post('/api/image/generate', async (req: Request, res: Response) => {
+  const userId = (req.headers['x-user-id'] as string | undefined)?.trim();
+
+  try {
+    const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
+    const widthRaw = Number(req.body?.width);
+    const heightRaw = Number(req.body?.height);
+    const platform = typeof req.body?.platform === 'string' ? req.body.platform.trim() : 'Custom';
+    const designType = typeof req.body?.designType === 'string' ? req.body.designType.trim() : 'post';
+    const presetId = typeof req.body?.presetId === 'string' ? req.body.presetId.trim() : undefined;
+    const variationSeed = typeof req.body?.variationSeed === 'string' ? req.body.variationSeed.trim() : '';
+
+    if (!prompt) return safeJson(res, { error: 'Prompt is required.' }, 400);
+    const width = Math.min(4096, Math.max(64, Math.round(Number.isFinite(widthRaw) ? widthRaw : 1080)));
+    const height = Math.min(4096, Math.max(64, Math.round(Number.isFinite(heightRaw) ? heightRaw : 1080)));
+
+    const batchId = randomUUID();
+    const createdAt = new Date().toISOString();
+
+    const hashToHue = (input: string) => {
+      let h = 0;
+      for (let i = 0; i < input.length; i++) h = (h * 31 + input.charCodeAt(i)) >>> 0;
+      return h % 360;
+    };
+
+    const buildSvg = (idx: number) => {
+      const hueA = hashToHue(`${variationSeed}|${batchId}|${idx}|a`);
+      const hueB = (hueA + 38 + idx * 13) % 360;
+      const safePrompt = prompt.replace(/[<>]/g, '').slice(0, 120);
+      const meta = `${platform} • ${designType} • ${width}×${height}`;
+      return `
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="hsl(${hueA} 85% 60%)"/>
+      <stop offset="100%" stop-color="hsl(${hueB} 85% 60%)"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#000" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#bg)"/>
+  <rect x="${Math.round(width * 0.07)}" y="${Math.round(height * 0.08)}" width="${Math.round(
+        width * 0.86
+      )}" height="${Math.round(height * 0.84)}" rx="28" fill="rgba(255,255,255,0.90)" filter="url(#shadow)"/>
+  <text x="${Math.round(width * 0.1)}" y="${Math.round(height * 0.2)}" fill="#0f172a" font-size="${Math.max(
+        18,
+        Math.round(Math.min(width, height) * 0.045)
+      )}" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial" font-weight="700">
+    AI Image Generator (stub)
+  </text>
+  <text x="${Math.round(width * 0.1)}" y="${Math.round(height * 0.27)}" fill="#334155" font-size="${Math.max(
+        12,
+        Math.round(Math.min(width, height) * 0.028)
+      )}" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial">
+    ${meta}
+  </text>
+  <text x="${Math.round(width * 0.1)}" y="${Math.round(height * 0.36)}" fill="#475569" font-size="${Math.max(
+        12,
+        Math.round(Math.min(width, height) * 0.026)
+      )}" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial">
+    Prompt:
+  </text>
+  <foreignObject x="${Math.round(width * 0.1)}" y="${Math.round(height * 0.39)}" width="${Math.round(
+        width * 0.8
+      )}" height="${Math.round(height * 0.5)}">
+    <div xmlns="http://www.w3.org/1999/xhtml"
+         style="color:#0f172a;font-size:${Math.max(12, Math.round(Math.min(width, height) * 0.03))}px;font-family:ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;line-height:1.25;word-break:break-word;">
+      ${safePrompt}
+    </div>
+  </foreignObject>
+  <text x="${Math.round(width * 0.1)}" y="${Math.round(height * 0.92)}" fill="#64748b" font-size="${Math.max(
+        10,
+        Math.round(Math.min(width, height) * 0.022)
+      )}" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial">
+    Variation ${idx + 1} • ${new Date().toLocaleString()}
+  </text>
+</svg>`;
+    };
+
+    const count = 4;
+    const images = await Promise.all(
+      Array.from({ length: count }, async (_unused, idx) => {
+        const svg = buildSvg(idx);
+        const png = await sharp(Buffer.from(svg)).png().toBuffer();
+        const dataUrl = `data:image/png;base64,${png.toString('base64')}`;
+        return {
+          id: randomUUID(),
+          url: dataUrl,
+          width,
+          height,
+          prompt,
+          createdAt,
+        };
+      })
+    );
+
+    let designId: string | undefined = undefined;
+    if (userId) {
+      try {
+        await connectMongo();
+        const fileIds = await Promise.all(
+          images.map((img, idx) =>
+            uploadDataUrlToGridFS(img.url, `social-${platform}-${designType}-${width}x${height}-${idx + 1}-${Date.now()}.png`)
+          )
+        );
+        const views = images.map((_img, idx) => `variation-${idx + 1}`);
+        const doc = await Design.create({
+          name: `Social ${platform} ${designType}`.slice(0, 60),
+          title: `Social ${platform} ${designType}`.slice(0, 60),
+          prompt,
+          userId,
+          style: 'realistic',
+          resolution: Math.max(width, height),
+          views,
+          composite: { mime: 'image/png', fileId: fileIds[0]?.toString?.() ?? String(fileIds[0]) },
+          images: images.map((_img, idx) => ({
+            view: views[idx],
+            mime: 'image/png',
+            fileId: fileIds[idx]?.toString?.() ?? String(fileIds[idx]),
+          })),
+        });
+        designId = doc?._id?.toString?.() ?? undefined;
+      } catch (err) {
+        console.warn('Skipping persistence for /api/image/generate (Mongo unavailable)', err);
+      }
+    }
+
+    return safeJson(res, { batchId, images, designId });
+  } catch (err: any) {
+    console.error('Image generate error:', err);
+    return safeJson(res, { error: err instanceof Error ? err.message : 'Generation failed.' }, 500);
   }
 });
 
