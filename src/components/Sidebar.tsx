@@ -16,7 +16,7 @@ interface SidebarProps {
 
 const navItems = [
   { id: 'dashboard' as Screen, icon: LayoutDashboard, label: 'Dashboard' },
-  { id: 'ai-generator' as Screen, icon: Sparkles, label: 'AI Image Generator' },
+  { id: 'ai-generator' as Screen, icon: Sparkles, label: 'AI Product Generator' },
   { id: 'my-designs' as Screen, icon: FolderOpen, label: 'My Designs' },
   { id: 'editor' as Screen, icon: Palette, label: 'Editor' },
   { id: 'product-preview' as Screen, icon: Package, label: 'Product Preview' },

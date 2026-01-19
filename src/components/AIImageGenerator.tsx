@@ -2165,7 +2165,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 	            <Sparkles className="w-5 h-5 text-white" />
 	          </div>
           <div>
-            <h2 className="text-slate-900">AI Image Generator</h2>
+            <h2 className="text-slate-900">AI Product Generator</h2>
             <p className="text-slate-600 text-sm">
               Generate one base design, then generate consistent multi-view outputs.
             </p>
