@@ -498,10 +498,29 @@ async function generateTextJsonWithModelFallback<T>(label: string, prompt: strin
   throw lastErr instanceof Error ? lastErr : new Error(`Gemini request failed for ${label}.`);
 }
 
-connectMongo().catch((err) => {
-  console.error('Failed to connect to MongoDB', err);
-  process.exit(1);
-});
+// Mongo is used only for persistence (saved designs/assets). In dev, allow the app to run without it so
+// image generation endpoints still work. In production, default to requiring Mongo so features aren't silently lost.
+const requireMongo = (() => {
+  const configured = (process.env.REQUIRE_MONGO ?? '').trim().toLowerCase();
+  if (configured === 'true') return true;
+  if (configured === 'false') return false;
+  return isProductionEnv();
+})();
+
+if (!process.env.MONGODB_URI) {
+  const msg = '[server] MONGODB_URI is not set (persistence disabled)';
+  if (requireMongo) {
+    console.error(msg);
+    process.exit(1);
+  } else {
+    console.warn(msg);
+  }
+} else {
+  connectMongo().catch((err) => {
+    console.error('Failed to connect to MongoDB', err);
+    if (requireMongo) process.exit(1);
+  });
+}
 
 const allowedStyles: StyleKey[] = ['realistic', '3d', 'lineart', 'watercolor', 'modelMale', 'modelFemale', 'modelKid'];
 const allowedViews = new Set<ViewKey>(['front', 'back', 'left', 'right', 'threeQuarter', 'closeUp', 'top']);
