@@ -35,6 +35,7 @@ import { buildTryOnModelViewConstraints, deriveModelFormatFromEnv, inferAspectRa
 import { assertPromptEnhancerSelectionDevOnly } from './promptEnhancer/assertions';
 import { buildGenerateViewsResponse } from './handlers/generateViewsResponse';
 import { buildSaveDesignPayload } from './handlers/saveDesignPayload';
+import { generateImageHandler } from './handlers/generateImage';
 import { safeJson } from './utils/safeJson';
 import { stripKeysDeep } from './utils/stripKeysDeep';
 
@@ -209,6 +210,10 @@ app.use('/api/uniform/generate', jsonLarge);
 app.use('/api/uniform/convert-style', jsonLarge);
 app.use('/api/uniform/convert-model', jsonLarge);
 app.use(jsonSmall);
+
+// OpenAI Image Generation
+app.use('/generated', express.static(path.join(process.cwd(), 'server', 'public', 'generated')));
+app.post('/api/image/generate', generateImageHandler);
 
 startAssetCleanup();
 
@@ -3607,7 +3612,7 @@ async function generateViewImage(
   targetHeight: number,
   options?: { background?: { r: number; g: number; b: number; alpha: number } }
 ) {
-    const response = await generateContentWithRetry(
+  const response = await generateContentWithRetry(
     `generateViewImage:${view}`,
     async () =>
       await ai.models.generateContent({

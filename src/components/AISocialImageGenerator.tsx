@@ -13,7 +13,7 @@ import { Download, Loader2, Sparkles, Wand2 } from 'lucide-react';
 import { authFetch } from '../utils/auth';
 import {
   formatRatioLabel,
-  getPresets,
+  getAllPlatformPresets,
   type SocialDesignType,
   type SocialPlatform,
   type SocialPreset,
@@ -110,14 +110,16 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
   const [lockAspect, setLockAspect] = useState<boolean>(true);
   const lockedRatioRef = useRef<number>(1200 / 627);
   const [prompt, setPrompt] = useState('');
-  const [showSafeArea, setShowSafeArea] = useState(false);
+
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [history, setHistory] = useState<GenerationBatch[]>([]);
   const [livePreviewSrc, setLivePreviewSrc] = useState<string | null>(null);
   const lastPayloadRef = useRef<any | null>(null);
 
-  const presets = useMemo(() => getPresets(platform, designType), [platform, designType]);
+  // Use combined presets for the selected platform
+  const presets = useMemo(() => getAllPlatformPresets(platform), [platform]);
+
   const selectedPreset: SocialPreset | null = useMemo(() => {
     if (!presetId) return null;
     return presets.find((p) => p.id === presetId) ?? null;
@@ -127,14 +129,19 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
     const next = presets[0];
     if (!next) {
       setPresetId('');
+      if (platform === 'Custom') {
+        setLockAspect(false);
+      }
       return;
     }
+    setLockAspect(true); // Default to locked for standard platforms
     setPresetId(next.id);
     setWidth(next.width);
     setHeight(next.height);
+    if (next.designType) setDesignType(next.designType);
     if (lockAspect) lockedRatioRef.current = next.width / next.height;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [platform, designType]);
+  }, [platform]); // Removed designType from dependencies
 
   useEffect(() => {
     if (!lockAspect) return;
@@ -145,20 +152,32 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
   const ratioLabel = useMemo(() => formatRatioLabel(width, height), [width, height]);
   const aspectRatio = useMemo(() => (width > 0 && height > 0 ? width / height : 1), [width, height]);
 
-  const setWidthLocked = (next: number) => {
-    const w = clampInt(next, 64, 4096);
-    setWidth(w);
-    if (!lockAspect) return;
-    const h = clampInt(Math.round(w / lockedRatioRef.current), 64, 4096);
-    setHeight(h);
+  const setWidthLocked = (val: string) => {
+    const n = parseInt(val, 10);
+    if (!isNaN(n)) {
+      const w = clampInt(n, 1, 4096); // Allow intermediate small numbers
+      setWidth(w);
+      setPresetId('');
+      if (lockAspect && n >= 64) {
+        setHeight(clampInt(Math.round(w / lockedRatioRef.current), 64, 4096));
+      }
+    } else if (val === '') {
+      setWidth(0);
+    }
   };
 
-  const setHeightLocked = (next: number) => {
-    const h = clampInt(next, 64, 4096);
-    setHeight(h);
-    if (!lockAspect) return;
-    const w = clampInt(Math.round(h * lockedRatioRef.current), 64, 4096);
-    setWidth(w);
+  const setHeightLocked = (val: string) => {
+    const n = parseInt(val, 10);
+    if (!isNaN(n)) {
+      const h = clampInt(n, 1, 4096);
+      setHeight(h);
+      setPresetId('');
+      if (lockAspect && n >= 64) {
+        setWidth(clampInt(Math.round(h * lockedRatioRef.current), 64, 4096));
+      }
+    } else if (val === '') {
+      setHeight(0);
+    }
   };
 
   const applyPreset = (id: string) => {
@@ -167,6 +186,7 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
     if (!preset) return;
     setWidth(preset.width);
     setHeight(preset.height);
+    if (preset.designType) setDesignType(preset.designType);
     if (lockAspect) lockedRatioRef.current = preset.width / preset.height;
   };
 
@@ -183,7 +203,7 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
       width,
       height,
       platform,
-      designType,
+      designType, // Now correctly uses the state derived from the preset
       presetId: presetId || undefined,
     };
     payload.variationSeed = `${Date.now()}-${Math.random()}`;
@@ -238,133 +258,108 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
           <Card className="lg:col-span-2 bg-white rounded-3xl border border-slate-200 shadow-xl p-6">
             <div className="space-y-6">
-              <div className="space-y-2">
-                <Label className="text-slate-700">Design Type</Label>
-                <Tabs value={designType} onValueChange={(v) => setDesignType(v as SocialDesignType)}>
-                  <TabsList className="grid grid-cols-3 w-full bg-slate-100/70">
-                    <TabsTrigger value="post">Post</TabsTrigger>
-                    <TabsTrigger value="banner">Banner</TabsTrigger>
-                    <TabsTrigger value="thumbnail">Thumbnail</TabsTrigger>
-                  </TabsList>
-                </Tabs>
-              </div>
-
-              <div className="space-y-2">
-                <Label className="text-slate-700">Platform</Label>
-                <Select value={platform} onValueChange={(v) => setPlatform(v as SocialPlatform)}>
-                  <SelectTrigger className="rounded-xl">
-                    <SelectValue placeholder="Select platform" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {PLATFORMS.map((p) => (
-                      <SelectItem key={p} value={p}>
-                        {p}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label className="text-slate-700">Preset Size</Label>
-                <Select value={presetId || ''} onValueChange={applyPreset}>
-                  <SelectTrigger className="rounded-xl">
-                    <SelectValue placeholder={presets.length ? 'Select preset' : 'No presets'} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {presets.length ? (
-                      presets.map((p) => (
-                        <SelectItem key={p.id} value={p.id}>
-                          {p.label} — {p.width}×{p.height} ({p.ratioLabel})
+              {/* Removed Design Type Tabs */}
+              <div className="flex flex-wrap items-start gap-4">
+                <div className="space-y-2">
+                  <Label className="text-slate-700">Platform</Label>
+                  <Select value={platform} onValueChange={(v: string) => setPlatform(v as SocialPlatform)}>
+                    <SelectTrigger className="rounded-xl w-fit min-w-[100px]">
+                      <SelectValue placeholder="Select platform" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PLATFORMS.map((p) => (
+                        <SelectItem key={p} value={p}>
+                          {p}
                         </SelectItem>
-                      ))
-                    ) : (
-                      <SelectItem value="__none__" disabled>
-                        No presets for this selection
-                      </SelectItem>
-                    )}
-                  </SelectContent>
-                </Select>
-                {selectedPreset?.notes ? <p className="text-xs text-slate-500">{selectedPreset.notes}</p> : null}
-              </div>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
 
-              <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm text-slate-900">Custom Size</p>
-                    <p className="text-xs text-slate-500">Override width/height if needed</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-600">Lock</span>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label className="text-slate-700">Lock Aspect</Label>
                     <Switch
                       checked={lockAspect}
-                      onCheckedChange={(v) => {
-                        setLockAspect(Boolean(v));
-                        if (v) lockedRatioRef.current = width > 0 && height > 0 ? width / height : 1;
-                      }}
+                      onCheckedChange={setLockAspect}
+                      className="data-[state=checked]:bg-purple-600"
                     />
                   </div>
+                  <Select value={presetId || ''} onValueChange={applyPreset}>
+                    <SelectTrigger className="rounded-xl w-fit min-w-[120px]">
+                      <SelectValue placeholder={presets.length ? 'Select preset' : 'Custom Sizes'} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {presets.length ? (
+                        presets.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            {p.label} — {p.width}×{p.height} ({p.ratioLabel})
+                          </SelectItem>
+                        ))
+                      ) : (
+                        <SelectItem value="__none__" disabled>
+                          No presets for this selection
+                        </SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                  {selectedPreset?.notes ? <p className="text-xs text-slate-500">{selectedPreset.notes}</p> : null}
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1">
-                    <Label className="text-xs text-slate-600">Width (px)</Label>
-                    <Input
-                      className="rounded-xl"
-                      inputMode="numeric"
-                      value={String(width)}
-                      onChange={(e) => setWidthLocked(Number(e.target.value))}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs text-slate-600">Height (px)</Label>
-                    <Input
-                      className="rounded-xl"
-                      inputMode="numeric"
-                      value={String(height)}
-                      onChange={(e) => setHeightLocked(Number(e.target.value))}
-                    />
-                  </div>
+                <div className="space-y-2">
+                  <Label className="text-slate-700">Width (px)</Label>
+                  <Input
+                    className="rounded-xl w-[100px]"
+                    inputMode="numeric"
+                    value={width || ''}
+                    readOnly={platform !== 'Custom'}
+                    onChange={(e) => setWidthLocked(e.target.value)}
+                    onBlur={() => {
+                      if (width < 64) setWidth(64);
+                    }}
+                  />
                 </div>
 
-                <div className="flex items-center justify-between text-xs text-slate-600">
-                  <span>
-                    Ratio: <span className="text-slate-900">{ratioLabel}</span>
-                  </span>
-                  <span className="text-slate-500">
-                    {clampInt(width, 64, 4096)}×{clampInt(height, 64, 4096)}
-                  </span>
+                <div className="space-y-2">
+                  <Label className="text-slate-700">Height (px)</Label>
+                  <Input
+                    className="rounded-xl w-[100px]"
+                    inputMode="numeric"
+                    value={height || ''}
+                    readOnly={platform !== 'Custom'}
+                    onChange={(e) => setHeightLocked(e.target.value)}
+                    onBlur={() => {
+                      if (height < 64) setHeight(64);
+                    }}
+                  />
                 </div>
               </div>
+
+
 
               <div className="space-y-2">
                 <Label className="text-slate-700">Prompt</Label>
-                <Textarea
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  placeholder="Describe the image you want (style, subject, mood, text overlays, etc.)"
-                  className="min-h-[140px] rounded-2xl"
-                />
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-3">
-                <Button
-                  className="rounded-xl bg-gradient-to-r from-violet-500 to-purple-500 hover:from-violet-600 hover:to-purple-600 shadow-lg shadow-purple-500/30"
-                  onClick={() => void callGenerate('generate')}
-                  disabled={isGenerating}
-                >
-                  {isGenerating ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Sparkles className="w-4 h-4 mr-2" />}
-                  Generate
-                </Button>
-                <Button
-                  variant="secondary"
-                  className="rounded-xl"
-                  onClick={() => void callGenerate('regenerate')}
-                  disabled={isGenerating || !lastPayloadRef.current}
-                >
-                  {isGenerating ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Wand2 className="w-4 h-4 mr-2" />}
-                  Regenerate
-                </Button>
+                <div className="flex flex-row items-end gap-3">
+                  <Textarea
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    placeholder="Describe the image you want..."
+                    className="min-h-[80px] rounded-2xl flex-1"
+                  />
+                  <Button
+                    size="default"
+                    className="rounded-xl bg-gradient-to-r from-violet-500 to-purple-500 hover:from-violet-600 hover:to-purple-600 shadow-lg shadow-purple-500/30 h-[80px] w-[200px] shrink-0 flex flex-row items-center justify-center gap-2 transition-all active:scale-95"
+                    onClick={() => void callGenerate('generate')}
+                    disabled={isGenerating}
+                  >
+                    {isGenerating ? (
+                      <Loader2 className="w-5 h-5 animate-spin shrink-0" />
+                    ) : (
+                      <Sparkles className="w-5 h-5 shrink-0" />
+                    )}
+                    <span className="font-bold whitespace-nowrap">Generate Image</span>
+                  </Button>
+                </div>
               </div>
             </div>
           </Card>
@@ -374,15 +369,12 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
               <div className="flex items-center justify-between mb-4">
                 <div>
                   <h3 className="text-slate-900">Live Preview ({width}×{height})</h3>
-                  <p className="text-sm text-slate-500">Preview respects the selected aspect ratio.</p>
+
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-slate-600">Show Safe Area</span>
-                  <Switch checked={showSafeArea} onCheckedChange={setShowSafeArea} />
-                </div>
+
               </div>
 
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 overflow-hidden">
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 overflow-hidden shadow-inner">
                 <AspectRatio ratio={aspectRatio}>
                   <div className="absolute inset-0 bg-gradient-to-br from-slate-100 via-white to-slate-100" />
                   {livePreviewSrc ? (
@@ -392,15 +384,30 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
                       Generate an image to preview here.
                     </div>
                   )}
-                  {showSafeArea ? (
-                    <div className="absolute inset-0 pointer-events-none">
-                      <div className="absolute inset-[6%] border-2 border-purple-400/60 rounded-xl" />
-                      <div className="absolute left-1/2 top-0 bottom-0 w-px bg-purple-400/30" />
-                      <div className="absolute top-1/2 left-0 right-0 h-px bg-purple-400/30" />
-                    </div>
-                  ) : null}
                 </AspectRatio>
               </div>
+
+              {livePreviewSrc && (
+                <div className="flex justify-end pt-4">
+                  <Button
+                    size="default"
+                    variant="outline"
+                    className="h-10 rounded-xl shadow-sm bg-white hover:bg-purple-50/50 hover:shadow-lg hover:shadow-purple-500/10 hover:-translate-y-0.5 hover:border-purple-300 border-slate-200 px-5 transition-all duration-300 active:scale-95 group flex flex-row items-center gap-2 whitespace-nowrap"
+                    onClick={(e: React.MouseEvent) => {
+                      e.stopPropagation();
+                      const filename = `ai-generated-${Date.now()}.png`;
+                      if (livePreviewSrc.startsWith('data:')) {
+                        downloadDataUrl(livePreviewSrc, filename);
+                      } else {
+                        void downloadViaFetch(livePreviewSrc, filename).catch((err) => toast(err?.message || 'Download failed.'));
+                      }
+                    }}
+                  >
+                    <Download className="h-4 w-4 text-slate-600 group-hover:text-purple-600 transition-colors shrink-0" />
+                    <span className="font-semibold text-slate-700 group-hover:text-purple-600 transition-colors">Download Image</span>
+                  </Button>
+                </div>
+              )}
             </Card>
 
             <Card className="bg-white rounded-3xl border border-slate-200 shadow-xl p-6">
@@ -461,7 +468,7 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
                                 <Button
                                   size="sm"
                                   variant="secondary"
-                                  className="rounded-xl"
+                                  className="rounded-xl h-8 bg-white hover:bg-purple-50/50 hover:shadow-md hover:border-purple-200 border border-transparent transition-all active:scale-95 group/btn"
                                   onClick={() => {
                                     const nameBase = toSlug(`${batch.platform}-${batch.designType}-${img.width}x${img.height}`) || 'image';
                                     const filename = `${nameBase}-${img.id}.png`;
@@ -474,8 +481,8 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
                                     );
                                   }}
                                 >
-                                  <Download className="w-4 h-4 mr-1" />
-                                  Download
+                                  <Download className="w-3.5 h-3.5 mr-1.5 text-slate-600 group-hover/btn:text-purple-600 transition-colors" />
+                                  <span className="text-slate-700 group-hover/btn:text-purple-600 transition-colors">Download</span>
                                 </Button>
                                 <Button
                                   size="sm"
@@ -504,7 +511,7 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
             </Card>
           </div>
         </div>
-      </div>
-    </div>
+      </div >
+    </div >
   );
 }
