@@ -625,6 +625,12 @@ export function isPromptEnhancerDebug() {
   return readPromptEnhancerEnv().debug;
 }
 
+export function isLetterheadPrompt(p: string) {
+  const s = extractUserRequestSegment(p).toLowerCase();
+  if (!s.trim()) return false;
+  return /\bletter[-\s]?head\b/i.test(s);
+}
+
 export function isProductionEnv() {
   return String(process.env.NODE_ENV ?? '').toLowerCase() === 'production';
 }
@@ -763,6 +769,7 @@ export function maybeEnhancePrompt(
 
   let enhancedPrompt: string;
   let negativePrompt: string;
+  const letterheadDetected = isLetterheadPrompt(userPrompt);
 
   const canUseGptStyleNoneMode = apparelMode === 'none' && !isGraphicOrDesignPrompt(userPrompt);
 
@@ -807,6 +814,40 @@ export function maybeEnhancePrompt(
     const out = enhancePrompt(promptForEnhancer, effectiveOptions);
     enhancedPrompt = out.enhancedPrompt;
     negativePrompt = out.negativePrompt;
+  }
+
+  // For graphic/design prompts (logo, branding, stationery), prefer stationery-focused
+  // phrasing and avoid photographic terms that aren't appropriate for print/branding.
+  if (isGraphicOrDesignPrompt(userPrompt)) {
+    const photoRegex = /\b(cinematic|golden hour|shallow depth of field|35mm|bokeh|photorealistic|film|natural ambient lighting|dramatic lighting|studio lighting|soft natural light|high dynamic range|rim lighting|volumetric light|neon accent lighting|dreamy glow)\b/gi;
+    enhancedPrompt = String(enhancedPrompt ?? '').replace(photoRegex, '');
+    enhancedPrompt = enhancedPrompt.replace(/\s{2,}/g, ' ').replace(/,\s*,/g, ',').replace(/,\s*$/g, '').trim();
+
+    const letterheadPreface =
+      'Professional typographic hierarchy, clean white background, ample whitespace and balanced margins, vector-ready logo, print-ready layout. ONE LOGO ONLY. Ensure top-left logo placement only (do NOT center). 12mm safe margins for print (do not place important elements within 12mm of edges). Provide a monochrome (black-on-white) logo variant for print, optional top-right accent band, footer row for contact details, and a subtle diagonal watermark for branding.';
+
+    const stationeryPreface = letterheadDetected
+      ? letterheadPreface
+      : 'Professional typographic hierarchy, clean white background, ample whitespace and balanced margins, vector-ready logo, print-ready layout.';
+    enhancedPrompt = `${stationeryPreface} ${enhancedPrompt}`.replace(/\s+/g, ' ').trim();
+
+    // Don't accidentally block logos/text for graphic outputs.
+    negativePrompt = String(negativePrompt ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter((x) => x && !/^(logo|text|watermark)$/i.test(x))
+      .join(', ');
+
+    // Remove photography/camera guidance and composition lines that don't apply to print/branding.
+    enhancedPrompt = enhancedPrompt.replace(/Style intent:[^.]*\./gi, '');
+    enhancedPrompt = enhancedPrompt.replace(/Choose a [^.]*environment that enhances the subject\.?/gi, '');
+    enhancedPrompt = enhancedPrompt.replace(/Avoid adding elements that were not explicitly requested by the user\./gi, '');
+    enhancedPrompt = enhancedPrompt.replace(/Avoid adding elements that were not explicitly requested\b/gi, '');
+    const compositionRegex = /\b(dynamic perspective|rule of thirds|leading lines|symmetrical framing|candid moment framing|negative space|wide angle perspective|dynamic angle|bokeh|shallow depth of field|shallow depth|rim lighting|dramatic lighting|golden hour|neon accent lighting|dreamy glow)\b/gi;
+    enhancedPrompt = enhancedPrompt.replace(compositionRegex, '');
+
+    // Re-clean punctuation/spacing leftovers.
+    enhancedPrompt = enhancedPrompt.replace(/\s{2,}/g, ' ').replace(/,\s*,/g, ',').replace(/,\s*$/g, '').trim();
   }
 
   const hash = hashShort(enhancedPrompt);

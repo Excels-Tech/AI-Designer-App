@@ -3,6 +3,7 @@ import { Sidebar } from './components/Sidebar';
 import { Dashboard } from './components/Dashboard';
 import { AIImageGenerator } from './components/AIImageGenerator';
 import { AISocialImageGenerator } from './components/AISocialImageGenerator';
+import { AIStationeryDesigner } from './components/AIStationeryDesigner';
 import { DesignEditor } from './components/DesignEditor';
 import { ProductMockup } from './components/ProductMockup';
 import { VideoCreator } from './components/VideoCreator';
@@ -14,6 +15,7 @@ export type Screen =
   | 'dashboard' 
   | 'ai-generator' 
   | 'ai-image-generator'
+  | 'ai-stationery'
   | 'my-designs' 
   | 'editor' 
   | 'product-preview' 
@@ -48,6 +50,8 @@ export default function App() {
     switch (currentScreen) {
       case 'dashboard':
         return <Dashboard onNavigate={setCurrentScreen} />;
+      case 'ai-stationery':
+        return <AIStationeryDesigner />;
       case 'editor':
         return (
           <DesignEditor

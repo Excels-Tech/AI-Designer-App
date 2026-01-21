@@ -1,6 +1,7 @@
 import { 
   LayoutDashboard, 
   Sparkles, 
+  FileText,
   FolderOpen, 
   Palette, 
   Package, 
@@ -18,6 +19,7 @@ const navItems = [
   { id: 'dashboard' as Screen, icon: LayoutDashboard, label: 'Dashboard' },
   { id: 'ai-generator' as Screen, icon: Sparkles, label: 'AI Product Generator' },
   { id: 'ai-image-generator' as Screen, icon: Sparkles, label: 'AI Image Generator' },
+  { id: 'ai-stationery' as Screen, icon: FileText, label: 'AI Stationery Designer' },
   { id: 'my-designs' as Screen, icon: FolderOpen, label: 'My Designs' },
   { id: 'editor' as Screen, icon: Palette, label: 'Editor' },
   { id: 'product-preview' as Screen, icon: Package, label: 'Product Preview' },

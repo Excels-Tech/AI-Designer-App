@@ -113,6 +113,9 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
 
 
   const [isGenerating, setIsGenerating] = useState(false);
+  const [variantMode, setVariantMode] = useState<'random'|'none'|'seed'|'custom'>('random');
+  const [variantSeed, setVariantSeed] = useState('');
+  const [customVariant, setCustomVariant] = useState('');
   const [history, setHistory] = useState<GenerationBatch[]>([]);
   const [livePreviewSrc, setLivePreviewSrc] = useState<string | null>(null);
   const lastPayloadRef = useRef<any | null>(null);
@@ -205,6 +208,12 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
       platform,
       designType, // Now correctly uses the state derived from the preset
       presetId: presetId || undefined,
+      variant: ((): string => {
+        if (variantMode === 'none') return 'none';
+        if (variantMode === 'seed' && variantSeed.trim()) return `seed:${variantSeed.trim()}`;
+        if (variantMode === 'custom' && customVariant.trim()) return customVariant.trim();
+        return 'random';
+      })(),
     };
     payload.variationSeed = `${Date.now()}-${Math.random()}`;
 
@@ -274,6 +283,30 @@ export function AISocialImageGenerator({ onUseInEditor }: AISocialImageGenerator
                       ))}
                     </SelectContent>
                   </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label className="text-slate-700">Style Variant</Label>
+                  <div className="flex items-center gap-3">
+                    <select
+                      className="rounded-xl border-slate-200 p-2"
+                      value={variantMode}
+                      onChange={(e) => setVariantMode(e.target.value as any)}
+                    >
+                      <option value="random">Random</option>
+                      <option value="seed">Seed</option>
+                      <option value="custom">Custom</option>
+                      <option value="none">None</option>
+                    </select>
+
+                    {variantMode === 'seed' && (
+                      <Input className="rounded-xl w-[160px]" placeholder="Seed value" value={variantSeed} onChange={(e) => setVariantSeed(e.target.value)} />
+                    )}
+
+                    {variantMode === 'custom' && (
+                      <Input className="rounded-xl w-[220px]" placeholder="Custom variant description" value={customVariant} onChange={(e) => setCustomVariant(e.target.value)} />
+                    )}
+                  </div>
                 </div>
 
                 <div className="space-y-2">

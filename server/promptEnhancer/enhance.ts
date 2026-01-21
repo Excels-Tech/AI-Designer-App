@@ -62,6 +62,7 @@ function computeGroupsToInclude(creativity: number) {
   const count = 3 + Math.round(c * 4);
   const order: (keyof typeof templates.phraseGroups)[] = [
     'style',
+    'stationery',
     'lighting',
     'camera',
     'composition',
@@ -136,6 +137,9 @@ export function enhancePrompt(prompt: string, options: EnhanceOptions = { }): { 
   const stylePreset = normalizePhrase(options.stylePreset ?? '');
   const styleBias = detectStyleBias(`${base} ${stylePreset}`.trim());
 
+  // Detect stationery-like requests (letterhead, stationery, logo, visiting card, envelope)
+  const stationeryLike = /\b(letter-?head|stationery|business card|visiting card|envelope|logo|stationer(y)?)\b/i.test(`${base} ${stylePreset}`);
+
   const rand = makeRng(seedFromString(`${base}|${stylePreset}|${modelFormat}|${aspectRatio}|${creativity}`));
   const groups = computeGroupsToInclude(creativity);
 
@@ -143,6 +147,36 @@ export function enhancePrompt(prompt: string, options: EnhanceOptions = { }): { 
   for (const groupKey of groups) {
     const phrases = templates.phraseGroups[groupKey].phrases as any;
     const biased = filterPhrasesForBias(groupKey, phrases, styleBias, stylePreset);
+    // If this is a stationery-style prompt, avoid photographic/camera/lighting phrases
+    let candidatePhrases = biased as { phrase: string; weight: number }[];
+    if (stationeryLike) {
+      const banKeywords = [
+        'bokeh',
+        'golden hour',
+        'studio lighting',
+        'studio',
+        'cinematic',
+        'photorealistic',
+        '35mm',
+        'film',
+        'natural ambient',
+        'soft natural light',
+        'rim lighting',
+        'volumetric light',
+        'neon',
+        'dreamy',
+        'shallow depth',
+        'photographic',
+        'photojournalistic',
+        'shot on',
+      ];
+      candidatePhrases = candidatePhrases.filter((p) => {
+        const text = String(p.phrase ?? '').toLowerCase();
+        return !banKeywords.some((k) => text.includes(k));
+      });
+      // If filtering removed everything, fall back to original biased list
+      if (!candidatePhrases.length) candidatePhrases = biased as any;
+    }
     picked.push(weightedPick(biased as any, rand));
   }
 
