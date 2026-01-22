@@ -633,6 +633,14 @@ const FULL_FRAME_NEGATIVE_PROMPT = [
   'NO cropped edges. NO extreme crop. NO partial view. NO cut-off legs. NO cut-off sleeves.',
 ].join(' ');
 
+const LOGO_WATERMARK_FIDELITY_PROMPT = [
+  'LOGO/TEXT FIDELITY: If the design includes a logo, wordmark, watermark, or any text, preserve it EXACTLY.',
+  'Do NOT redraw it, do NOT double-expose it, and do NOT create translucent duplicate overlays.',
+  'Keep edges crisp with no blur/ghosting/overlap artifacts.',
+  'Never mirror/flip any text, logo, or watermark. Text must remain readable (not reversed).',
+  'Do not duplicate prints onto other sides; if the base design shows a print on only one area, do not invent additional prints elsewhere.',
+].join(' ');
+
 const TRANSPARENT_CUTOUT_PROMPT = [
   'Background MUST be TRANSPARENT (PNG with alpha).',
   'Return a backgroundless cutout of the uniform only.',
@@ -2775,6 +2783,7 @@ function buildBasePrompt(prompt: string, style: StyleKey, resolution: number, fo
     'No grids, no collages, no multi-panel layouts.',
     FULL_FRAME_POSITIVE_PROMPT,
     FULL_FRAME_NEGATIVE_PROMPT,
+    LOGO_WATERMARK_FIDELITY_PROMPT,
     NO_SHADOWS_PROMPT,
     forceWhite ? WHITE_BACKGROUND_PROMPT : null,
     `Style: ${styleModifiers[style]}.`,
@@ -2809,6 +2818,7 @@ function buildViewFromBasePrompt(
     sideStrict,
     extraInstruction?.trim() ? `IMPORTANT: ${extraInstruction.trim()}` : null,
     'Use this exact design. Do not change the main subject identity, colors, patterns, or layout. Only change camera angle.',
+    LOGO_WATERMARK_FIDELITY_PROMPT,
     FULL_FRAME_POSITIVE_PROMPT,
     FULL_FRAME_NEGATIVE_PROMPT,
     'Consistency: keep the same zoom level, padding, and camera distance across all requested views.',
@@ -4185,14 +4195,9 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
       .png()
       .toBuffer();
 
-    // If both LEFT and RIGHT are requested, we generate LEFT and derive RIGHT by mirroring LEFT.
-    // This guarantees a distinct right-side output even when the model keeps returning two left views.
-    const generateRightFromLeft = views.includes('left') && views.includes('right');
-    const viewsToGenerate = generateRightFromLeft ? views.filter((v) => v !== 'right') : views;
-
     const generatedMap = new Map<ViewKey, Buffer>();
     await Promise.all(
-      viewsToGenerate.map(async (view) => {
+      views.map(async (view) => {
         if (view === 'front') {
           if (!forceWhite) {
             generatedMap.set(view, baseFullBuffer);
@@ -4219,17 +4224,6 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
         generatedMap.set(view, outBuf);
       })
     );
-
-    if (generateRightFromLeft) {
-      const leftBuf = generatedMap.get('left') ?? null;
-      if (leftBuf) {
-        const mirrored = await sharp(leftBuf).flop().png().toBuffer();
-        const mirroredOut = forceWhite
-          ? Buffer.from(await ensureSolidWhiteBackgroundStrict(mirrored.toString('base64')), 'base64')
-          : mirrored;
-        generatedMap.set('right', mirroredOut);
-      }
-    }
 
     const fullImages = views.map((view) => {
       const buf = generatedMap.get(view);
@@ -4260,18 +4254,9 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
             ? Buffer.from(await ensureSolidWhiteBackgroundStrict(regenerated.buffer.toString('base64')), 'base64')
             : regenerated.buffer;
 
-          // If Gemini still returned the left view again, fall back to a mirrored-left image
-          // so the user always gets a distinct right-side view.
-          const stillWrong = !(await isOppositeSideOfLeft(leftTile.buffer, outBuf));
-          if (stillWrong) {
-            const mirrored = await sharp(leftTile.buffer).flop().png().toBuffer();
-            const mirroredOut = forceWhite
-              ? Buffer.from(await ensureSolidWhiteBackgroundStrict(mirrored.toString('base64')), 'base64')
-              : mirrored;
-            fullImages[rightIdx] = { view: 'right', buffer: mirroredOut };
-          } else {
-            fullImages[rightIdx] = { view: 'right', buffer: outBuf };
-          }
+          // Never fall back to a mirrored-left output: it mirrors text/logos and creates invalid prints.
+          // If regeneration still isn't opposite-side enough, keep the regenerated output but do not flip it.
+          fullImages[rightIdx] = { view: 'right', buffer: outBuf };
         }
       }
     }
@@ -5057,6 +5042,7 @@ app.post('/api/realistic/render', async (req: Request, res: Response) => {
       'Convert this design mockup into a photorealistic product photo.',
       'Keep layout and colors exactly the same.',
       'Preserve design placement.',
+      LOGO_WATERMARK_FIDELITY_PROMPT,
       'Improve lighting and material realism.',
       prompt ? `Additional notes: ${prompt}` : '',
     ]
