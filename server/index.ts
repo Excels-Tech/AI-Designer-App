@@ -1056,7 +1056,144 @@ async function ensureSolidWhiteBackgroundStrict(pngBase64: string) {
     // ignore detection errors
   }
 
+  // If the model "prints" a faint watermark/text onto the white background, remove it by
+  // keeping only the largest connected foreground component (the product) and whitening the rest.
+  try {
+    out = await stripSmallForegroundArtifactsOnWhiteBackground(out);
+  } catch {
+    // ignore cleanup failures and keep the original
+  }
+
   return out;
+}
+
+async function stripSmallForegroundArtifactsOnWhiteBackground(pngBase64: string, sampleSize = 256) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const meta = await sharp(buf, { failOn: 'none' }).metadata();
+  const origW = meta.width ?? 0;
+  const origH = meta.height ?? 0;
+  if (!origW || !origH) return normalized;
+
+  const { data, info } = await sharp(buf, { failOn: 'none' })
+    .ensureAlpha()
+    .flatten({ background: WHITE_BG })
+    .resize(sampleSize, sampleSize, { fit: 'fill' })
+    .grayscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const width = info.width;
+  const height = info.height;
+  if (!width || !height) return normalized;
+
+  // Treat near-white as background.
+  const FG_THR = 250;
+  const isFg = (v: number) => v < FG_THR;
+
+  const visited = new Uint8Array(width * height);
+  const compId = new Int32Array(width * height);
+  compId.fill(-1);
+
+  const qx = new Int32Array(width * height);
+  const qy = new Int32Array(width * height);
+
+  let compCount = 0;
+  const compSizes: number[] = [];
+  for (let y0 = 0; y0 < height; y0 += 1) {
+    for (let x0 = 0; x0 < width; x0 += 1) {
+      const idx0 = y0 * width + x0;
+      if (visited[idx0]) continue;
+      visited[idx0] = 1;
+      if (!isFg(data[idx0] ?? 255)) continue;
+
+      let qh = 0;
+      let qt = 0;
+      qx[qt] = x0;
+      qy[qt] = y0;
+      qt += 1;
+      compId[idx0] = compCount;
+      let size = 0;
+
+      while (qh < qt) {
+        const x = qx[qh];
+        const y = qy[qh];
+        qh += 1;
+        size += 1;
+
+        const neighbors = [
+          [x - 1, y],
+          [x + 1, y],
+          [x, y - 1],
+          [x, y + 1],
+        ] as const;
+        for (const [nx, ny] of neighbors) {
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          const ni = ny * width + nx;
+          if (visited[ni]) continue;
+          visited[ni] = 1;
+          if (!isFg(data[ni] ?? 255)) continue;
+          compId[ni] = compCount;
+          qx[qt] = nx;
+          qy[qt] = ny;
+          qt += 1;
+        }
+      }
+
+      compSizes.push(size);
+      compCount += 1;
+    }
+  }
+
+  if (compCount <= 1) return normalized;
+
+  let maxIdx = 0;
+  let maxSize = 0;
+  let otherSize = 0;
+  for (let i = 0; i < compSizes.length; i += 1) {
+    const s = compSizes[i] ?? 0;
+    if (s > maxSize) {
+      otherSize += maxSize;
+      maxSize = s;
+      maxIdx = i;
+    } else {
+      otherSize += s;
+    }
+  }
+
+  const total = width * height || 1;
+  const maxRatio = maxSize / total;
+  const otherRatio = otherSize / total;
+  // If the "main" object isn't dominant or there aren't meaningful extra components, skip.
+  if (maxRatio < 0.05) return normalized;
+  if (otherRatio < 0.0008) return normalized;
+
+  const maskSmall = Buffer.alloc(width * height);
+  for (let i = 0; i < maskSmall.length; i += 1) {
+    maskSmall[i] = compId[i] === maxIdx ? 255 : 0;
+  }
+
+  const maskResized = await sharp(maskSmall, { raw: { width, height, channels: 1 } })
+    .resize(origW, origH, { fit: 'fill' })
+    .blur(0.8)
+    .threshold(96)
+    .raw()
+    .toBuffer();
+
+  const cutout = await sharp(buf, { failOn: 'none' })
+    .ensureAlpha()
+    .removeAlpha()
+    .joinChannel(maskResized, { raw: { width: origW, height: origH, channels: 1 } })
+    .png()
+    .toBuffer();
+
+  const flattened = await sharp({
+    create: { width: origW, height: origH, channels: 4, background: WHITE_BG },
+  })
+    .composite([{ input: cutout, left: 0, top: 0 }])
+    .png()
+    .toBuffer();
+
+  return flattened.toString('base64');
 }
 
 async function scoreCroppingRiskOnWhiteBackground(pngBase64: string) {
@@ -2819,6 +2956,7 @@ function buildViewFromBasePrompt(
     extraInstruction?.trim() ? `IMPORTANT: ${extraInstruction.trim()}` : null,
     'Use this exact design. Do not change the main subject identity, colors, patterns, or layout. Only change camera angle.',
     LOGO_WATERMARK_FIDELITY_PROMPT,
+    'PRINT PLACEMENT: Prints/logos/watermarks must stay physically consistent on the product. Do not move them to other panels/sides. If a print is not visible from this angle, it should not appear.',
     FULL_FRAME_POSITIVE_PROMPT,
     FULL_FRAME_NEGATIVE_PROMPT,
     'Consistency: keep the same zoom level, padding, and camera distance across all requested views.',
