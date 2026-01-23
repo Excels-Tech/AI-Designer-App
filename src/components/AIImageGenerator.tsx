@@ -1746,6 +1746,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           resolution,
           width: resolution,
           height: resolution,
+          is3D: effectiveStyle === '3d',
           ...(referenceImageBase64 ? { referenceImageBase64, referenceImageMimeType } : {}),
         }),
       });
@@ -1765,6 +1766,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           width: resolution,
           height: resolution,
           prompt: finalPrompt,
+          is3D: effectiveStyle === '3d',
         }),
       });
       const viewsPayload = await viewsResp.json().catch(() => ({}));

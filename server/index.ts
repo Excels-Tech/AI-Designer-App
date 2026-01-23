@@ -1,14 +1,23 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import dotenv from 'dotenv';
+import path from 'node:path';
+import fs from 'node:fs';
 
 const rootEnv = path.resolve(process.cwd(), '.env');
 const serverEnv = path.resolve(process.cwd(), 'server', '.env');
 
-if (fs.existsSync(rootEnv)) dotenv.config({ path: rootEnv, override: true });
-if (fs.existsSync(serverEnv)) dotenv.config({ path: serverEnv, override: true });
+let loadedRootEnv = false;
+let loadedServerEnv = false;
 
+if (fs.existsSync(rootEnv)) {
+  dotenv.config({ path: rootEnv, override: true });
+  loadedRootEnv = true;
+}
+if (fs.existsSync(serverEnv)) {
+  dotenv.config({ path: serverEnv, override: true });
+  loadedServerEnv = true;
+}
+
+import { randomUUID } from 'node:crypto';
 import cors from 'cors';
 import express, { Request, Response } from 'express';
 import sharp from 'sharp';
@@ -36,6 +45,7 @@ import { assertPromptEnhancerSelectionDevOnly } from './promptEnhancer/assertion
 import { buildGenerateViewsResponse } from './handlers/generateViewsResponse';
 import { buildSaveDesignPayload } from './handlers/saveDesignPayload';
 import { generateImageHandler } from './handlers/generateImage';
+import { isHoodieMockupPrompt } from './prompts/hoodieMockup';
 import { safeJson } from './utils/safeJson';
 import { stripKeysDeep } from './utils/stripKeysDeep';
 
@@ -121,8 +131,6 @@ function inlineDataFromAnyImageBase64(input: { base64: string; mimeType?: string
 
 const RAW_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
 const GEMINI_KEY = sanitizeKey(RAW_KEY);
-const loadedRootEnv = fs.existsSync(rootEnv);
-const loadedServerEnv = fs.existsSync(serverEnv);
 
 console.log('Gemini key loaded, length:', GEMINI_KEY.length);
 
@@ -133,8 +141,8 @@ if (!GEMINI_KEY) {
 const ai = new GoogleGenAI({ apiKey: GEMINI_KEY });
 
 const styleModifiers: Record<StyleKey, string> = {
-  realistic: 'photorealistic, natural lighting, high detail, sharp focus',
-  '3d': 'high-quality 3D render, PBR materials, studio lighting, octane/cycles style',
+  realistic: 'professional product photography, photorealistic, natural cotton fabric texture with visible weave, realistic material properties, matte finish, even diffuse studio lighting, high detail, sharp focus, clean product presentation',
+  '3d': 'photorealistic 3D render, high-quality realistic materials with natural cotton texture, physically-based rendering (PBR), even studio lighting, professional product visualization, detailed fabric weave, matte cotton finish, natural depth and dimension',
   lineart: 'clean line art, black ink on white background, no shading, no color',
   watercolor: 'watercolor painting, paper texture, soft edges, gentle pigment blooms',
   modelMale: 'photorealistic studio photo of a male model wearing the product, fashion lookbook, natural pose',
@@ -422,37 +430,181 @@ function trimIfLooksCutAtLimit(input: string, maxLen: number): string {
   return s;
 }
 
-function buildTitlesPrompt(input: { productName: string; category?: string; count: number }) {
+function buildTitlesPrompt(input: { productName: string; category?: string; count: number; seed?: string }) {
+  const categoryLine = input.category ? `Category context (required product type anchor): "${input.category}".` : '';
+  const seedLine = input.seed ? `Session Seed (for uniqueness): ${input.seed}. Generate a fresh and different variety based on this seed.` : '';
   return [
     'You are an ecommerce SEO assistant. Generate product listing titles.',
     `Product name: "${input.productName}".`,
-    input.category ? `Category context (optional): "${input.category}".` : '',
+    categoryLine,
+    seedLine,
     `Generate exactly ${input.count} unique titles.`,
-    'Rules: each title MUST be 100–120 characters (inclusive) and MUST NOT exceed 120; end on a complete word (no cut-off last word).',
+    'Rules: each title MUST be 60–120 characters (inclusive) and MUST NOT exceed 120; end on a complete word (no cut-off last word).',
     "Do NOT end with a dangling connector/article (e.g. don't end with: and, or, for, with, to, in, of, the, a, an).",
+    `CRITICAL: Every title MUST include the product name terms exactly as written in "${input.productName}" (do not autocorrect, do not replace with synonyms).`,
+    'CRITICAL: Do NOT include any brand names, trademarked terms, company names, or seller/store names (e.g., Nike, Adidas, Apple, Disney). Strictly follow the user input without inventing brands.',
+    'Focus strictly on the provided product name and category context. Do not add unrelated brands or comparisons.',
+    'Do NOT add occupational context or audience terms (e.g., professional, business, corporate, office, colleagues) unless the user provided them in the product name or category.',
+    input.category
+      ? 'CRITICAL: Do NOT invent a different product type. Every title MUST clearly match the provided category/product type.'
+      : 'CRITICAL: If the product name does not clearly include a product type (e.g., only a single ambiguous word), do NOT guess a product type. Return {"titles":[]} instead.',
     'Include buyer-intent keywords and (when relevant) material, style, season, audience, gift intent, and use case.',
     'Keep titles relevant to the product; do not invent a different primary product type (e.g. do not turn a hoodie into a t-shirt).',
     'Avoid duplicates; no numbering; no extra commentary.',
+    'CRITICAL: NO punctuation (commas, colons, pipes, semicolons, etc.). Use ONLY spaces to separate words.',
     'Return ONLY valid JSON in this exact shape: {"titles":["..."]}',
   ]
     .filter(Boolean)
     .join(' ');
 }
 
-function buildKeywordsPrompt(input: { productName: string; category?: string; count: number }) {
+function buildKeywordsPrompt(input: { productName: string; category?: string; count: number; seed?: string }) {
+  const categoryLine = input.category ? `Category context (required product type anchor): "${input.category}".` : '';
+  const seedLine = input.seed ? `Session Seed (for uniqueness): ${input.seed}. Generate a fresh and different variety based on this seed.` : '';
   return [
     'You are an ecommerce SEO assistant. Generate search keywords for a product listing.',
     `Product name: "${input.productName}".`,
-    input.category ? `Category context (optional): "${input.category}".` : '',
+    categoryLine,
+    seedLine,
     `Generate exactly ${input.count} unique keywords.`,
     'Rules: mix short + long-tail; include generic + broad search intents plus specific buyer-intent phrases.',
+    'CRITICAL: Do NOT include any brand names, trademarked terms, company names, or seller/store names (e.g., Nike, Adidas, Apple, Disney). Strictly follow the user input without inventing brands.',
+    'Focus strictly on the provided product name and category context. Do not add unrelated brands or comparisons.',
+    input.category
+      ? 'CRITICAL: Do NOT invent a different product type. Keywords must match the provided category/product type.'
+      : 'CRITICAL: If the product name does not clearly include a product type (e.g., only a single ambiguous word), do NOT guess a product type. Return {"keywords":[]} instead.',
     'Include synonyms, themes, style descriptors, audience/recipient, occasions, and use-cases when relevant.',
     'Keep keywords relevant to the product; do not invent a different primary product type (e.g. do not turn a hoodie into a t-shirt).',
     'Avoid duplicates; no numbering; no extra commentary.',
+    'CRITICAL: NO punctuation (commas, colons, pipes, semicolons, etc.). Use ONLY spaces to separate keywords.',
     'Return ONLY valid JSON in this exact shape: {"keywords":["..."]}',
   ]
     .filter(Boolean)
     .join(' ');
+}
+
+const BLOCKED_BRAND_TERMS = [
+  'adidas',
+  'nike',
+  'puma',
+  'reebok',
+  'under armour',
+  'underarmour',
+  'new balance',
+  'asics',
+  'fila',
+  'lululemon',
+  'gucci',
+  'louis vuitton',
+  'prada',
+  'chanel',
+  'versace',
+  'ray-ban',
+  'rayban',
+  'oakley',
+  'apple',
+  'iphone',
+  'ipad',
+  'macbook',
+  'samsung',
+  'sony',
+  'playstation',
+  'xbox',
+  'nintendo',
+  'google',
+  'pixel',
+  'microsoft',
+  'amazon',
+  'disney',
+  'marvel',
+  'star wars',
+  'starwars',
+  'lego',
+  'barbie',
+] as const;
+
+function escapeRegexLiteral(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const BLOCKED_BRAND_REGEX = new RegExp(
+  `\\b(?:${BLOCKED_BRAND_TERMS.map((t) => escapeRegexLiteral(t).replace(/\\\s+/g, '\\\\s+')).join('|')})\\b`,
+  'i'
+);
+
+function containsBlockedBrand(text: string): boolean {
+  const s = String(text ?? '');
+  if (!s.trim()) return false;
+  if (/[®™]/.test(s)) return true;
+  return BLOCKED_BRAND_REGEX.test(s);
+}
+
+const PRODUCT_NAME_STOPWORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'as',
+  'at',
+  'by',
+  'for',
+  'from',
+  'in',
+  'of',
+  'on',
+  'or',
+  'the',
+  'to',
+  'with',
+]);
+
+function productNameTokens(productName: string): string[] {
+  const raw = String(productName ?? '').trim().toLowerCase();
+  if (!raw) return [];
+  const parts = raw
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .filter((p) => p.length >= 3)
+    .filter((p) => !PRODUCT_NAME_STOPWORDS.has(p));
+  return uniqStable(parts);
+}
+
+function categoryTokens(category: string): string[] {
+  const raw = String(category ?? '').trim().toLowerCase();
+  if (!raw) return [];
+  const parts = raw
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .filter((p) => p.length >= 3)
+    .filter((p) => !PRODUCT_NAME_STOPWORDS.has(p));
+  return uniqStable(parts);
+}
+
+function titleMatchesCategory(title: string, category: string): boolean {
+  const tokens = categoryTokens(category);
+  if (!tokens.length) return true;
+  const s = String(title ?? '');
+  return tokens.some((token) => new RegExp(`\\b${escapeRegexLiteral(token)}\\b`, 'i').test(s));
+}
+
+function titleMatchesUserInput(title: string, productName: string): boolean {
+  const tokens = productNameTokens(productName);
+  if (!tokens.length) return true;
+  const s = String(title ?? '');
+  for (const token of tokens) {
+    const re = new RegExp(`\\b${escapeRegexLiteral(token)}\\b`, 'i');
+    if (!re.test(s)) return false;
+  }
+  return true;
+}
+
+function isVagueProductName(productName: string): boolean {
+  // A single non-descriptive token forces the model to guess a product type.
+  const tokens = productNameTokens(productName);
+  return tokens.length < 2;
 }
 
 const TEXT_MODEL_CANDIDATES = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'] as const;
@@ -610,16 +762,84 @@ async function normalizeGeminiOutputPngBase64(
 
 const TRANSPARENT_BG = { r: 0, g: 0, b: 0, alpha: 0 };
 const WHITE_BG = { r: 255, g: 255, b: 255, alpha: 1 };
+const LIGHT_GRAY_BG = { r: 238, g: 238, b: 238, alpha: 1 }; // #eeeeee
 const WHITE_BACKGROUND_PROMPT = [
-  'Background MUST be pure white (#FFFFFF), seamless and clean.',
-  'Isolated subject on pure white background, ecommerce style.',
+  'Background MUST be PURE SOLID WHITE (#FFFFFF), perfectly uniform, seamless, and clean.',
+  'Isolated subject on absolute white void.',
+  'NO texture, NO grain, NO noise, NO artifacts, NO dither, NO speckled patterns.',
   'NO room, NO studio scene, NO windows, NO wall texture, NO background objects, NO floor.',
   'NO checkerboard, NO gray studio box, NO environment, NO props.',
   'NO frames, NO borders, NO boxes, NO mockups.',
   'NO shadows, NO floor shadows, NO reflections, NO gradients, NO vignette.',
 ].join(' ');
 
-const NO_SHADOWS_PROMPT = 'NO shadows. NO cast shadows. NO floor shadows. NO drop shadows.';
+const NO_SHADOWS_PROMPT =
+  'NO cast shadows. NO floor shadows. NO drop shadows. Allow subtle self-shadowing from fabric folds and seams (natural shading on the garment only).';
+
+const APPAREL_MATTE_LIGHTING_PROMPT = [
+  'LIGHTING: soft, diffuse, even studio lighting. Balanced exposure. Natural midtones.',
+  'MATERIAL: completely matte cotton/fleece fabric. Preserve fabric texture and folds clearly.',
+  'ABSOLUTELY NO shine, NO gloss, NO reflections, NO glint, and NO specularity.',
+  'NO harsh specular highlights, NO glossy shine, NO wet/plastic look, NO metallic/pearlescent finish.',
+  'NO blown highlights, NO clipped whites, NO HDR hot spots.',
+  'NO glitter, NO sparkles, NO speckle noise, NO grain, NO salt-and-pepper artifacts.',
+].join(' ');
+
+const WHITE_APPAREL_EXPOSURE_PROMPT =
+  'WHITE GARMENT: keep true white fabric but preserve detail; avoid overexposed shiny patches. Maintain visible seams, folds, and knit texture.';
+
+const APPAREL_WHITE_BACKGROUND_PROMPT = [
+  'Background MUST be PURE SOLID UNIFORM WHITE (#FFFFFF), seamless and perfectly clean.',
+  'ZERO noise, ZERO grain, ZERO texture, ZERO artifacts in the background.',
+  'NO room, NO studio scene, NO props, NO floor.',
+  'NO cast shadows or floor shadows; background stays uniform digital white.',
+  'Allow natural garment self-shadowing for folds/seams only (do not flatten the garment).',
+  'Do not add reflections, gloss, bloom, or highlight sparkle.',
+].join(' ');
+
+const HOODIE_MOCKUP_BACKGROUND_PROMPT = [
+  'Background: light gray seamless paper (#eeeeee) (NOT pure white) with a soft natural shadow under hoodie only.',
+  'Centered, straight-on front view. Clean ecommerce product photo (NOT 3D render).',
+  'Leave 8-10% margin around hoodie; no cropping.',
+  'NO reflections, NO glossy floor, NO gradient backdrop, NO vignette, NO props, NO scene.',
+].join(' ');
+
+const HOODIE_MOCKUP_NEGATIVE_PROMPT = [
+  'NEGATIVE: glossy, shiny, reflective, wet look, plastic, vinyl, leather, specular highlights, overexposed, blown whites, HDR, bloom, lens flare, dramatic lighting, harsh shadows, high contrast, vignette, 3D render, CGI, octane, unreal engine, ray tracing, mannequin head, model, cropped, angled view, close-up.',
+].join(' ');
+
+function wantsBranding(text: string): boolean {
+  const s = String(text ?? '').toLowerCase();
+  if (!s.trim()) return false;
+  return /\b(logo|badge|crest|emblem|wordmark|sponsor|branding|brand name|text|number|jersey)\b/.test(s);
+}
+
+function wantsBackgroundScene(text: string): boolean {
+  const s = String(text ?? '').toLowerCase();
+  if (!s.trim()) return false;
+  return /\b(background|scene|scenery|environment|stadium|arena|crowd|field|pitch|grass|sky|sunset|trees|forest|park|room|interior|gradient|vignette)\b/.test(s);
+}
+
+function wants3D(text: string): boolean {
+  const s = String(text ?? '').toLowerCase();
+  if (!s.trim()) return false;
+  return /\b(3d|cgi|render|pbr|octane|unreal|blender)\b/.test(s);
+}
+
+function isApparelPrompt(text: string): boolean {
+  const s = String(text ?? '').toLowerCase();
+  if (!s.trim()) return false;
+  return /\b(hoodie|hoddie|hoody|sweatshirt|pullover|t-?shirt|tee|shirt|jersey|jacket|sweater|uniform|apparel|garment)\b/i.test(s);
+}
+
+function isWhiteApparelPrompt(text: string): boolean {
+  const s = String(text ?? '').toLowerCase();
+  if (!s.trim()) return false;
+  // Trigger only when "white" is used to describe an apparel item, not the background.
+  return /\bwhite\b.{0,24}\b(hoodie|hoddie|hoody|sweatshirt|pullover|t-?shirt|tee|shirt|jersey|jacket|sweater|uniform)\b|\b(hoodie|hoddie|hoody|sweatshirt|pullover|t-?shirt|tee|shirt|jersey|jacket|sweater|uniform)\b.{0,24}\bwhite\b/i.test(
+    s
+  );
+}
 
 const FULL_FRAME_POSITIVE_PROMPT = [
   'FRAMING: Full-length shot. Entire main subject fully visible head-to-toe (top-to-bottom).',
@@ -632,6 +852,18 @@ const FULL_FRAME_NEGATIVE_PROMPT = [
   'NO zoomed-in. NO close-up. NO tight framing. NO close camera.',
   'NO cropped edges. NO extreme crop. NO partial view. NO cut-off legs. NO cut-off sleeves.',
 ].join(' ');
+
+const NO_LOGO_GUARD_PROMPT =
+  'STRICT: Do NOT add any logos, emblems, crests, badges, stripes, numbers, text, typography, words, slogans, letters, wordmarks, patterns, watermarks, emails, phone numbers, URLs, QR codes, contact info, or banners. Fabric must be completely plain solid color only.';
+
+const WHITE_BACKGROUND_GUARD_PROMPT =
+  'STRICT BACKGROUND: Pure solid white (#FFFFFF) only. No scenery, no stadium, no field, no grass, no sky, no trees, no crowd, no horizon, no floor, no props, no shapes or graphics. No shadows or drop shadows. If anything appears behind the product, replace it with solid white.';
+
+const NO_SHADOW_GUARD_PROMPT =
+  'STRICT: No drop shadows, no cast shadows, no long shadows, no floor or ground shadows. Keep lighting soft and even.';
+
+const NO_3D_GUARD_PROMPT =
+  'Do NOT render in 3D or CGI unless the user explicitly requested 3D. Prefer clean studio photography style.';
 
 const LOGO_WATERMARK_FIDELITY_PROMPT = [
   'LOGO/TEXT FIDELITY: If the design includes a logo, wordmark, watermark, or any text, preserve it EXACTLY.',
@@ -2893,17 +3125,28 @@ const viewSpecificInstructions: Record<ViewKey, string> = {
 };
 
 function buildViewPrompt(basePrompt: string, style: StyleKey, view: ViewKey, width: number, height: number) {
+  const hoodieMockup = isHoodieMockupPrompt(basePrompt);
+  const brandingOk = wantsBranding(basePrompt);
+  const backgroundOk = wantsBackgroundScene(basePrompt);
+  const allow3d = wants3D(basePrompt);
   return [
     `Single-frame image of the SAME product/design viewed from the ${viewLabels[view]} angle.`,
     `View requirement: ${viewSpecificInstructions[view]}`,
     `No grids, no collages, no multi-panel layouts. One centered subject.`,
+    !brandingOk ? NO_LOGO_GUARD_PROMPT : null,
+    !backgroundOk ? WHITE_BACKGROUND_GUARD_PROMPT : null,
+    !allow3d ? NO_3D_GUARD_PROMPT : null,
+    NO_SHADOW_GUARD_PROMPT,
+    isApparelPrompt(basePrompt) ? APPAREL_MATTE_LIGHTING_PROMPT : null,
+    isWhiteApparelPrompt(basePrompt) ? WHITE_APPAREL_EXPOSURE_PROMPT : null,
+    hoodieMockup ? HOODIE_MOCKUP_NEGATIVE_PROMPT : null,
     FULL_FRAME_POSITIVE_PROMPT,
     FULL_FRAME_NEGATIVE_PROMPT,
     'Consistency: keep the same zoom level, padding, and camera distance across all requested views.',
     `Keep lighting, materials, and colors identical to every other view.`,
     `Do not mirror or flip the subject. Do not swap left/right. Each requested view must be distinct and match its angle.`,
-    WHITE_BACKGROUND_PROMPT,
-    NO_SHADOWS_PROMPT,
+    hoodieMockup ? HOODIE_MOCKUP_BACKGROUND_PROMPT : isApparelPrompt(basePrompt) ? APPAREL_WHITE_BACKGROUND_PROMPT : WHITE_BACKGROUND_PROMPT,
+    hoodieMockup ? null : NO_SHADOWS_PROMPT,
     `Style: ${styleModifiers[style]}.`,
     `Base prompt: ${basePrompt}`,
     `Target output size close to ${width}x${height}px (square crop friendly).`,
@@ -2913,16 +3156,33 @@ function buildViewPrompt(basePrompt: string, style: StyleKey, view: ViewKey, wid
 function buildBasePrompt(prompt: string, style: StyleKey, resolution: number, forceWhiteOverride?: boolean) {
   const forceWhite =
     typeof forceWhiteOverride === 'boolean' ? forceWhiteOverride : shouldForceWhiteBackgroundFromPrompt(prompt);
+  const hoodieMockup = isHoodieMockupPrompt(prompt);
+  const brandingOk = wantsBranding(prompt);
+  const backgroundOk = wantsBackgroundScene(prompt);
+  const allow3d = wants3D(prompt);
   return [
     'Generate ONE base image that matches the user prompt.',
     'STRICT: Front view (head-on) unless the user prompt implies a different viewpoint (e.g. poster/logo).',
     'STRICT: Do not add socks, shoes, mannequins, models, people, faces, hands, or body parts unless the user prompt explicitly asks for them.',
     'No grids, no collages, no multi-panel layouts.',
+    !brandingOk ? NO_LOGO_GUARD_PROMPT : null,
+    !backgroundOk ? WHITE_BACKGROUND_GUARD_PROMPT : null,
+    !allow3d ? NO_3D_GUARD_PROMPT : null,
+    !allow3d ? NO_SHADOW_GUARD_PROMPT : null,
+    isApparelPrompt(prompt) ? APPAREL_MATTE_LIGHTING_PROMPT : null,
+    isWhiteApparelPrompt(prompt) ? WHITE_APPAREL_EXPOSURE_PROMPT : null,
+    hoodieMockup ? HOODIE_MOCKUP_NEGATIVE_PROMPT : null,
     FULL_FRAME_POSITIVE_PROMPT,
     FULL_FRAME_NEGATIVE_PROMPT,
-    LOGO_WATERMARK_FIDELITY_PROMPT,
-    NO_SHADOWS_PROMPT,
-    forceWhite ? WHITE_BACKGROUND_PROMPT : null,
+    brandingOk ? LOGO_WATERMARK_FIDELITY_PROMPT : null,
+    hoodieMockup ? null : allow3d ? null : NO_SHADOWS_PROMPT,
+    hoodieMockup
+      ? HOODIE_MOCKUP_BACKGROUND_PROMPT
+      : forceWhite
+        ? isApparelPrompt(prompt)
+          ? APPAREL_WHITE_BACKGROUND_PROMPT
+          : WHITE_BACKGROUND_PROMPT
+        : null,
     `Style: ${styleModifiers[style]}.`,
     `User prompt: ${prompt}`,
     `Target output size close to ${resolution}x${resolution}px (square).`,
@@ -2948,6 +3208,10 @@ function buildViewFromBasePrompt(
     typeof forceWhiteOverride === 'boolean'
       ? forceWhiteOverride
       : shouldForceWhiteBackgroundFromPrompt(userPrompt || '');
+  const hoodieMockup = isHoodieMockupPrompt(userPrompt || '');
+  const brandingOk = wantsBranding(userPrompt || '');
+  const backgroundOk = wantsBackgroundScene(userPrompt || '');
+  const allow3d = wants3D(userPrompt || '');
 
   return [
     `Create a single image of the SAME design from the ${viewLabels[view]} angle.`,
@@ -2955,8 +3219,15 @@ function buildViewFromBasePrompt(
     sideStrict,
     extraInstruction?.trim() ? `IMPORTANT: ${extraInstruction.trim()}` : null,
     'Use this exact design. Do not change the main subject identity, colors, patterns, or layout. Only change camera angle.',
-    LOGO_WATERMARK_FIDELITY_PROMPT,
-    'PRINT PLACEMENT: Prints/logos/watermarks must stay physically consistent on the product. Do not move them to other panels/sides. If a print is not visible from this angle, it should not appear.',
+    !brandingOk ? NO_LOGO_GUARD_PROMPT : null,
+    !backgroundOk ? WHITE_BACKGROUND_GUARD_PROMPT : null,
+    !allow3d ? NO_3D_GUARD_PROMPT : null,
+    !allow3d ? NO_SHADOW_GUARD_PROMPT : null,
+    isApparelPrompt(userPrompt || '') ? APPAREL_MATTE_LIGHTING_PROMPT : null,
+    isWhiteApparelPrompt(userPrompt || '') ? WHITE_APPAREL_EXPOSURE_PROMPT : null,
+    hoodieMockup ? HOODIE_MOCKUP_NEGATIVE_PROMPT : null,
+    brandingOk ? LOGO_WATERMARK_FIDELITY_PROMPT : null,
+    'PRINT PLACEMENT: If the base image shows any prints/logos/text, keep them fixed; otherwise, do not add any new prints.',
     FULL_FRAME_POSITIVE_PROMPT,
     FULL_FRAME_NEGATIVE_PROMPT,
     'Consistency: keep the same zoom level, padding, and camera distance across all requested views.',
@@ -2964,8 +3235,14 @@ function buildViewFromBasePrompt(
     userPrompt?.trim()
       ? `User prompt (secondary reference): ${userPrompt.trim()}. The attached base image is the ground-truth design reference.`
       : null,
-    NO_SHADOWS_PROMPT,
-    forceWhite ? WHITE_BACKGROUND_PROMPT : null,
+    hoodieMockup ? null : allow3d ? null : NO_SHADOWS_PROMPT,
+    hoodieMockup
+      ? HOODIE_MOCKUP_BACKGROUND_PROMPT
+      : forceWhite
+        ? isApparelPrompt(userPrompt || '')
+          ? APPAREL_WHITE_BACKGROUND_PROMPT
+          : WHITE_BACKGROUND_PROMPT
+        : null,
     'No grids, no collages, no multi-panel layouts. One centered subject.',
     'Do not mirror or flip the subject. Do not swap left/right.',
     `Style: ${styleModifiers[style]}.`,
@@ -3014,69 +3291,55 @@ function buildMannequinConversionPrompt(modelKey: MannequinModelKey) {
 
 function modelFrontPrompt(modelKey: MannequinModelKey, extraConstraints?: string) {
   return [
-    `Generate a high-resolution PHOTOREALISTIC studio photograph of a real adult ${modelKey} model wearing the exact same garment/apparel product from the reference image.`,
-    'VIEW: FRONT view. Keep the same orientation as the input.',
-    'STRICT: REAL human athlete (NOT mannequin, NOT doll, NOT statue, NOT dummy).',
-    'STRICT: REAL CAMERA PHOTO. Professional studio fashion photography (NOT 3D, NOT CGI).',
-    'REALISM: natural skin microtexture, pores, fine hair strands, subtle imperfections. Avoid overly smooth/plastic skin.',
-    'STRICT CAMERA FRAMING: FULL BODY head-to-toe including head and face. Wide full-body photo.',
-    'Leave clear margin above the head and below the feet. Do NOT crop any body part or any clothing.',
-    'STRICT: Do NOT zoom in. Use a consistent wide camera distance.',
-    'STRICT: Preserve the exact garment design and all details: colors, patterns, logos/prints/text, placement, and branding.',
-    'STRICT: Do not invent new design elements. Do not mirror or flip.',
-    'Avoid adding extra accessories (hats, gloves, bags, jewelry) unless clearly present in the reference image.',
+    `Generate a high-resolution, masterfully executed PHOTOREALISTIC studio photograph of a real adult ${modelKey} model wearing the exact same garment/apparel product from the reference image.`,
+    'VIEW: Straight-on FRONT view.',
+    'CAMERA: Professional DSLR photo, 85mm f/1.8 lens look. Razor-sharp focus on the model and garment with natural shallow depth of field. High dynamic range with authentic film-like contrast.',
+    'REALISM: ENFORCE AUTHENTIC HUMAN TEXTURE. Visible skin pores, natural skin micro-variation, fine hair strands, subtle facial asymmetry, and realistic moisture in the eyes. ABSOLUTELY NO plastic skin, NO uncanny valley smoothness, NO AI-generated "perfect" look.',
+    'STRICT: REAL human model (NOT a mannequin, NOT a CGI character, NOT a digital avatar, NOT a statue).',
+    'LIGHTING: Professional high-end fashion studio lighting (softbox or Rembrandt lighting). Use directional light to create natural depth, realistic shadows in fabric folds, and believable skin highlights.',
+    'STRICT CAMERA FRAMING: FULL BODY head-to-toe including the entire head and face. Wide-angle framing with clear empty space above the head and below the feet. Do NOT crop any body part or any clothing.',
+    'STRICT: Preserve the EXACT garment design, colors, material texture, logos, prints, and branding from the reference image without any deviation.',
     extraConstraints?.trim() ? `IMPORTANT: ${extraConstraints.trim()}` : null,
-    'Background: clean studio backdrop with even lighting. Do not let background choices override garment preservation.',
+    'Background: pure, clean, uniform studio white/gray background that does not distract from the model.',
   ].join(' ');
 }
 
 function modelBackPrompt(modelKey: MannequinModelKey, extraConstraints?: string) {
   return [
-    `Generate a high-resolution PHOTOREALISTIC studio photograph of a real adult ${modelKey} model wearing the exact same garment/apparel product from the reference image.`,
-    'VIEW: BACK view (rear view). Keep the same orientation as the input.',
-    'CRITICAL: Match the SAME camera distance and framing as the front view output (wide full-body).',
-    'STRICT: REAL human athlete (NOT mannequin, NOT doll, NOT statue, NOT dummy).',
-    'STRICT: REAL CAMERA PHOTO. Professional studio fashion photography (NOT 3D, NOT CGI).',
-    'REALISM: natural skin microtexture, pores, fine hair strands, subtle imperfections. Avoid overly smooth/plastic skin.',
-    'STRICT CAMERA FRAMING (NO EXCEPTIONS): FULL BODY head-to-toe including head and face. Wide full-body photo.',
-    'Leave clear margin above the head and below the feet (extra padding).',
-    'STRICT: Do NOT crop. Do NOT zoom. Do NOT use a close-up. Do NOT change focal length to crop the subject.',
-    'STRICT: Preserve the exact garment design and all details: colors, patterns, logos/prints/text, placement, and branding.',
-    'STRICT: Do not invent new design elements. Do not mirror or flip.',
-    'Avoid adding extra accessories (hats, gloves, bags, jewelry) unless clearly present in the reference image.',
+    `Generate a high-resolution, masterfully executed PHOTOREALISTIC studio photograph of a real adult ${modelKey} model wearing the exact same garment/apparel product from the reference image.`,
+    'VIEW: Straight-on BACK view (rear view).',
+    'CAMERA: Professional DSLR photo, 85mm f/1.8 lens look. Match the exact framing, distance, and focal length of the front view for a consistent pair.',
+    'REALISM: ENFORCE AUTHENTIC HUMAN TEXTURE. Visible skin pores on the neck/limbs, natural hair texture (back of head), and realistic human anatomy. No plastic or overly smooth surfaces.',
+    'STRICT: REAL human model (NOT a mannequin, NOT a CGI character, NOT a digital avatar, NOT a statue).',
+    'LIGHTING: Professional high-end fashion studio lighting. Ensure the back of the garment is clearly illuminated with realistic shading in folds and seams.',
+    'STRICT CAMERA FRAMING: FULL BODY head-to-toe. Include the head and feet. Provide generous empty margin/padding around the entire figure. DO NOT CROP.',
+    'STRICT: Preserve the EXACT garment design, colors, material texture, and branding from the reference image.',
     extraConstraints?.trim() ? `IMPORTANT: ${extraConstraints.trim()}` : null,
-    'Background: clean studio backdrop with even lighting. Do not let background choices override garment preservation.',
+    'Background: pure, clean, uniform studio white/gray background.',
   ].join(' ');
 }
 
 function modelFrontPromptMaleFrom3d() {
   return [
-    'Generate a high-resolution PHOTOREALISTIC full-body studio sports photograph of a real adult male athlete wearing the exact same soccer uniform from the reference image.',
-    'VIEW: FRONT view. Neutral stance, arms relaxed at sides, kit clearly visible.',
-    'CAMERA: REAL DSLR photo, 85mm look, crisp focus, high dynamic range, natural softbox lighting, subtle realistic shadows.',
-    'REALISM DETAILS: visible skin pores and natural microtexture, subtle imperfections, realistic hair, natural facial features, correct human proportions.',
-    'STRICT CAMERA FRAMING: FULL BODY head-to-toe including head/face. Wide full-body fashion photo. Centered subject. Leave generous margin above head and below feet. DO NOT crop.',
-    'STRICT: NO 3D render. NO CGI. NO game character. NO cartoon. NO mannequin. NO plastic skin. NO doll.',
-    'STRICT: Preserve the exact uniform design and all details: colors, patterns, logos, text, placement, numbering, and branding.',
-    'STRICT: Do not invent design elements. Do not mirror or flip.',
-    'STRICT: Do not add socks/shoes/accessories unless clearly present in the reference image.',
-    'BACKGROUND: clean seamless white studio. Output should look like professional sports ecommerce photography.',
+    'Generate a high-resolution, masterfully executed PHOTOREALISTIC studio sports photograph of a real adult male athlete wearing the exact same uniform from the reference image.',
+    'VIEW: FRONT view. Neutral stance, kit clearly visible.',
+    'CAMERA: Professional sports photography, DSLR with 85mm prime lens. Razor-sharp focus on the athlete and uniform. High dynamic range, natural color grading.',
+    'REALISM: ENFORCE AUTHENTIC HUMAN DETAILS. Visible skin pores, natural skin sheen (not plastic), realistic muscle definition with natural shading, individual hair strands, and authentic facial features. ABSOLUTELY NO CGI, NO game character look, NO mannequin.',
+    'STRICT CAMERA FRAMING: FULL BODY head-to-toe including the head and face. Wide-angle framing. Centered subject. Leave generous empty padding above the head and below the feet. DO NOT CROP.',
+    'STRICT: Preserve the EXACT uniform design, colors, material texture, logos, prints, and branding from the reference image.',
+    'BACKGROUND: Pure, clean, seamless white/gray studio background.',
   ].join(' ');
 }
 
 function modelBackPromptMaleFrom3d() {
   return [
-    'Generate a high-resolution PHOTOREALISTIC full-body studio sports photograph of a real adult male athlete wearing the exact same soccer uniform from the reference image.',
-    'VIEW: BACK view (rear). Neutral stance, kit clearly visible.',
-    'CAMERA: REAL DSLR photo, 85mm look, crisp focus, high dynamic range, natural softbox lighting, subtle realistic shadows.',
-    'REALISM DETAILS: visible skin pores and natural microtexture, subtle imperfections, realistic hair, natural facial features, correct human proportions.',
-    'CRITICAL: Match the SAME camera distance and framing as the front view output (wide full-body).',
-    'STRICT CAMERA FRAMING: FULL BODY head-to-toe including head/face. Centered subject. Leave generous margin above head and below feet. DO NOT crop. DO NOT zoom.',
-    'STRICT: NO 3D render. NO CGI. NO game character. NO cartoon. NO mannequin. NO plastic skin. NO doll.',
-    'STRICT: Preserve the exact uniform design and all details: colors, patterns, logos, text, placement, numbering, and branding.',
-    'STRICT: Do not invent design elements. Do not mirror or flip.',
-    'STRICT: Do not add socks/shoes/accessories unless clearly present in the reference image.',
-    'BACKGROUND: clean seamless white studio. Output should look like professional sports ecommerce photography.',
+    'Generate a high-resolution, masterfully executed PHOTOREALISTIC studio sports photograph of a real adult male athlete wearing the exact same uniform from the reference image.',
+    'VIEW: Straight-on BACK view (rear).',
+    'CAMERA: Professional sports photography, DSLR with 85mm prime lens. Match the exact framing, distance, and lighting of the front view.',
+    'REALISM: ENFORCE AUTHENTIC HUMAN TEXTURE. Visible skin pores, natural hair texture, and realistic human anatomy. No plastic or overly smooth surfaces.',
+    'STRICT CAMERA FRAMING: FULL BODY head-to-toe. Centered subject. Leave generous empty margin above head and below feet. DO NOT CROP. DO NOT ZOOM.',
+    'STRICT: Preserve the EXACT uniform design, colors, material texture, and branding from the reference image.',
+    'BACKGROUND: Pure, clean, seamless white/gray studio background.',
   ].join(' ');
 }
 
@@ -3752,6 +4015,174 @@ function stripNegativePromptLine(prompt: string): string {
   return s.replace(/\n\s*Negative prompt:\s*[\s\S]*$/i, '').trim();
 }
 
+async function normalizeHoodieMockupEcom(buffer: Buffer): Promise<Buffer> {
+  // Goal: force a clean ecommerce look like the reference:
+  // - uniform light gray background (#eeeeee)
+  // - remove wall/gradient/backdrop/shadows that touch the edges
+  // - keep garment cutout + add a subtle synthetic grounding shadow under hoodie
+  const original = sharp(buffer, { failOn: 'none' }).ensureAlpha();
+  const meta = await original.metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  if (!width || !height) return buffer;
+
+  const smallSize = 256;
+  const { data: smallRgba, info } = await original
+    .clone()
+    .resize(smallSize, smallSize, { fit: 'fill' })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const sw = info.width ?? smallSize;
+  const sh = info.height ?? smallSize;
+
+  const sampleBorder = () => {
+    let r = 0,
+      g = 0,
+      b = 0,
+      n = 0;
+    const add = (x: number, y: number) => {
+      const idx = (y * sw + x) * 4;
+      r += smallRgba[idx] ?? 0;
+      g += smallRgba[idx + 1] ?? 0;
+      b += smallRgba[idx + 2] ?? 0;
+      n += 1;
+    };
+    for (let x = 0; x < sw; x += 1) {
+      add(x, 0);
+      add(x, sh - 1);
+    }
+    for (let y = 0; y < sh; y += 1) {
+      add(0, y);
+      add(sw - 1, y);
+    }
+    const denom = n || 1;
+    return { r: r / denom, g: g / denom, b: b / denom };
+  };
+
+  const bg = sampleBorder();
+  const dist2 = (x: number, y: number) => {
+    const idx = (y * sw + x) * 4;
+    const dr = (smallRgba[idx] ?? 0) - bg.r;
+    const dg = (smallRgba[idx + 1] ?? 0) - bg.g;
+    const db = (smallRgba[idx + 2] ?? 0) - bg.b;
+    return dr * dr + dg * dg + db * db;
+  };
+
+  const threshold2 = 26 * 26;
+  const visited = new Uint8Array(sw * sh);
+  const isBg = new Uint8Array(sw * sh);
+  const queueX = new Int16Array(sw * sh);
+  const queueY = new Int16Array(sw * sh);
+  let qh = 0;
+  let qt = 0;
+
+  const enqueue = (x: number, y: number) => {
+    const i = y * sw + x;
+    if (visited[i]) return;
+    visited[i] = 1;
+    if (dist2(x, y) > threshold2) return;
+    isBg[i] = 1;
+    queueX[qt] = x;
+    queueY[qt] = y;
+    qt += 1;
+  };
+
+  for (let x = 0; x < sw; x += 1) {
+    enqueue(x, 0);
+    enqueue(x, sh - 1);
+  }
+  for (let y = 0; y < sh; y += 1) {
+    enqueue(0, y);
+    enqueue(sw - 1, y);
+  }
+
+  while (qh < qt) {
+    const x = queueX[qh];
+    const y = queueY[qh];
+    qh += 1;
+
+    const nbs = [
+      [x - 1, y],
+      [x + 1, y],
+      [x, y - 1],
+      [x, y + 1],
+    ] as const;
+    for (const [nx, ny] of nbs) {
+      if (nx < 0 || ny < 0 || nx >= sw || ny >= sh) continue;
+      enqueue(nx, ny);
+    }
+  }
+
+  // Build 1-channel mask: 255 for foreground, 0 for background.
+  const mask = Buffer.alloc(sw * sh);
+  let minX = sw,
+    minY = sh,
+    maxX = 0,
+    maxY = 0;
+  for (let y = 0; y < sh; y += 1) {
+    for (let x = 0; x < sw; x += 1) {
+      const i = y * sw + x;
+      const fg = isBg[i] ? 0 : 255;
+      mask[i] = fg;
+      if (fg) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (minX > maxX || minY > maxY) {
+    return await sharp(buffer, { failOn: 'none' }).ensureAlpha().flatten({ background: LIGHT_GRAY_BG }).png().toBuffer();
+  }
+
+  const maskFull = await sharp(mask, { raw: { width: sw, height: sh, channels: 1 } })
+    .resize(width, height, { fit: 'fill' })
+    .blur(0.6)
+    .png()
+    .toBuffer();
+
+  // Cutout subject.
+  const cutout = await original
+    .clone()
+    .composite([{ input: maskFull, blend: 'dest-in' }])
+    .png()
+    .toBuffer();
+
+  // Synthetic soft shadow under hoodie (computed from bbox in small space, scaled to full size).
+  const scaleX = width / sw;
+  const scaleY = height / sh;
+  const boxW = Math.max(1, (maxX - minX) * scaleX);
+  const boxH = Math.max(1, (maxY - minY) * scaleY);
+  const cx = (minX + (maxX - minX) / 2) * scaleX;
+  const bottomY = maxY * scaleY;
+  const shadowW = Math.max(1, boxW * 0.72);
+  const shadowH = Math.max(1, boxH * 0.10);
+  const shadowY = Math.min(height - 1, bottomY + shadowH * 0.35);
+
+  const shadowSvg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+  <ellipse cx="${cx.toFixed(2)}" cy="${shadowY.toFixed(2)}" rx="${(shadowW / 2).toFixed(2)}" ry="${(shadowH / 2).toFixed(
+    2
+  )}" fill="rgba(0,0,0,0.18)"/>
+</svg>`;
+  const shadow = await sharp(Buffer.from(shadowSvg))
+    .png()
+    .blur(Math.max(6, Math.round(Math.min(width, height) * 0.018)))
+    .toBuffer();
+
+  // Compose on uniform light gray background.
+  const bgLayer = await sharp({
+    create: { width, height, channels: 4, background: LIGHT_GRAY_BG },
+  })
+    .composite([{ input: shadow }, { input: cutout }])
+    .png()
+    .toBuffer();
+
+  return bgLayer;
+}
+
 async function generateViewImage(
   prompt: string,
   style: StyleKey,
@@ -3777,8 +4208,16 @@ async function generateViewImage(
     throw new Error(`Gemini response did not include an image for view "${view}".`);
   }
 
-  const raw = Buffer.from(imagePart.data as string, 'base64');
-  const background = options?.background ?? { r: 245, g: 246, b: 248, alpha: 1 };
+  const rawIn = Buffer.from(imagePart.data as string, 'base64');
+  const raw = isHoodieMockupPrompt(prompt)
+    ? await sharp(rawIn, { failOn: 'none' })
+      .ensureAlpha()
+      .modulate({ brightness: 0.92, saturation: 1.0 })
+      .linear(1, -6)
+      .png()
+      .toBuffer()
+    : rawIn;
+  const background = options?.background ?? (isHoodieMockupPrompt(prompt) ? LIGHT_GRAY_BG : WHITE_BG);
   const insetScale = 0.9;
   const insetWidth = Math.max(1, Math.round(targetWidth * insetScale));
   const insetHeight = Math.max(1, Math.round(targetHeight * insetScale));
@@ -3796,10 +4235,12 @@ async function generateViewImage(
     .png()
     .toBuffer();
 
+  const finalBuf = isHoodieMockupPrompt(prompt) ? await normalizeHoodieMockupEcom(resized) : resized;
+
   return {
     view,
-    buffer: resized,
-    dataUrl: `data:image/png;base64,${resized.toString('base64')}`,
+    buffer: finalBuf,
+    dataUrl: `data:image/png;base64,${finalBuf.toString('base64')}`,
   };
 }
 
@@ -3849,8 +4290,17 @@ async function generateViewImageFromBase(
     throw new Error(`Gemini response did not include an image for view "${view}".`);
   }
 
-  const raw = Buffer.from(imagePart.data as string, 'base64');
-  const background = options?.background ?? { r: 245, g: 246, b: 248, alpha: 1 };
+  const rawIn = Buffer.from(imagePart.data as string, 'base64');
+  const raw = isHoodieMockupPrompt(userPrompt || '')
+    ? await sharp(rawIn, { failOn: 'none' })
+      .ensureAlpha()
+      .modulate({ brightness: 0.92, saturation: 1.0 })
+      .linear(1, -6)
+      .png()
+      .toBuffer()
+    : rawIn;
+  const background =
+    options?.background ?? (isHoodieMockupPrompt(userPrompt || '') ? LIGHT_GRAY_BG : { r: 245, g: 246, b: 248, alpha: 1 });
   // IMPORTANT: do not intentionally shrink non-front views.
   // We always return an image that is exactly targetWidth × targetHeight,
   // and rely on prompt + post-processing for safe framing.
@@ -3859,11 +4309,23 @@ async function generateViewImageFromBase(
     .png()
     .toBuffer();
 
+  const finalBuf = isHoodieMockupPrompt(userPrompt || '') ? await normalizeHoodieMockupEcom(resized) : resized;
+
   return {
     view,
-    buffer: resized,
-    dataUrl: `data:image/png;base64,${resized.toString('base64')}`,
+    buffer: finalBuf,
+    dataUrl: `data:image/png;base64,${finalBuf.toString('base64')}`,
   };
+}
+
+async function inlineDataFromPngBuffer(buffer: Buffer, targetSize = 512) {
+  const resized = await sharp(buffer, { failOn: 'none' })
+    .ensureAlpha()
+    .resize(targetSize, targetSize, { fit: 'contain', background: WHITE_BG, withoutEnlargement: true })
+    .png()
+    .toBuffer();
+  assertBase64Size(resized.toString('base64'));
+  return { mimeType: 'image/png', data: resized.toString('base64') };
 }
 
 async function computeDHash64(buffer: Buffer): Promise<bigint> {
@@ -4042,6 +4504,8 @@ app.post('/api/generate-views', async (req: Request, res: Response) => {
 
   try {
     const userPrompt = prompt.trim();
+    const hoodieMockup = isHoodieMockupPrompt(userPrompt);
+    const styleEffective: StyleKey = hoodieMockup ? 'realistic' : style;
     const enhanceOptions = {
       creativity: Number((req.body as any)?.creativity ?? 0.3),
       modelFormat: deriveModelFormatFromEnv(),
@@ -4051,11 +4515,11 @@ app.post('/api/generate-views', async (req: Request, res: Response) => {
     const grid = computeGrid(views.length);
     const tileWidth = Math.max(64, Math.floor(resolution / grid.columns));
     const tileHeight = Math.max(64, Math.floor(resolution / grid.rows));
-    const sampleModelText = buildViewPrompt(promptForModel, style, views[0], tileWidth, tileHeight);
+    const sampleModelText = buildViewPrompt(promptForModel, styleEffective, views[0], tileWidth, tileHeight);
     assertPromptEnhancerSelectionDevOnly({ label: 'generate-views', userPrompt, promptForModel, modelText: sampleModelText });
 
     const tiles = await Promise.all(
-      views.map((view) => generateViewImage(promptForModel, style, view, tileWidth, tileHeight))
+      views.map((view) => generateViewImage(promptForModel, styleEffective, view, tileWidth, tileHeight))
     );
 
     const composite = await composeComposite(tiles, grid.columns, grid.rows, tileWidth, tileHeight);
@@ -4068,7 +4532,7 @@ app.post('/api/generate-views', async (req: Request, res: Response) => {
           title,
           userId: userId!.trim(),
           prompt: userPrompt,
-          style,
+          style: styleEffective,
           resolution,
           views,
           composite: composite.dataUrl,
@@ -4102,23 +4566,36 @@ app.post('/api/generate-product-titles', async (req: Request, res: Response) => 
     const countRaw = Number(req.body?.count);
     const requestedCount = Number.isFinite(countRaw) ? Math.round(countRaw) : 120;
     const count = Math.min(120, Math.max(50, requestedCount));
+    const seed = randomUUID();
 
     if (!productName) return safeJson(res, { error: 'productName is required.' }, 400);
+    if (isVagueProductName(productName) && !category) {
+      return safeJson(
+        res,
+        { error: 'Please provide a more descriptive product name (at least 2 words) or specify a category.' },
+        400
+      );
+    }
 
-    const batches = 2;
-    const perBatch = Math.max(10, Math.ceil(count / batches));
+    const batches = 4;
+    const perBatch = Math.max(10, Math.ceil(count / 2));
     const all: string[] = [];
 
     for (let i = 0; i < batches; i += 1) {
-      const prompt = buildTitlesPrompt({ productName, category: category || undefined, count: perBatch });
+      const prompt = buildTitlesPrompt({ productName, category: category || undefined, count: perBatch, seed });
       const parsed = await generateTextJsonWithModelFallback<{ titles: unknown }>('generate-product-titles', prompt);
 
       const titlesRaw = normalizeLines(parsed?.titles, 180);
       const titles = titlesRaw
         .map((t) => trimDanglingTailWordsForTitle(trimIfLooksCutAtLimit(t, 120)))
-        .filter((t) => t.length >= 60);
+        .filter((t) => t.length >= 60)
+        .filter((t) => !containsBlockedBrand(t))
+        .filter((t) => titleMatchesUserInput(t, productName))
+        .filter((t) => (category ? titleMatchesCategory(t, category) : true));
       all.push(...titles);
       await sleep(900);
+
+      if (uniqStable(all).length >= count) break;
     }
 
     const titles = uniqStable(all).slice(0, count);
@@ -4137,21 +4614,36 @@ app.post('/api/generate-product-keywords', async (req: Request, res: Response) =
     const countRaw = Number(req.body?.count);
     const requestedCount = Number.isFinite(countRaw) ? Math.round(countRaw) : 350;
     const count = Math.min(350, Math.max(100, requestedCount));
+    const seed = randomUUID();
 
     if (!productName) return safeJson(res, { error: 'productName is required.' }, 400);
+    if (isVagueProductName(productName) && !category) {
+      return safeJson(
+        res,
+        { error: 'Please provide a more descriptive product name (at least 2 words) or specify a category.' },
+        400
+      );
+    }
 
-    const batches = 2;
-    const perBatch = Math.max(50, Math.ceil(count / batches));
+    const batches = 4;
+    const perBatch = Math.max(50, Math.ceil(count / 2));
     const all: string[] = [];
 
     for (let i = 0; i < batches; i += 1) {
-      const prompt = buildKeywordsPrompt({ productName, category: category || undefined, count: perBatch });
+      const prompt = buildKeywordsPrompt({ productName, category: category || undefined, count: perBatch, seed });
       const parsed = await generateTextJsonWithModelFallback<{ keywords: unknown }>('generate-product-keywords', prompt);
 
       const keywordsRaw = normalizeLines(parsed?.keywords, 120);
-      const keywords = keywordsRaw.map((k) => trimIfLooksCutAtLimit(k, 60)).filter(Boolean);
+      const keywords = keywordsRaw
+        .map((k) => trimIfLooksCutAtLimit(k, 60))
+        .filter(Boolean)
+        .filter((k) => !containsBlockedBrand(k))
+        .filter((k) => titleMatchesUserInput(k, productName))
+        .filter((k) => (category ? titleMatchesCategory(k, category) : true));
       all.push(...keywords);
       await sleep(900);
+
+      if (uniqStable(all).length >= count) break;
     }
 
     const keywords = uniqStable(all).slice(0, count);
@@ -4165,7 +4657,7 @@ app.post('/api/generate-product-keywords', async (req: Request, res: Response) =
 
 app.post('/api/generate-base', async (req: Request, res: Response) => {
   const { prompt, resolution, width, height, referenceImageBase64, referenceImageMimeType } = req.body as GenerateBaseRequestBody;
-  const style = normalizeIncomingStyleKey((req.body as any)?.style);
+  const styleIncoming = normalizeIncomingStyleKey((req.body as any)?.style);
   const requestedResolution =
     Number.isFinite(Number(width)) && Number.isFinite(Number(height)) && Number(width) === Number(height) && Number(width) > 0
       ? Number(width)
@@ -4175,7 +4667,7 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
     return safeJson(res, { error: 'Prompt is required.' }, 400);
   }
 
-  if (!style || !(style in styleModifiers) || !allowedBaseStyles.has(style)) {
+  if (!styleIncoming || !(styleIncoming in styleModifiers) || !allowedBaseStyles.has(styleIncoming)) {
     return safeJson(res, { error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' }, 400);
   }
 
@@ -4188,7 +4680,9 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
     const referenceInlineData = referenceImageBase64
       ? inlineDataFromAnyImageBase64({ base64: referenceImageBase64, mimeType: referenceImageMimeType })
       : null;
-    const forceWhite = shouldForceWhiteBackgroundFromPrompt(userPrompt);
+    const hoodieMockup = isHoodieMockupPrompt(userPrompt);
+    const style: StyleKey = hoodieMockup ? 'realistic' : styleIncoming;
+    const forceWhite = hoodieMockup ? false : shouldForceWhiteBackgroundFromPrompt(userPrompt);
     const enhanceOptions = {
       creativity: Number((req.body as any)?.creativity ?? 0.3),
       modelFormat: deriveModelFormatFromEnv(),
@@ -4251,8 +4745,19 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
       }
     }
 
-    let baseImage = await normalizeGeminiOutputPngBase64(String(imagePart.data), requestedResolution, { background: WHITE_BG });
-    if (forceWhite) {
+    let baseImage = await normalizeGeminiOutputPngBase64(String(imagePart.data), requestedResolution, {
+      background: hoodieMockup ? LIGHT_GRAY_BG : WHITE_BG,
+    });
+    if (hoodieMockup) {
+      const clamped = await sharp(Buffer.from(baseImage, 'base64'), { failOn: 'none' })
+        .ensureAlpha()
+        .modulate({ brightness: 0.92, saturation: 1.0 })
+        .linear(1, -6)
+        .png()
+        .toBuffer();
+      const normalized = await normalizeHoodieMockupEcom(clamped);
+      baseImage = normalized.toString('base64');
+    } else if (forceWhite) {
       baseImage = await ensureSolidWhiteBackgroundStrict(baseImage);
     }
     return safeJson(res, { baseImage });
@@ -4264,7 +4769,7 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
 
 app.post('/api/generate-views-from-base', async (req: Request, res: Response) => {
   const { baseImageBase64, resolution, width, height, prompt } = req.body as GenerateViewsFromBaseRequestBody;
-  const style = normalizeIncomingStyleKey((req.body as any)?.style);
+  const styleIncoming = normalizeIncomingStyleKey((req.body as any)?.style);
   const viewsRaw = Array.isArray((req.body as any)?.views) ? (req.body as any).views : [];
   const views = viewsRaw
     .map((v: any) => normalizeIncomingViewKey(v))
@@ -4278,7 +4783,7 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
     return safeJson(res, { error: 'baseImageBase64 is required.' }, 400);
   }
 
-  if (!style || !(style in styleModifiers) || !allowedBaseStyles.has(style)) {
+  if (!styleIncoming || !(styleIncoming in styleModifiers) || !allowedBaseStyles.has(styleIncoming)) {
     return safeJson(res, { error: 'Invalid style. Allowed: realistic, 3d, lineart, watercolor.' }, 400);
   }
 
@@ -4296,7 +4801,9 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
 
   try {
     const userPrompt = (prompt || '').trim();
-    const forceWhite = shouldForceWhiteBackgroundFromPrompt(userPrompt);
+    const hoodieMockup = isHoodieMockupPrompt(userPrompt);
+    const style: StyleKey = hoodieMockup ? 'realistic' : styleIncoming;
+    const forceWhite = hoodieMockup ? false : shouldForceWhiteBackgroundFromPrompt(userPrompt);
     const enhanceOptions = {
       creativity: Number((req.body as any)?.creativity ?? 0.3),
       modelFormat: deriveModelFormatFromEnv(),
@@ -4322,16 +4829,25 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
         modelText: sampleModelText,
       });
     }
-    const tileBackground = WHITE_BG;
+    const tileBackground = hoodieMockup ? LIGHT_GRAY_BG : WHITE_BG;
     const grid = computeGrid(views.length);
     const tileWidth = Math.max(64, Math.floor(requestedResolution / grid.columns));
     const tileHeight = Math.max(64, Math.floor(requestedResolution / grid.rows));
 
     const normalizedBase = normalizePngBase64(baseImageBase64);
-    const baseFullBuffer = await sharp(Buffer.from(normalizedBase, 'base64'))
+    let baseFullBuffer = await sharp(Buffer.from(normalizedBase, 'base64'))
       .resize(requestedResolution, requestedResolution, { fit: 'contain', background: tileBackground })
       .png()
       .toBuffer();
+    if (hoodieMockup) {
+      baseFullBuffer = await sharp(baseFullBuffer, { failOn: 'none' })
+        .ensureAlpha()
+        .modulate({ brightness: 0.92, saturation: 1.0 })
+        .linear(1, -6)
+        .png()
+        .toBuffer();
+      baseFullBuffer = await normalizeHoodieMockupEcom(baseFullBuffer);
+    }
 
     const generatedMap = new Map<ViewKey, Buffer>();
     await Promise.all(
@@ -4369,6 +4885,8 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
       return { view, buffer: buf };
     });
 
+    const metaWarnings: string[] = [];
+
     if (views.includes('left') && views.includes('right')) {
       const leftTile = fullImages.find((t) => t.view === 'left') ?? null;
       const rightIdx = fullImages.findIndex((t) => t.view === 'right');
@@ -4378,23 +4896,100 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
         const shouldFix = rightTile && !(await isOppositeSideOfLeft(leftTile.buffer, rightTile.buffer));
 
         if (rightTile && shouldFix) {
-          const regenerated = await generateViewImageFromBase(
-            normalizedBase,
-            style,
-            'right',
-            requestedResolution,
-            requestedResolution,
-            promptForModel,
-            "This MUST be the RIGHT side view (opposite side from the LEFT). Do NOT reuse the left-side angle. Do NOT mirror the design. Only change camera angle. Ensure the garment's front points to the LEFT in the frame.",
-            { background: tileBackground, forceWhiteOverride: forceWhite }
-          );
-          const outBuf = forceWhite
-            ? Buffer.from(await ensureSolidWhiteBackgroundStrict(regenerated.buffer.toString('base64')), 'base64')
-            : regenerated.buffer;
+          let bestBuf: Buffer = rightTile.buffer;
+          let bestOpposite = await isOppositeSideOfLeft(leftTile.buffer, bestBuf);
 
-          // Never fall back to a mirrored-left output: it mirrors text/logos and creates invalid prints.
-          // If regeneration still isn't opposite-side enough, keep the regenerated output but do not flip it.
-          fullImages[rightIdx] = { view: 'right', buffer: outBuf };
+          const retryInstructions = [
+            "This MUST be the RIGHT side view (opposite side from the LEFT). Do NOT reuse the left-side angle. Do NOT mirror the design. Only change camera angle. Ensure the garment's front points to the LEFT in the frame.",
+            "STRICT RIGHT VIEW: Camera is on the subject's RIGHT side. The subject faces LEFT in the frame. Show the RIGHT side only. Do NOT show the LEFT side.",
+            'CRITICAL: Do NOT mirror/flip any text/logo/watermark. Keep text readable (not reversed). If the front logo is not visible from this angle, do not invent a mirrored copy.',
+          ];
+
+          const baseInline = pngBase64ToInlineData(normalizedBase);
+          const leftInline = await inlineDataFromPngBuffer(leftTile.buffer, 512);
+
+          const generateRightWithLeftRef = async (instruction: string) => {
+            const text = [
+              'You are generating a new image view of the SAME product.',
+              'The FIRST attached image is the base/front design reference (ground truth design).',
+              "The SECOND attached image is the LEFT side view of the same product that was already generated.",
+              'Task: Generate the RIGHT side view (opposite side from the LEFT view).',
+              'Do NOT copy the left-side camera angle. Only change camera position to the right side.',
+              'Never mirror/flip text/logos/watermarks. Keep all text readable (not reversed).',
+              'Print placement must stay physically consistent on the product; do not duplicate prints on other sides.',
+              instruction,
+              buildViewFromBasePrompt(
+                style,
+                'right',
+                requestedResolution,
+                requestedResolution,
+                promptForModel,
+                undefined,
+                forceWhite
+              ),
+              'Return ONE image only.',
+            ]
+              .filter(Boolean)
+              .join(' ');
+
+            const response = await generateContentWithRetry(
+              'generateViewImageFromBase:right:leftRef',
+              async () =>
+                await ai.models.generateContent({
+                  model: 'gemini-2.5-flash-image',
+                  contents: [
+                    {
+                      role: 'user',
+                      parts: [{ text }, { inlineData: baseInline }, { inlineData: leftInline }],
+                    },
+                  ],
+                }),
+              { attempts: 2, baseDelayMs: 650 }
+            );
+
+            const imagePart = extractGeminiInlineImagePart(response);
+            if (!imagePart?.data) {
+              throw new Error('Gemini response did not include an image for right view.');
+            }
+            const raw = Buffer.from(imagePart.data as string, 'base64');
+            const resized = await sharp(raw)
+              .resize(requestedResolution, requestedResolution, { fit: 'contain', background: tileBackground })
+              .png()
+              .toBuffer();
+            return forceWhite
+              ? Buffer.from(await ensureSolidWhiteBackgroundStrict(resized.toString('base64')), 'base64')
+              : resized;
+          };
+
+          for (let attempt = 0; attempt < retryInstructions.length && !bestOpposite; attempt += 1) {
+            let outBuf: Buffer;
+            try {
+              outBuf = await generateRightWithLeftRef(retryInstructions[attempt]);
+            } catch {
+              const regenerated = await generateViewImageFromBase(
+                normalizedBase,
+                style,
+                'right',
+                requestedResolution,
+                requestedResolution,
+                promptForModel,
+                retryInstructions[attempt],
+                { background: tileBackground, forceWhiteOverride: forceWhite }
+              );
+              outBuf = forceWhite
+                ? Buffer.from(await ensureSolidWhiteBackgroundStrict(regenerated.buffer.toString('base64')), 'base64')
+                : regenerated.buffer;
+            }
+
+            bestBuf = outBuf;
+            bestOpposite = await isOppositeSideOfLeft(leftTile.buffer, bestBuf);
+          }
+
+          if (!bestOpposite) {
+            metaWarnings.push('Right view may match left-side angle; try regenerating views for a true right view.');
+          }
+
+          fullImages[rightIdx] = { view: 'right', buffer: bestBuf };
         }
       }
     }
@@ -4417,6 +5012,7 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
         dimensions: composite.dimensions,
         grid: { ...grid, tileWidth, tileHeight },
         viewOrder: views,
+        warnings: metaWarnings.length ? metaWarnings : undefined,
       },
     });
   } catch (err: any) {

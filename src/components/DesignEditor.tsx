@@ -102,6 +102,7 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
   const [selectedLogoId, setSelectedLogoId] = useState<string | null>(null);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const [canvasPx, setCanvasPx] = useState<number>(CANVAS_MAX_PX);
+  const [canvasBgColor, setCanvasBgColor] = useState<string>('#FFFFFF');
 
   const [myDesignsOpen, setMyDesignsOpen] = useState(false);
   const [designsLoading, setDesignsLoading] = useState(false);
@@ -112,6 +113,7 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
   const [saveName, setSaveName] = useState('');
   const [saving, setSaving] = useState(false);
   const [exportResolutionScale, setExportResolutionScale] = useState<1 | 2 | 4>(1);
+  const [baseZoom, setBaseZoom] = useState<number>(1);
 
   const placeholderThumb =
     "data:image/svg+xml;charset=utf-8," +
@@ -130,14 +132,14 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
   const dragRef = useRef<
     | null
     | {
-        kind: 'text' | 'logo';
-        id: string;
-        startClientX: number;
-        startClientY: number;
-        startXNorm: number;
-        startYNorm: number;
-        hasMoved: boolean;
-      }
+      kind: 'text' | 'logo';
+      id: string;
+      startClientX: number;
+      startClientY: number;
+      startXNorm: number;
+      startYNorm: number;
+      hasMoved: boolean;
+    }
   >(null);
 
   const getTextLayersSnapshot = () => {
@@ -236,13 +238,14 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
     if (!baseImageDims) {
       return { size, scale: 1, offsetX: 0, offsetY: 0 };
     }
-    const scale = Math.min(size / baseImageDims.width, size / baseImageDims.height);
+    const fitScale = Math.min(size / baseImageDims.width, size / baseImageDims.height);
+    const scale = fitScale * baseZoom;
     const drawnW = baseImageDims.width * scale;
     const drawnH = baseImageDims.height * scale;
     const offsetX = (size - drawnW) / 2;
     const offsetY = (size - drawnH) / 2;
     return { size, scale, offsetX, offsetY };
-  }, [baseImageDims, canvasPx]);
+  }, [baseImageDims, canvasPx, baseZoom]);
 
   const selectedText = useMemo(
     () => (selectedTextId ? textLayers.find((layer) => layer.id === selectedTextId) ?? null : null),
@@ -730,6 +733,22 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
               e.currentTarget.value = '';
             }}
           />
+
+          <div className="pt-2 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-900 font-medium">Preview Zoom</span>
+              <span className="text-xs text-slate-500">{Math.round(baseZoom * 100)}%</span>
+            </div>
+            <input
+              type="range"
+              min="0.5"
+              max="3"
+              step="0.1"
+              value={baseZoom}
+              onChange={(e) => setBaseZoom(Number(e.target.value))}
+              className="w-full h-1.5 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-purple-500"
+            />
+          </div>
         </div>
 
         <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
@@ -789,7 +808,8 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
             <div className="mt-5 flex justify-center">
               <div
                 ref={stageOuterRef}
-                className="w-full max-w-[720px] aspect-square rounded-2xl border border-slate-200 bg-white overflow-hidden flex items-center justify-center"
+                className="w-full max-w-[720px] aspect-square rounded-2xl border border-slate-200 overflow-hidden flex items-center justify-center"
+                style={{ backgroundColor: canvasBgColor }}
               >
                 <div
                   ref={stageRef}
@@ -809,7 +829,13 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
                     <img
                       src={baseImageSrc}
                       alt="Base"
-                      className="absolute inset-0 w-full h-full object-contain"
+                      className="absolute"
+                      style={{
+                        left: display.offsetX,
+                        top: display.offsetY,
+                        width: baseImageDims ? baseImageDims.width * display.scale : '100%',
+                        height: baseImageDims ? baseImageDims.height * display.scale : '100%',
+                      }}
                       draggable={false}
                     />
                   ) : (
@@ -818,169 +844,193 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
                     </div>
                   )}
 
-                {logoLayers.map((layer) => {
-                  if (!baseImageDims) return null;
-                  const dims = logoDimsById[layer.id];
-                  const w = dims ? dims.width * display.scale : 160;
-                  const h = dims ? dims.height * display.scale : 160;
-                  const left = display.offsetX + layer.xNorm * baseImageDims.width * display.scale;
-                  const top = display.offsetY + layer.yNorm * baseImageDims.height * display.scale;
-                  const isSelected = selectedLogoId === layer.id;
+                  {logoLayers.map((layer) => {
+                    if (!baseImageDims) return null;
+                    const dims = logoDimsById[layer.id];
+                    const w = dims ? dims.width * display.scale : 160;
+                    const h = dims ? dims.height * display.scale : 160;
+                    const left = display.offsetX + layer.xNorm * baseImageDims.width * display.scale;
+                    const top = display.offsetY + layer.yNorm * baseImageDims.height * display.scale;
+                    const isSelected = selectedLogoId === layer.id;
 
-                  return (
-                    <div
-                      key={layer.id}
-                      className="absolute"
-                      style={{
-                        left,
-                        top,
-                        width: w,
-                        height: h,
-                        transform: `translate(-50%, -50%) rotate(${layer.rotation}deg) scale(${layer.scale})`,
-                        transformOrigin: 'center',
-                        zIndex: 20,
-                      }}
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                        setSelectedLogoId(layer.id);
-                        setSelectedTextId(null);
-                        startDrag('logo', layer.id, e.clientX, e.clientY);
-                        (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
-                      }}
-                      onPointerUp={(e) => {
-                        (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
-                        endDrag();
-                      }}
-                    >
+                    return (
                       <div
-                        className={
-                          isSelected
-                            ? 'w-full h-full rounded-xl ring-2 ring-purple-400 ring-offset-2 ring-offset-transparent'
-                            : 'w-full h-full'
-                        }
+                        key={layer.id}
+                        className="absolute"
+                        style={{
+                          left,
+                          top,
+                          width: w,
+                          height: h,
+                          transform: `translate(-50%, -50%) rotate(${layer.rotation}deg) scale(${layer.scale})`,
+                          transformOrigin: 'center',
+                          zIndex: 20,
+                        }}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          setSelectedLogoId(layer.id);
+                          setSelectedTextId(null);
+                          startDrag('logo', layer.id, e.clientX, e.clientY);
+                          (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+                        }}
+                        onPointerUp={(e) => {
+                          (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
+                          endDrag();
+                        }}
                       >
-                        <img src={layer.src} alt="Logo" className="w-full h-full object-contain" draggable={false} />
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {textLayers.map((layer) => {
-                  if (!baseImageDims) return null;
-                  const left = display.offsetX + layer.xNorm * baseImageDims.width * display.scale;
-                  const top = display.offsetY + layer.yNorm * baseImageDims.height * display.scale;
-                  const isSelected = selectedTextId === layer.id;
-                  const isEditing = editingTextId === layer.id;
-                  const fontCss = FONT_OPTIONS.find((opt) => opt.id === layer.fontId)?.css ?? FONT_OPTIONS[0].css;
-
-                  return (
-                    <div
-                      key={layer.id}
-                      className="absolute"
-                      style={{ left, top, transform: 'translate(-50%, -50%)', zIndex: 30 }}
-                      onDoubleClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedTextId(layer.id);
-                        setSelectedLogoId(null);
-                        setEditingTextId(layer.id);
-                        dragRef.current = null;
-                      }}
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                        if (isEditing) return;
-                        if (e.detail > 1) return;
-                        setSelectedTextId(layer.id);
-                        setSelectedLogoId(null);
-                        startDrag('text', layer.id, e.clientX, e.clientY);
-                        (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
-                      }}
-                      onPointerUp={(e) => {
-                        (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
-                        endDrag();
-                      }}
-                      onPointerCancel={(e) => {
-                        (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
-                        endDrag();
-                      }}
-                    >
-                      <div
-                        className={isSelected ? 'relative rounded-lg ring-2 ring-purple-400 ring-offset-2' : 'rounded-lg'}
-                        style={{ padding: 4, background: isSelected ? 'rgba(255,255,255,0.55)' : 'transparent' }}
-                      >
-                        {isSelected && !isEditing && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              endDrag();
-                              setTextLayers((prev) => prev.filter((t) => t.id !== layer.id));
-                              setSelectedTextId((prev) => (prev === layer.id ? null : prev));
-                              setEditingTextId((prev) => (prev === layer.id ? null : prev));
-                            }}
-                            className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-white border border-slate-200 shadow-sm text-slate-600 hover:text-red-600 hover:border-red-200 flex items-center justify-center"
-                            title="Delete text"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
-                        )}
-
                         <div
-                          suppressContentEditableWarning
-                          contentEditable={isEditing}
-                          onBlur={(e) => {
-                            const nextText = (e.currentTarget.textContent || '').trim() || 'Text';
-                            setTextLayers((prev) =>
-                              prev.map((t) => (t.id === layer.id ? { ...t, text: nextText } : t))
-                            );
-                            setEditingTextId(null);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                              e.preventDefault();
-                              (e.currentTarget as HTMLDivElement).blur();
-                            }
-                            if (e.key === 'Escape') {
-                              e.preventDefault();
-                              (e.currentTarget as HTMLDivElement).blur();
-                            }
-                          }}
-                          className={isEditing ? 'outline-none cursor-text' : 'cursor-move'}
-                          ref={(node) => {
-                            const map = textNodeRefs.current;
-                            if (!node) {
-                              map.delete(layer.id);
-                              return;
-                            }
-                            map.set(layer.id, node);
-                          }}
-                          style={{
-                            color: layer.color,
-                            fontSize: `${Math.max(10, Math.round(layer.fontSize * display.scale))}px`,
-                            fontFamily: fontCss,
-                            lineHeight: 1.1,
-                            textAlign: 'center',
-                            userSelect: isEditing ? 'text' : 'none',
-                            whiteSpace: 'pre-wrap',
-                          }}
+                          className={
+                            isSelected
+                              ? 'w-full h-full rounded-xl ring-2 ring-purple-400 ring-offset-2 ring-offset-transparent'
+                              : 'w-full h-full'
+                          }
                         >
-                          {layer.text}
+                          <img src={layer.src} alt="Logo" className="w-full h-full object-contain" draggable={false} />
                         </div>
                       </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+
+                  {textLayers.map((layer) => {
+                    if (!baseImageDims) return null;
+                    const left = display.offsetX + layer.xNorm * baseImageDims.width * display.scale;
+                    const top = display.offsetY + layer.yNorm * baseImageDims.height * display.scale;
+                    const isSelected = selectedTextId === layer.id;
+                    const isEditing = editingTextId === layer.id;
+                    const fontCss = FONT_OPTIONS.find((opt) => opt.id === layer.fontId)?.css ?? FONT_OPTIONS[0].css;
+
+                    return (
+                      <div
+                        key={layer.id}
+                        className="absolute"
+                        style={{ left, top, transform: 'translate(-50%, -50%)', zIndex: 30 }}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedTextId(layer.id);
+                          setSelectedLogoId(null);
+                          setEditingTextId(layer.id);
+                          dragRef.current = null;
+                        }}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          if (isEditing) return;
+                          if (e.detail > 1) return;
+                          setSelectedTextId(layer.id);
+                          setSelectedLogoId(null);
+                          startDrag('text', layer.id, e.clientX, e.clientY);
+                          (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+                        }}
+                        onPointerUp={(e) => {
+                          (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
+                          endDrag();
+                        }}
+                        onPointerCancel={(e) => {
+                          (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
+                          endDrag();
+                        }}
+                      >
+                        <div
+                          className={isSelected ? 'relative rounded-lg ring-2 ring-purple-400 ring-offset-2' : 'rounded-lg'}
+                          style={{ padding: 4, background: isSelected ? 'rgba(255,255,255,0.55)' : 'transparent' }}
+                        >
+                          {isSelected && !isEditing && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                endDrag();
+                                setTextLayers((prev) => prev.filter((t) => t.id !== layer.id));
+                                setSelectedTextId((prev) => (prev === layer.id ? null : prev));
+                                setEditingTextId((prev) => (prev === layer.id ? null : prev));
+                              }}
+                              className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-white border border-slate-200 shadow-sm text-slate-600 hover:text-red-600 hover:border-red-200 flex items-center justify-center"
+                              title="Delete text"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+
+                          <div
+                            suppressContentEditableWarning
+                            contentEditable={isEditing}
+                            onBlur={(e) => {
+                              const nextText = (e.currentTarget.textContent || '').trim() || 'Text';
+                              setTextLayers((prev) =>
+                                prev.map((t) => (t.id === layer.id ? { ...t, text: nextText } : t))
+                              );
+                              setEditingTextId(null);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && !e.shiftKey) {
+                                e.preventDefault();
+                                (e.currentTarget as HTMLDivElement).blur();
+                              }
+                              if (e.key === 'Escape') {
+                                e.preventDefault();
+                                (e.currentTarget as HTMLDivElement).blur();
+                              }
+                            }}
+                            className={isEditing ? 'outline-none cursor-text' : 'cursor-move'}
+                            ref={(node) => {
+                              const map = textNodeRefs.current;
+                              if (!node) {
+                                map.delete(layer.id);
+                                return;
+                              }
+                              map.set(layer.id, node);
+                            }}
+                            style={{
+                              color: layer.color,
+                              fontSize: `${Math.max(10, Math.round(layer.fontSize * display.scale))}px`,
+                              fontFamily: fontCss,
+                              lineHeight: 1.1,
+                              textAlign: 'center',
+                              userSelect: isEditing ? 'text' : 'none',
+                              whiteSpace: 'pre-wrap',
+                            }}
+                          >
+                            {layer.text}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             </div>
           </div>
         </div>
-      </div>
       </main>
 
       <aside className="w-80 bg-white border-l border-slate-200 p-6 overflow-auto">
         <h4 className="text-slate-900 mb-4">Properties</h4>
 
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
+          <p className="text-sm text-slate-900 font-medium">Canvas Background</p>
+          <div className="grid grid-cols-6 gap-2">
+            {COLOR_SWATCHES.map((color) => {
+              const active = canvasBgColor === color;
+              return (
+                <button
+                  key={color}
+                  type="button"
+                  onClick={() => {
+                    setCanvasBgColor(color);
+                  }}
+                  className={`w-10 h-10 rounded-xl transition-all border-2 ${active ? 'ring-4 ring-offset-2 ring-purple-500 border-white' : 'border-slate-200 hover:scale-110'
+                    }`}
+                  style={{ backgroundColor: color }}
+                  title={color}
+                >
+                  {color === '#FFFFFF' && <div className="w-full h-full border border-slate-300 rounded-xl" />}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {!selectedText && !selectedLogo && (
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600 mt-4">
             Select a text or logo layer to edit its properties.
           </div>
         )}
@@ -1006,9 +1056,8 @@ export function DesignEditor({ baseImages, onComplete }: DesignEditorProps) {
                           prev.map((t) => (t.id === selectedText.id ? { ...t, color } : t))
                         );
                       }}
-                      className={`w-10 h-10 rounded-xl transition-all border-2 ${
-                        active ? 'ring-4 ring-offset-2 ring-purple-500 border-white' : 'border-slate-200 hover:scale-110'
-                      }`}
+                      className={`w-10 h-10 rounded-xl transition-all border-2 ${active ? 'ring-4 ring-offset-2 ring-purple-500 border-white' : 'border-slate-200 hover:scale-110'
+                        }`}
                       style={{ backgroundColor: color }}
                       title={color}
                     >

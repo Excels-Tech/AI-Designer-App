@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { enhancePrompt, type AspectRatio, type EnhanceOptions, type ModelFormat } from './enhance';
+import { buildHoodieMockupPrompt } from '../prompts/hoodieMockup';
 
 function escapeRegExp(input: string): string {
   return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -7,6 +8,8 @@ function escapeRegExp(input: string): string {
 
 const APPAREL_OR_FASHION_KEYWORDS = [
   'hoodie',
+  'hoddie',
+  'hoody',
   't-shirt',
   'tshirt',
   'shirt',
@@ -397,6 +400,59 @@ function isGraphicOrDesignPrompt(p: string): boolean {
   ].some((w) => keywordPattern(w).test(s));
 }
 
+function hasWatermarkIntent(p: string): boolean {
+  const s = extractUserRequestSegment(p).toLowerCase();
+  if (!s.trim()) return false;
+  return /\bwater[\s-]*mark(ed|ing)?\b/.test(s);
+}
+
+function hasBrandingIntent(p: string): boolean {
+  const s = extractUserRequestSegment(p).toLowerCase();
+  if (!s.trim()) return false;
+  const keywords = [
+    'brand',
+    'branding',
+    'logo',
+    'wordmark',
+    'watermark',
+    'label',
+    'packaging',
+    'bottle label',
+    'box design',
+    'tagline',
+    'text on',
+    'caption',
+    'sticker',
+    'badge',
+    'emblem',
+  ];
+  return keywords.some((w) => keywordPattern(w).test(s));
+}
+
+function hasBackgroundIntent(p: string): boolean {
+  const s = extractUserRequestSegment(p).toLowerCase();
+  if (!s.trim()) return false;
+  const keywords = [
+    'background',
+    'scene',
+    'environment',
+    'stadium',
+    'arena',
+    'crowd',
+    'field',
+    'pitch',
+    'outdoor',
+    'sunset',
+    'sky',
+    'landscape',
+    'park',
+    'room',
+    'studio',
+    'gradient',
+  ];
+  return keywords.some((w) => keywordPattern(w).test(s));
+}
+
 function shouldForcePhotorealNonProduct(p: string, apparelMode: ApparelMode): boolean {
   if (apparelMode !== 'none') return false;
   if (userRequestedNonPhotorealStyle(p)) return false;
@@ -464,7 +520,7 @@ function buildPhotorealPrompt(args: {
     `Photorealistic, ultra-detailed image of ${subject}, rendered to look completely real at first glance with true-to-life proportions and believable scale.`,
     detailLine,
     'Use a realistic environment/background consistent with the request, with atmospheric depth, natural perspective cues, and physically accurate reflections where relevant.',
-    'Lighting should be natural and directional (soft sun or practical light), with gentle shadow falloff, realistic specular highlights, and neutral color balance (no artificial glow, no oversaturation).',
+    'Lighting should be natural and directional (soft sun or practical light), with gentle shadow falloff, COMPLETELY MATTE material finish, with NO shine, NO gloss, and NO reflections.',
     subjectKind === 'human'
       ? 'Cinematic camera realism: portrait framing focused on the face and upper body unless full-body is requested, shallow depth of field, crisp facial focus with soft background separation, high dynamic range, and clean, believable contrast.'
       : 'Cinematic camera realism: high-end lens feel, shallow depth of field with crisp subject focus and soft background separation, high dynamic range, and clean, believable contrast.',
@@ -735,6 +791,19 @@ export function maybeEnhancePrompt(
   const fashionDetected = apparelDetected && !mockupDetected && isFashionModelPrompt(userPrompt);
   const apparelMode: ApparelMode = mockupDetected ? 'mockup' : fashionDetected ? 'fashion' : apparelDetected ? 'neutral' : 'none';
 
+  // Hoodie mockups must remain clean ecommerce product shots; avoid cinematic/film prompt additions entirely.
+  if (firstApparelKeyword === 'hoodie' && apparelMode !== 'fashion') {
+    const enhancedPrompt = buildHoodieMockupPrompt({ basePrompt: userPrompt });
+    const hash = hashShort(enhancedPrompt);
+    const negativePrompt = enhancePrompt('', options).negativePrompt;
+    if (isPromptEnhancerDebug() && !isProductionEnv()) {
+      console.log(`[PromptEnhancer:${logLabel}] hoodie-mockup`, { hash });
+    } else {
+      console.log(`[PromptEnhancer:${logLabel}]`, { hash });
+    }
+    return { promptForModel: enhancedPrompt, negativePrompt, enhancedHash: hash };
+  }
+
   const creativity = Number(options?.creativity ?? 0.3);
   const forcePhotorealNonProduct = shouldForcePhotorealNonProduct(userPrompt, apparelMode);
   const creativityEffective = forcePhotorealNonProduct ? 1 : creativity;
@@ -770,6 +839,9 @@ export function maybeEnhancePrompt(
   let enhancedPrompt: string;
   let negativePrompt: string;
   const letterheadDetected = isLetterheadPrompt(userPrompt);
+  const brandingRequested = hasBrandingIntent(userPrompt);
+  const watermarkRequested = hasWatermarkIntent(userPrompt);
+  const backgroundRequested = hasBackgroundIntent(userPrompt);
 
   const canUseGptStyleNoneMode = apparelMode === 'none' && !isGraphicOrDesignPrompt(userPrompt);
 
@@ -824,7 +896,8 @@ export function maybeEnhancePrompt(
     enhancedPrompt = enhancedPrompt.replace(/\s{2,}/g, ' ').replace(/,\s*,/g, ',').replace(/,\s*$/g, '').trim();
 
     const letterheadPreface =
-      'Professional typographic hierarchy, clean white background, ample whitespace and balanced margins, vector-ready logo, print-ready layout. ONE LOGO ONLY. Ensure top-left logo placement only (do NOT center). 12mm safe margins for print (do not place important elements within 12mm of edges). Provide a monochrome (black-on-white) logo variant for print, optional top-right accent band, footer row for contact details, and a subtle diagonal watermark for branding.';
+      'Professional typographic hierarchy, clean white background, ample whitespace and balanced margins, vector-ready logo, print-ready layout. ONE LOGO ONLY. Ensure top-left logo placement only (do NOT center). 12mm safe margins for print (do not place important elements within 12mm of edges). Provide a monochrome (black-on-white) logo variant for print, optional top-right accent band, footer row for contact details.' +
+      (watermarkRequested ? ' If the user requested a watermark, add only a very light, optional diagonal watermark.' : ' Do not add any watermark unless explicitly requested by the user.');
 
     const stationeryPreface = letterheadDetected
       ? letterheadPreface
@@ -835,7 +908,7 @@ export function maybeEnhancePrompt(
     negativePrompt = String(negativePrompt ?? '')
       .split(',')
       .map((s) => s.trim())
-      .filter((x) => x && !/^(logo|text|watermark)$/i.test(x))
+      .filter((x) => x && !/^(logo|text)$/i.test(x) && (!/^watermark$/i.test(x) || watermarkRequested))
       .join(', ');
 
     // Remove photography/camera guidance and composition lines that don't apply to print/branding.
@@ -848,6 +921,100 @@ export function maybeEnhancePrompt(
 
     // Re-clean punctuation/spacing leftovers.
     enhancedPrompt = enhancedPrompt.replace(/\s{2,}/g, ' ').replace(/,\s*,/g, ',').replace(/,\s*$/g, '').trim();
+  }
+
+  // Default to plain/unbranded outputs unless the user explicitly asked for branding/text/watermarks.
+  if (!brandingRequested && !isGraphicOrDesignPrompt(userPrompt)) {
+    enhancedPrompt = `${enhancedPrompt}\nPlain, unbranded output: solid color fabric only, no logos, no brand names, no badges, no crests, no emblems, no symbols, no numbers, no stripes, no patches, no prints/patterns, no text, no watermarks. Keep the uniform completely plain.`.trim();
+
+    if (negativePrompt) {
+      const negatives = new Set(
+        String(negativePrompt)
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      );
+      [
+        'logo',
+        'text',
+        'watermark',
+        'label',
+        'brand name',
+        'caption',
+        'emblem',
+        'badge',
+        'crest',
+        'symbol',
+        'wordmark',
+        'sponsor',
+        'number',
+        'jersey number',
+        'branding',
+        'print',
+        'pattern',
+        'stripe',
+        'patch',
+        'non-plain uniform',
+        'non-plain kit',
+        'decorated uniform',
+        'letters',
+        'numbers',
+        'typography',
+        'wordmark',
+        'slogan',
+      ].forEach((word) => negatives.add(word));
+      negativePrompt = Array.from(negatives).join(', ');
+    } else {
+      negativePrompt =
+        'logo, text, watermark, branding, labels, captions, emblem, badge, crest, symbol, sponsor, number, jersey number, print, pattern, stripe, patch, non-plain uniform, non-plain kit, decorated uniform';
+    }
+  }
+
+  // Force plain product and white background when the user did not ask for a background/scene.
+  const needsPlainProduct = apparelMode !== 'fashion' || !isGraphicOrDesignPrompt(userPrompt);
+  if (needsPlainProduct && !backgroundRequested) {
+    enhancedPrompt = `${enhancedPrompt}\nPlain product on a PURE SOLID WHITE background (#FFFFFF), nothing else in the background (no graphics, no shapes), no scenery, no room, no stadium, no field, no crowd, no horizon, no floor, no props.`.trim();
+
+    const negatives = new Set(
+      String(negativePrompt ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    );
+      [
+        'stadium',
+        'arena',
+        'crowd',
+        'fans',
+        'bleachers',
+        'field',
+        'pitch',
+        'grass',
+        'sky',
+        'sunset',
+        'horizon',
+        'landscape',
+        'room',
+        'interior',
+        'gradient',
+        'vignette',
+        'floor shadow',
+        'ground shadow',
+        'scene',
+        'background',
+      'environment',
+      'props',
+      'shape backdrop',
+      'graphic backdrop',
+      'circle backdrop',
+      'emblem backdrop',
+      'patterned background',
+      'textured background',
+      'non-white background',
+      'gradient background',
+      'scenery',
+    ].forEach((word) => negatives.add(word));
+    negativePrompt = Array.from(negatives).join(', ');
   }
 
   const hash = hashShort(enhancedPrompt);

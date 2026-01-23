@@ -6,6 +6,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import sharp from 'sharp';
 import { safeJson } from '../utils/safeJson';
 import fetch from 'node-fetch';
+import { buildHoodieMockupPrompt, isHoodieMockupPrompt } from '../prompts/hoodieMockup';
 
 // Initialize Google GenAI client lazily
 let genai: GoogleGenerativeAI | null = null;
@@ -31,12 +32,14 @@ const STATIONERY_DESIGN_TYPES = new Set([
 ]);
 
 const STYLE_VARIANTS = [
-    'Topband: ONE LOGO ONLY in top-left header; 18–24mm top accent band in brand color; small top-left logo; right-aligned contact row in footer; 12mm safe margins; provide monochrome logo variant.',
+    'Topband: ONE LOGO ONLY in top-left header; 18-24mm top accent band in brand color; small top-left logo; right-aligned contact row in footer; 12mm safe margins; provide monochrome logo variant.',
     'Corner flourish: ONE LOGO ONLY top-left; bold corner flourish in brand color at top-right; main body uncluttered; minimal centered contact footer; 12mm safe margins; monochrome variant.',
-    'Diagonal watermark: ONE LOGO ONLY top-left; subtle diagonal accent at lower-right and very low-opacity watermark in lower quadrant; left-aligned footer contact row; 12mm safe margins; monochrome variant.',
     'Minimal: ONE LOGO ONLY top-left; very wide whitespace, no decorative accents; clear typographic hierarchy; icons-only minimal footer; 12mm safe margins; monochrome variant.',
     'Footer-heavy: ONE LOGO ONLY top-left; minimal header, prominent footer with stacked contact info and separators; ensure 12mm safe margins; monochrome variant.'
 ];
+
+const WATERMARK_VARIANT =
+    'Diagonal watermark: ONE LOGO ONLY top-left; subtle diagonal accent at lower-right and very low-opacity watermark in lower quadrant; left-aligned footer contact row; 12mm safe margins; monochrome variant.';
 
 // Ensure directory exists
 if (!fs.existsSync(GENERATED_DIR)) {
@@ -45,7 +48,7 @@ if (!fs.existsSync(GENERATED_DIR)) {
 
 export async function generateImageHandler(req: Request, res: Response) {
     try {
-        const { prompt, width, height, platform, designType, brandName, tagline, colors, tone, styleDescription, dnaImageUrl } = req.body;
+        const { prompt, width, height, platform, designType, brandName, tagline, colors, tone, styleDescription, dnaImageUrl, is3D } = req.body;
         const normalizedDesignType = String(designType || '').trim().toLowerCase();
         const isStationery = STATIONERY_DESIGN_TYPES.has(normalizedDesignType);
 
@@ -157,6 +160,10 @@ NO mockups. NO 3D. NO perspective.`;
                     const variantParam = variantParamRaw.trim().toLowerCase();
 
                     let chosenVariant: string | null = null;
+                    const watermarkRequested =
+                        /watermark/i.test(variantParamRaw) ||
+                        /watermark/i.test(String(styleDescription ?? '')) ||
+                        /watermark/i.test(String(prompt ?? ''));
 
                     if (styleDescription && String(styleDescription).trim()) {
                         chosenVariant = String(styleDescription).trim();
@@ -173,6 +180,10 @@ NO mockups. NO 3D. NO perspective.`;
                     } else {
                         // treat unknown string as a custom variant description
                         chosenVariant = variantParamRaw;
+                    }
+
+                    if (watermarkRequested && variantParam !== 'none') {
+                        chosenVariant = WATERMARK_VARIANT;
                     }
 
                     console.log('[Generate] Using stationery variant:', chosenVariant ?? 'none');
@@ -197,28 +208,33 @@ NO mockups. NO 3D. NO perspective.`;
                     (req as any).chosenVariant = chosenVariant;
                 }
             } else {
-                const enhancementInstruction = `You are an expert prompt engineer for photorealistic AI image generation.
-
-Transform this user prompt into a detailed, photorealistic image description. 
+                if (isHoodieMockupPrompt(prompt)) {
+                    // Hoodie mockups must remain clean ecommerce product shots; avoid cinematic/film prompt additions.
+                    finalPrompt = buildHoodieMockupPrompt({ basePrompt: prompt, is3D: is3D === true });
+                } else {
+                    const enhancementInstruction = `You are an expert prompt engineer for photorealistic AI image generation.
+	
+	Transform this user prompt into a detailed, photorealistic image description. 
 
 CRITICAL RULES:
-1. Start with: "A candid, unposed photograph of..." or "An authentic, documentary-style photo of..."
-2. Add: "shot on 35mm film", "natural ambient lighting", "grain and slight imperfections visible"
-3. For people: "natural skin texture with pores and small imperfections", "asymmetrical features", "authentic expression"
-4. Add: "no post-processing", "raw photo aesthetic", "photojournalistic style"
-5. NEVER use: CGI, render, artistic, stylized, perfect, dramatic, hyper-real, illustration, painting
+1. Start with: "A high-quality, professional studio photograph of..." or "A clean, well-lit product photo of..."
+2. Add: "soft diffuse lighting", "matte finish", "clean solid background"
+3. For people: "natural skin texture", "authentic expression"
+4. Add: "plain background", "no shine", "no reflections", "no grain", "no noise"
+5. NEVER use: CGI, render, artistic, stylized, perfect, dramatic, hyper-real, illustration, painting, grain, 35mm, film, artifacts
 
 User prompt: ${prompt}
 Platform: ${platform || 'social media'}
+	
+	Output ONLY the enhanced prompt, nothing else:`;
 
-Output ONLY the enhanced prompt, nothing else:`;
+                    const enhancementModel = ai.getGenerativeModel({ model: 'gemini-2.0-flash' });
+                    const enhancementResponse = await enhancementModel.generateContent(enhancementInstruction);
 
-                const enhancementModel = ai.getGenerativeModel({ model: 'gemini-2.0-flash' });
-                const enhancementResponse = await enhancementModel.generateContent(enhancementInstruction);
-
-                const enhancedText = enhancementResponse.response.text();
-                if (enhancedText) {
-                    finalPrompt = enhancedText.trim();
+                    const enhancedText = enhancementResponse.response.text();
+                    if (enhancedText) {
+                        finalPrompt = enhancedText.trim();
+                    }
                 }
             }
         } catch (enhanceErr) {
@@ -321,7 +337,15 @@ Output ONLY the enhanced prompt, nothing else:`;
                         const imageData = part.inlineData.data;
                         if (!imageData) continue;
 
-                        const buffer = Buffer.from(imageData, 'base64');
+                        let buffer = Buffer.from(imageData, 'base64');
+                        if (isHoodieMockupPrompt(prompt)) {
+                            buffer = await sharp(buffer, { failOn: 'none' })
+                                .ensureAlpha()
+                                .modulate({ brightness: 0.92, saturation: 1.0 })
+                                .linear(1, -6)
+                                .png()
+                                .toBuffer();
+                        }
 
                         console.log(`[Generate] Resizing ${id} to ${Math.round(width)}x${Math.round(height)}...`);
                         await sharp(buffer).resize({ width: Math.round(width), height: Math.round(height), fit: 'cover' }).toFile(filepath);
@@ -336,7 +360,15 @@ Output ONLY the enhanced prompt, nothing else:`;
             console.warn('[Generate] Gemini image generation failed, attempting OpenAI fallback:', genErr?.message || genErr);
             if (process.env.OPENAI_API_KEY) {
                 try {
-                    const buffer = await openAIGenerateImage(finalPrompt);
+                    let buffer = await openAIGenerateImage(finalPrompt);
+                    if (isHoodieMockupPrompt(prompt)) {
+                        buffer = await sharp(buffer, { failOn: 'none' })
+                            .ensureAlpha()
+                            .modulate({ brightness: 0.92, saturation: 1.0 })
+                            .linear(1, -6)
+                            .png()
+                            .toBuffer();
+                    }
                     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
                     const filename = `${id}.png`;
                     const filepath = path.join(GENERATED_DIR, filename);

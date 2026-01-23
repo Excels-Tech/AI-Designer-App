@@ -59,7 +59,7 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
 
     const generateTitles = async () => {
         const candidate = normalizeQuery(titlesFieldText);
-        const looksLikeOutput = titles.length > 0 && normalizeQuery(titlesResultLimited) === candidate;
+        const looksLikeOutput = titles.length > 0 && normalizeQuery(titles.join(' ')) === candidate;
         const query = (looksLikeOutput ? titlesLastQuery : candidate).trim();
 
         if (!query) {
@@ -92,7 +92,7 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
 
     const generateKeywords = async () => {
         const candidate = normalizeQuery(keywordsFieldText);
-        const looksLikeOutput = keywords.length > 0 && normalizeQuery(keywordsResultLimited) === candidate;
+        const looksLikeOutput = keywords.length > 0 && normalizeQuery(keywords.join(' ')) === candidate;
         const query = (looksLikeOutput ? keywordsLastQuery : candidate).trim();
 
         if (!query) {
@@ -209,23 +209,31 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
     };
 
     // Keep outputs within requested character ranges whenever generated.
-    const titlesResultLimited = pickBestTitleToRange(titles, 100, 120);
-    // Keywords: never cut inside a keyword; pack full keywords up to a safe max within range.
-    const keywordsResultLimited = packItemsToLimitNoPartial(keywords, ', ', 340);
+    const cleanPunctuation = (s: string) => s.replace(/[|,;:!]/g, ' ').replace(/\s+/g, ' ').trim();
+
+    // We want ONE optimized title (100-120 chars) and one set of keywords (up to 350 chars).
+    const rawBestTitle = pickBestTitleToRange(titles, 100, 120);
+    const titlesResultLimited = cleanPunctuation(rawBestTitle);
+    const titlesBadges = titlesResultLimited ? [titlesResultLimited] : [];
+
+    // Keywords: pack full keywords up to a safe max within range.
+    const keywordsPacked = packItemsToLimitNoPartial(keywords, '|||', 340);
+    const keywordsBadges = keywordsPacked.split('|||').map(cleanPunctuation).filter(Boolean);
+    const keywordsResultLimited = keywordsBadges.join(' ');
 
     const calcChWidth = (value: string) => `${Math.min(600, Math.max(28, normalizeQuery(value).length + 2))}ch`;
 
     useEffect(() => {
-        if (titlesResultLimited) setTitlesFieldText(titlesResultLimited);
-    }, [titlesResultLimited]);
+        if (titles.length) setTitlesFieldText('');
+    }, [titles]);
 
     useEffect(() => {
-        if (keywordsResultLimited) setKeywordsFieldText(keywordsResultLimited);
-    }, [keywordsResultLimited]);
+        if (keywords.length) setKeywordsFieldText('');
+    }, [keywords]);
 
-	    return (
-	        <div className="listing-assistant-inline bg-white rounded-3xl border border-slate-200 shadow-xl p-8 space-y-6">
-	            <style>{`
+    return (
+        <div className="listing-assistant-inline bg-white rounded-3xl border border-slate-200 shadow-xl p-8 space-y-6">
+            <style>{`
 	                @keyframes lai-shine {
 	                    0% { transform: translate3d(-140%, 0, 0) skewX(-18deg); }
 	                    100% { transform: translate3d(240%, 0, 0) skewX(-18deg); }
@@ -264,59 +272,69 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
                     background: rgba(51, 65, 85, 0.95);
                 }
             `}</style>
-		            <div className="flex items-center gap-3 mb-2">
-		                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-500 flex items-center justify-center">
-		                    <Sparkles className="w-4 h-4 text-white" />
-		                </div>
-		                <div>
-		                    <h3 className="text-lg font-semibold text-slate-900">AI Titles & Keywords</h3>
-		                </div>
-		            </div>
+            <div className="flex items-center gap-3 mb-2">
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-500 flex items-center justify-center">
+                    <Sparkles className="w-4 h-4 text-white" />
+                </div>
+                <div>
+                    <h3 className="text-lg font-semibold text-slate-900">AI Titles & Keywords</h3>
+                </div>
+            </div>
 
-	    {error && <p className="text-sm text-red-600">{error}</p>}
+            {error && <p className="text-sm text-red-600">{error}</p>}
 
-	    {/* Results Section */}
-	    <div className="space-y-4 pt-4 border-t border-slate-100">
-	        {/* Titles Output (full width) */}
-	        <div className="space-y-2">
-	            <div className="flex items-center justify-between">
-	                <div className="flex items-center gap-2">
-	                    <label className="text-sm font-semibold text-slate-900">Generated Titles</label>
-	                    <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
-	                        {titlesResultLimited.length}/120
-	                    </span>
-	                </div>
-	            </div>
-		            <ScrollAreaPrimitive.Root type="always" className="w-full h-10 rounded-xl border border-slate-200 bg-slate-50 overflow-hidden">
-		                <ScrollAreaPrimitive.Viewport className="h-full w-full whitespace-nowrap" style={{ whiteSpace: 'nowrap' }}>
-		                    <div className="h-full px-3 py-2 flex items-center">
-                                <input
-                                    value={titlesFieldText}
-                                    onChange={(e) => {
-                                        setTitlesFieldText(e.target.value);
-                                        if (titles.length) setTitles([]);
-                                    }}
-                                    placeholder="Type product name here..."
-                                    className="bg-transparent border-0 p-0 m-0 shadow-none outline-none focus:outline-none focus:ring-0 focus:ring-offset-0 appearance-none text-[15px] text-slate-600 leading-6 min-w-max"
-                                    style={{ width: calcChWidth(titlesFieldText) }}
-                                />
-		                    </div>
-		                </ScrollAreaPrimitive.Viewport>
-	                <ScrollAreaPrimitive.Scrollbar orientation="horizontal" className="la-hscrollbar">
-	                    <ScrollAreaPrimitive.Thumb className="la-hthumb" />
-	                </ScrollAreaPrimitive.Scrollbar>
-	            </ScrollAreaPrimitive.Root>
-	            <div className="flex items-center justify-between pt-1">
-		                <button
-		                    type="button"
-		                    onClick={generateTitles}
-		                    disabled={!canOptimizeTitles || titlesLoading}
-		                    className="inline-flex items-center gap-2 text-sm font-medium text-purple-700 border border-purple-200 bg-purple-50 hover:bg-purple-100 px-4 py-2 rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-		                >
-		                    {titlesLoading ? 'Generating...' : 'Generate Titles'}
-		                </button>
-	                {titles.length > 0 && (
-	                    <button
+            {/* Results Section */}
+            <div className="space-y-4 pt-4 border-t border-slate-100">
+                {/* Titles Output (full width) */}
+                <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                            <label className="text-sm font-semibold text-slate-900">Generated Titles</label>
+                            <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
+                                {titlesResultLimited.length}/120
+                            </span>
+                        </div>
+                    </div>
+                    <ScrollAreaPrimitive.Root type="always" className="w-full min-h-[40px] max-h-32 rounded-xl border border-slate-200 bg-slate-50 overflow-hidden">
+                        <ScrollAreaPrimitive.Viewport className="h-full w-full">
+                            <div className="px-3 py-2 flex flex-wrap items-center gap-2">
+                                {titlesBadges.length > 0 ? (
+                                    titlesBadges.map((title, idx) => (
+                                        <div
+                                            key={idx}
+                                            className="inline-flex items-center px-4 py-2 rounded-xl text-base font-medium bg-gradient-to-r from-purple-500 to-violet-500 text-white shadow-sm"
+                                        >
+                                            {title}
+                                        </div>
+                                    ))
+                                ) : (
+                                    <input
+                                        value={titlesFieldText}
+                                        onChange={(e) => {
+                                            setTitlesFieldText(e.target.value);
+                                            if (titles.length) setTitles([]);
+                                        }}
+                                        placeholder="Type product name here..."
+                                        className="bg-transparent border-0 p-0 m-0 shadow-none outline-none focus:outline-none focus:ring-0 focus:ring-offset-0 appearance-none text-[15px] text-slate-600 leading-6 w-full"
+                                    />
+                                )}
+                            </div>
+                        </ScrollAreaPrimitive.Viewport>
+                        <ScrollAreaPrimitive.Scrollbar orientation="horizontal" className="la-hscrollbar">
+                            <ScrollAreaPrimitive.Thumb className="la-hthumb" />
+                        </ScrollAreaPrimitive.Scrollbar>
+                    </ScrollAreaPrimitive.Root>
+                    <div className="flex items-center justify-between pt-1">
+                        <button
+                            type="button"
+                            onClick={generateTitles}
+                            disabled={!canOptimizeTitles || titlesLoading}
+                            className="inline-flex items-center gap-2 text-sm font-medium text-purple-700 border border-purple-200 bg-purple-50 hover:bg-purple-100 px-4 py-2 rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                            {titlesLoading ? 'Generating...' : 'Generate Titles'}
+                        </button>
+                        {titles.length > 0 && (
+                            <button
                                 onClick={() => copyText(titlesResultLimited, 'titles')}
                                 className="inline-flex items-center gap-1.5 text-xs font-medium text-purple-700 border border-purple-200 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
                                 type="button"
@@ -328,46 +346,56 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
                     </div>
                 </div>
 
-	        {/* Keywords Output (full width) */}
-	        <div className="space-y-2">
-	            <div className="flex items-center justify-between">
-	                <div className="flex items-center gap-2">
-	                    <label className="text-sm font-semibold text-slate-900">Generated Keywords</label>
-	                    <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
-	                        {keywordsResultLimited.length}/350
-	                    </span>
-	                </div>
-	            </div>
-		            <ScrollAreaPrimitive.Root type="always" className="w-full h-12 rounded-xl border border-slate-200 bg-slate-50 overflow-hidden">
-		                <ScrollAreaPrimitive.Viewport className="h-full w-full whitespace-nowrap" style={{ whiteSpace: 'nowrap' }}>
-		                    <div className="h-full px-3 py-2 flex items-center">
-                                <input
-                                    value={keywordsFieldText}
-                                    onChange={(e) => {
-                                        setKeywordsFieldText(e.target.value);
-                                        if (keywords.length) setKeywords([]);
-                                    }}
-                                    placeholder="Type product name here..."
-                                    className="bg-transparent border-0 p-0 m-0 shadow-none outline-none focus:outline-none focus:ring-0 focus:ring-offset-0 appearance-none text-[15px] text-slate-600 leading-6 min-w-max"
-                                    style={{ width: calcChWidth(keywordsFieldText) }}
-                                />
-		                    </div>
-		                </ScrollAreaPrimitive.Viewport>
-	                <ScrollAreaPrimitive.Scrollbar orientation="horizontal" className="la-hscrollbar">
-	                    <ScrollAreaPrimitive.Thumb className="la-hthumb" />
-	                </ScrollAreaPrimitive.Scrollbar>
-	            </ScrollAreaPrimitive.Root>
-	            <div className="flex items-center justify-between pt-1">
-		                <button
-		                    type="button"
-		                    onClick={generateKeywords}
-		                    disabled={!canOptimizeKeywords || keywordsLoading}
-		                    className="inline-flex items-center gap-2 text-sm font-medium text-purple-700 border border-purple-200 bg-purple-50 hover:bg-purple-100 px-4 py-2 rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-		                >
-		                    {keywordsLoading ? 'Generating...' : 'Generate Keywords'}
-		                </button>
-	                {keywords.length > 0 && (
-	                    <button
+                {/* Keywords Output - Badges */}
+                <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                            <label className="text-sm font-semibold text-slate-900">Generated Keywords</label>
+                            <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
+                                {keywordsResultLimited.length}/350
+                            </span>
+                        </div>
+                    </div>
+                    <ScrollAreaPrimitive.Root type="always" className="w-full min-h-[40px] max-h-32 rounded-xl border border-slate-200 bg-slate-50 overflow-hidden">
+                        <ScrollAreaPrimitive.Viewport className="h-full w-full">
+                            <div className="px-3 py-2 flex flex-wrap items-center gap-2">
+                                {keywordsBadges.length > 0 ? (
+                                    keywordsBadges.map((keyword, idx) => (
+                                        <span
+                                            key={idx}
+                                            className="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium bg-gradient-to-r from-purple-500 to-violet-500 text-white"
+                                        >
+                                            {keyword}
+                                        </span>
+                                    ))
+                                ) : (
+                                    <input
+                                        value={keywordsFieldText}
+                                        onChange={(e) => {
+                                            setKeywordsFieldText(e.target.value);
+                                            if (keywords.length) setKeywords([]);
+                                        }}
+                                        placeholder="Type product name here..."
+                                        className="bg-transparent border-0 p-0 m-0 shadow-none outline-none focus:outline-none focus:ring-0 focus:ring-offset-0 appearance-none text-[15px] text-slate-600 leading-6 w-full"
+                                    />
+                                )}
+                            </div>
+                        </ScrollAreaPrimitive.Viewport>
+                        <ScrollAreaPrimitive.Scrollbar orientation="horizontal" className="la-hscrollbar">
+                            <ScrollAreaPrimitive.Thumb className="la-hthumb" />
+                        </ScrollAreaPrimitive.Scrollbar>
+                    </ScrollAreaPrimitive.Root>
+                    <div className="flex items-center justify-between pt-1">
+                        <button
+                            type="button"
+                            onClick={generateKeywords}
+                            disabled={!canOptimizeKeywords || keywordsLoading}
+                            className="inline-flex items-center gap-2 text-sm font-medium text-purple-700 border border-purple-200 bg-purple-50 hover:bg-purple-100 px-4 py-2 rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                            {keywordsLoading ? 'Generating...' : 'Generate Keywords'}
+                        </button>
+                        {keywordsBadges.length > 0 && (
+                            <button
                                 onClick={() => copyText(keywordsResultLimited, 'keywords')}
                                 className="inline-flex items-center gap-1.5 text-xs font-medium text-purple-700 border border-purple-200 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
                                 type="button"
@@ -379,6 +407,6 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
                     </div>
                 </div>
             </div>
-        </div>
+        </div >
     );
 }

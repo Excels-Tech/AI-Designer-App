@@ -85,7 +85,6 @@ export const templates = {
         { phrase: 'header with clear top-left logo and optional top-right accent band or corner flourish', weight: 1.4 },
         { phrase: '12mm safe margins for print; avoid placing important elements within 12mm of any edge', weight: 1.5 },
         { phrase: 'provide a monochrome (black-on-white) logo variant for print', weight: 1.4 },
-        { phrase: 'subtle diagonal watermark or light pattern in the lower-right quadrant for brand texture', weight: 1.0 },
         { phrase: 'footer row with contact details and minimal separators, aligned right or centered', weight: 1.2 },
         { phrase: 'generous page margins and safe area for printing; avoid placing important elements within 12mm of edges', weight: 1.3 },
         { phrase: 'accent stripe or corner graphic in brand color that complements the logo', weight: 1.1 },
