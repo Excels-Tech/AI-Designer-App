@@ -25,7 +25,7 @@ import { ListingAssistantInline } from './ListingAssistantInline';
 type ArtStyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor';
 type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'closeUp' | 'top';
 type FramingMode = 'preserve' | 'zoomIn' | 'zoomOut';
-type MannequinModelKey = 'male' | 'female';
+type MannequinModelKey = 'male' | 'female' | 'boy' | 'girl';
 
 interface AIImageGeneratorProps {
   onGenerate?: (composite: string) => void;
@@ -102,6 +102,33 @@ const viewOptions: { id: ViewKey; label: string }[] = [
   { id: 'right', label: 'Right Side' },
   { id: 'threeQuarter', label: '3/4 View' },
   { id: 'closeUp', label: 'Close-up View' },
+];
+
+const bgColorOptions = [
+  { id: 'white', label: 'White' },
+  { id: 'lightgray', label: 'Light Grey' },
+];
+
+const productColorOptions = [
+  { id: 'black', label: 'Black' },
+  { id: 'white', label: 'White' },
+  { id: 'red', label: 'Red' },
+  { id: 'blue', label: 'Blue' },
+  { id: 'green', label: 'Green' },
+  { id: 'yellow', label: 'Yellow' },
+  { id: 'navy', label: 'Navy' },
+  { id: 'burgundy', label: 'Burgundy' },
+  { id: 'charcoal', label: 'Charcoal' },
+  { id: 'olive', label: 'Olive' },
+  { id: 'pink', label: 'Pink' },
+  { id: 'purple', label: 'Purple' },
+];
+
+const mannequinOptions: { id: MannequinModelKey; label: string }[] = [
+  { id: 'male', label: 'Male' },
+  { id: 'female', label: 'Female' },
+  { id: 'boy', label: 'Boy' },
+  { id: 'girl', label: 'Girl' },
 ];
 
 const viewLabel = (view: ViewKey) => viewOptions.find((v) => v.id === view)?.label ?? view;
@@ -1565,7 +1592,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const [userId, setUserId] = useState<string | null>(null);
   const [designName, setDesignName] = useState('');
   const [hasResultFlag, setHasResultFlag] = useState(false);
-  const [openMenu, setOpenMenu] = useState<'convertStyle' | 'convertModel' | 'resolution' | 'style' | 'views' | null>(null);
+  const [selectedBgColor, setSelectedBgColor] = useState('white');
+  const [selectedProductColor, setSelectedProductColor] = useState<string | null>(null);
+  const [openMenu, setOpenMenu] = useState<'convertStyle' | 'model' | 'resolution' | 'style' | 'views' | 'bgColor' | 'productColor' | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const pendingResolutionClearRef = useRef(false);
 
@@ -1618,10 +1647,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
 
   const selectedViewsLabel = 'View Angles';
   const effectiveStyle: ArtStyleKey = selectedStyle ?? 'realistic';
-  const styleButtonLabel = useMemo(() => {
-    const label = styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? effectiveStyle;
-    return `Style: ${label}`;
-  }, [effectiveStyle]);
+  const styleButtonLabel = 'Style';
   const hasReferenceImage = Boolean(uploadedImageDataUrl || uploadedImageFile);
   const hasSingleEditResult = false;
   const baseVariant = useMemo(() => variants.find((v) => v.kind === 'base') ?? null, [variants]);
@@ -1696,11 +1722,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     const safePrompt = applyBrandSafety(templated.prompt);
     console.info('[ai] category', templated.category);
     console.log('User selected resolution:', resolution);
-    const shouldForceWhiteBackground = !promptRequestsNonWhiteBackgroundClient(trimmedPrompt);
-
     const variationPhrases = [
       'slightly different fabric wrinkles and folds',
-      'slightly different lighting balance while keeping pure white background',
+      selectedBgColor === 'white' ? 'slightly different lighting balance while keeping pure white background' : 'slightly different lighting balance',
       'slightly different camera distance while keeping full product visible',
       'slightly different material texture details',
       'slightly different highlights and shadows on the product (no background shadows)',
@@ -1708,7 +1732,18 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     const variation = variationPhrases[Math.floor(Math.random() * variationPhrases.length)] ?? 'slightly different details';
     const requestId =
       typeof crypto !== 'undefined' && 'randomUUID' in crypto ? (crypto as any).randomUUID() : `${Date.now()}-${Math.random()}`;
-    const finalPrompt = appendPromptModifier(safePrompt, `Variation: ${variation}. RequestId: ${requestId}.`);
+
+    let colorModifiers = '';
+    if (selectedBgColor === 'lightgray') {
+      colorModifiers += ' light grey background, soft studio lighting.';
+    } else {
+      colorModifiers += ' pure white background.';
+    }
+    if (selectedProductColor) {
+      colorModifiers += ` The product color is ${selectedProductColor}.`;
+    }
+
+    const finalPrompt = appendPromptModifier(safePrompt, `Variation: ${variation}. ${colorModifiers} RequestId: ${requestId}.`);
 
     const normalizedViews = normalizeViews(selectedViews);
     if (!normalizedViews.length) {
@@ -1747,6 +1782,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           width: resolution,
           height: resolution,
           is3D: effectiveStyle === '3d',
+          modelKey: selectedModel,
+          bgColor: selectedBgColor,
+          productColor: selectedProductColor,
           ...(referenceImageBase64 ? { referenceImageBase64, referenceImageMimeType } : {}),
         }),
       });
@@ -1767,6 +1805,8 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           height: resolution,
           prompt: finalPrompt,
           is3D: effectiveStyle === '3d',
+          bgColor: selectedBgColor,
+          productColor: selectedProductColor,
         }),
       });
       const viewsPayload = await viewsResp.json().catch(() => ({}));
@@ -1784,10 +1824,10 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         return { view, src: `data:image/png;base64,${imageBase64}`, imageBase64, width: resolution, height: resolution };
       });
 
-      setStatusMessage(shouldForceWhiteBackground ? 'Fitting images to frame...' : 'Preparing images...');
+      setStatusMessage('Preparing images...');
       const croppedImages: GeneratedImage[] = await Promise.all(
         orderedImages.map(async (img) => {
-          const fittedSrc = shouldForceWhiteBackground ? await fitImageToFrame(img.src, resolution, 0.01) : img.src;
+          const fittedSrc = await fitImageToFrame(img.src, resolution, 0.01);
           const fixedSrc = await ensurePngDataUrlSquareSize(fittedSrc, resolution);
           return {
             ...img,
@@ -1875,6 +1915,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           body: JSON.stringify({
             images: [{ view: viewKey, imageBase64: inputBase64 }],
             styleKey: target,
+            bgColor: selectedBgColor,
           }),
         });
         const payload = await resp.json().catch(() => ({}));
@@ -1954,9 +1995,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         body: JSON.stringify({
           images: modelSourceImages.map((img) => ({ view: img.view, imageBase64: img.imageBase64 ?? '' })),
           modelKey,
-          // Model previews should always be generated as realistic photography (not 3D/CGI),
           // regardless of the selected generation style.
           style: 'realistic',
+          bgColor: selectedBgColor,
         }),
       });
       const payload = await resp.json().catch(() => ({}));
@@ -1980,7 +2021,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         kind: 'model_preview',
         styleLabel: 'Realistic',
         styleKey: 'realistic',
-        modelLabel: modelKey === 'male' ? 'Male' : 'Female',
+        modelLabel: mannequinOptions.find((opt) => opt.id === modelKey)?.label ?? String(modelKey),
         modelKey,
         views: orderedImages.map((i) => i.view),
         composite,
@@ -2163,9 +2204,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     <div className="min-h-screen p-8 bg-gradient-to-br from-slate-50 via-white to-slate-100">
       <div className="max-w-6xl mx-auto space-y-6">
         <div className="flex items-center gap-3">
-	          <div className="app-shimmer-sweep w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500 to-purple-500 flex items-center justify-center">
-	            <Sparkles className="w-5 h-5 text-white" />
-	          </div>
+          <div className="app-shimmer-sweep w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500 to-purple-500 flex items-center justify-center">
+            <Sparkles className="w-5 h-5 text-white" />
+          </div>
           <div>
             <h2 className="text-slate-900">AI Product Generator</h2>
             <p className="text-slate-600 text-sm">
@@ -2173,6 +2214,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             </p>
           </div>
         </div>
+
 
         <div className="bg-white rounded-3xl border border-slate-200 shadow-xl p-8 space-y-8">
           <div>
@@ -2229,7 +2271,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           </div>
 
           <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-nowrap items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
               <MenuDropdown
                 open={openMenu === 'resolution'}
                 onClose={() => setOpenMenu(null)}
@@ -2284,40 +2326,27 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                   />
                 }
               >
-                <div className="p-1.5">
-                  <div className="px-2 pt-2 pb-1">
-                    <div className="flex flex-wrap gap-1.5">
-                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700">
-                        {styleOptions.find((opt) => opt.id === effectiveStyle)?.label ?? effectiveStyle}
-                      </span>
-                    </div>
-                  </div>
 
-                  <div className="flex flex-col gap-2 p-2">
-                    {styleOptions.map((opt) => {
-                      const active = effectiveStyle === opt.id;
-                      return (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => {
-                            setSelectedStyle(opt.id);
-                            setOpenMenu(null);
-                          }}
-                          className={clsx(
-                            'w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left',
-                            active
-                              ? 'bg-purple-50 text-slate-900 border-purple-300'
-                              : 'bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50'
-                          )}
-                        >
-                          <span className="min-w-0 text-sm truncate">{opt.label}</span>
-                          {active && <Check className="w-4 h-4 text-purple-600 flex-none" />}
-                        </button>
-                      );
-                    })}
-                  </div>
+
+                <div className="flex flex-col gap-2 p-2">
+                  {styleOptions.map((opt) => {
+                    const active = effectiveStyle === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedStyle(opt.id);
+                          setOpenMenu(null);
+                        }}
+                        className="w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50"
+                      >
+                        <span className="min-w-0 text-sm truncate">{opt.label}</span>
+                      </button>
+                    );
+                  })}
                 </div>
+
               </MenuDropdown>
 
               <MenuDropdown
@@ -2359,32 +2388,34 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
               </MenuDropdown>
 
               <MenuDropdown
-                open={openMenu === 'convertStyle'}
+                open={openMenu === 'bgColor'}
                 onClose={() => setOpenMenu(null)}
                 button={
                   <ToolbarDropdownButton
-                    label="Convert Style"
+                    label={`BG: ${bgColorOptions.find(o => o.id === selectedBgColor)?.label || 'White'}`}
                     icon={Palette}
-                    isOpen={openMenu === 'convertStyle'}
-                    disabled={isGenerating || !variants.some((v) => v.kind === 'base')}
-                    onClick={() => setOpenMenu((prev) => (prev === 'convertStyle' ? null : 'convertStyle'))}
-                    className="max-w-[160px]"
+                    isOpen={openMenu === 'bgColor'}
+                    onClick={() => setOpenMenu((prev) => (prev === 'bgColor' ? null : 'bgColor'))}
+                    className="max-w-[150px]"
                   />
                 }
               >
                 <div className="p-1.5">
                   <div className="flex flex-col gap-2">
-                    {styleOptions.map((opt) => (
+                    {bgColorOptions.map((opt) => (
                       <button
                         key={opt.id}
                         type="button"
                         onClick={() => {
+                          setSelectedBgColor(opt.id);
                           setOpenMenu(null);
-                          handleConvertStyle(opt.id);
                         }}
-                        className="w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50"
+                        className={clsx(
+                          "w-full h-[40px] px-3 rounded-lg text-sm border text-left transition-all",
+                          selectedBgColor === opt.id ? "bg-purple-50 border-purple-200 text-purple-700 font-medium" : "bg-white hover:bg-slate-50 border-slate-100"
+                        )}
                       >
-                        <span className="min-w-0 text-sm truncate">{opt.label}</span>
+                        {opt.label}
                       </button>
                     ))}
                   </div>
@@ -2392,59 +2423,112 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
               </MenuDropdown>
 
               <MenuDropdown
-                open={openMenu === 'convertModel'}
+                open={openMenu === 'productColor'}
                 onClose={() => setOpenMenu(null)}
                 button={
                   <ToolbarDropdownButton
-                    label="Convert Model"
+                    label={`Color: ${productColorOptions.find(o => o.id === selectedProductColor)?.label || 'Default'}`}
+                    icon={Palette}
+                    isOpen={openMenu === 'productColor'}
+                    onClick={() => setOpenMenu((prev) => (prev === 'productColor' ? null : 'productColor'))}
+                    className="max-w-[170px]"
+                  />
+                }
+              >
+                <div className="p-1.5">
+                  <div className="grid grid-cols-2 gap-1.5 w-[220px]">
+                    {productColorOptions.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedProductColor(opt.id);
+                          setOpenMenu(null);
+                        }}
+                        className={clsx(
+                          "h-[36px] px-2 rounded-lg text-xs border text-center transition-all",
+                          selectedProductColor === opt.id ? "bg-purple-50 border-purple-200 text-purple-700 font-medium" : "bg-white hover:bg-slate-50 border-slate-100"
+                        )}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedProductColor(null);
+                        setOpenMenu(null);
+                      }}
+                      className={clsx(
+                        "h-[36px] px-2 rounded-lg text-xs border text-center transition-all col-span-2",
+                        !selectedProductColor ? "bg-purple-50 border-purple-200 text-purple-700 font-medium" : "bg-white hover:bg-slate-50 border-slate-100"
+                      )}
+                    >
+                      Clear Selection
+                    </button>
+                  </div>
+                </div>
+              </MenuDropdown>
+
+              <MenuDropdown
+                open={openMenu === 'model'}
+                onClose={() => setOpenMenu(null)}
+                button={
+                  <ToolbarDropdownButton
+                    label="Model"
                     icon={Users}
-                    isOpen={openMenu === 'convertModel'}
-                    disabled={isGenerating || !variants.some((v) => v.kind === 'base')}
-                    onClick={() => setOpenMenu((prev) => (prev === 'convertModel' ? null : 'convertModel'))}
+                    isOpen={openMenu === 'model'}
+                    onClick={() => setOpenMenu((prev) => (prev === 'model' ? null : 'model'))}
                     className="max-w-[170px]"
                   />
                 }
               >
                 <div className="p-1.5">
                   <div className="flex flex-col gap-2">
-                    {(['male', 'female'] as const).map((m) => (
+                    {mannequinOptions.map((m) => (
                       <button
-                        key={m}
+                        key={m.id}
                         type="button"
                         onClick={() => {
-                          setSelectedModel(m);
+                          setSelectedModel(m.id);
                           setOpenMenu(null);
-                          handleConvertModel(m);
+                          if (variants.some(v => v.kind === 'base')) {
+                            handleConvertModel(m.id);
+                          }
                         }}
-                        className="w-full h-[48px] flex items-center justify-between gap-3 px-3 rounded-xl border transition-all text-left bg-white text-slate-800 border-slate-200 hover:border-purple-300 hover:bg-slate-50"
+                        className={clsx(
+                          "w-full h-[40px] px-3 rounded-lg text-sm border text-left transition-all",
+                          selectedModel === m.id ? "bg-purple-50 border-purple-200 text-purple-700" : "hover:bg-slate-50 border-slate-100"
+                        )}
                       >
-                        <span className="min-w-0 text-sm truncate">{m === 'male' ? 'Male' : 'Female'}</span>
+                        {m.label}
                       </button>
                     ))}
                   </div>
                 </div>
-	              </MenuDropdown>
+              </MenuDropdown>
 
-		              <button
-		                onClick={handleGenerate}
-		                disabled={isGenerating || prompt.trim().length === 0}
-	                className="aiig-shimmer ml-auto flex-none max-w-full bg-gradient-to-r from-violet-500 to-purple-500 text-white inline-flex justify-center h-14 min-w-[190px] items-center rounded-full px-8 sm:px-12 text-[15px] font-medium leading-none whitespace-nowrap shadow-sm transition-all hover:shadow hover:shadow-purple-500/30 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-200 disabled:opacity-60 disabled:cursor-not-allowed"
-	              >
-		                {isGenerating ? (
-		                  <span className="flex items-center gap-2 whitespace-nowrap">
-		                    <Loader2 className="w-5 h-5 animate-spin shrink-0 self-center" />
-		                    <span className="whitespace-nowrap self-center">Generating...</span>
-		                  </span>
-		                ) : (
-		                  <span className="flex items-center gap-2 whitespace-nowrap">
-		                    <Sparkles className="w-5 h-5 shrink-0 self-center" />
-		                    <span className="whitespace-nowrap self-center">Generate Image</span>
-		                  </span>
-		                )}
-		              </button>
+              <button
+                onClick={handleGenerate}
+                disabled={isGenerating || prompt.trim().length === 0}
+                className="aiig-shimmer ml-auto flex-none bg-gradient-to-r from-violet-500 to-purple-500 text-white inline-flex justify-center h-14 min-w-0 items-center rounded-full px-4 text-[15px] font-medium leading-none whitespace-nowrap shadow-sm transition-all hover:shadow hover:shadow-purple-500/30 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-200 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {isGenerating ? (
+                  <span className="flex items-center gap-2 whitespace-nowrap">
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0 flex-none" />
+                    <span className="whitespace-nowrap">Generating...</span>
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-2 whitespace-nowrap">
+                    <Sparkles className="w-4 h-4 shrink-0 flex-none" />
+                    <span className="whitespace-nowrap">Generate Image</span>
+                  </span>
+                )}
+              </button>
 
 
-	            </div>
+
+            </div>
 
             {/* helper text removed */}
           </div>
@@ -2496,7 +2580,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
             </div>
           )}
 
-	          <style>{`
+          <style>{`
 	            @keyframes aiig-shine {
 	              0% {
 	                transform: translate3d(-140%, 0, 0) skewX(-18deg);
@@ -2832,7 +2916,11 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
           </div>
         )}
       </div>
-
-    </div>
+    </div >
   );
 }
+
+
+
+
+

@@ -71,6 +71,8 @@ interface GenerateBaseRequestBody {
   height?: number;
   referenceImageBase64?: string;
   referenceImageMimeType?: string;
+  bgColor?: string;
+  productColor?: string;
 }
 
 interface GenerateViewsFromBaseRequestBody {
@@ -81,6 +83,8 @@ interface GenerateViewsFromBaseRequestBody {
   width?: number;
   height?: number;
   prompt?: string;
+  bgColor?: string;
+  productColor?: string;
 }
 
 interface GenerateUniformRequestBody {
@@ -95,6 +99,7 @@ interface ConvertStyleRequestBody {
   imageFrontBase64?: string;
   imageBackBase64?: string;
   styleKey?: string;
+  bgColor?: string;
 }
 
 interface ConvertModelRequestBody {
@@ -106,6 +111,7 @@ interface ConvertModelRequestBody {
   style?: string;
   // Backwards compatible (older client)
   sourceStyle?: string;
+  bgColor?: string;
 }
 
 function sanitizeKey(v?: string) {
@@ -439,7 +445,7 @@ function buildTitlesPrompt(input: { productName: string; category?: string; coun
     categoryLine,
     seedLine,
     `Generate exactly ${input.count} unique titles.`,
-    'Rules: each title MUST be 60–120 characters (inclusive) and MUST NOT exceed 120; end on a complete word (no cut-off last word).',
+    'Rules: Each title should be descriptive and catchy. Generate 2–3 short titles. The TOTAL COMBINED length of 2-3 of these titles (separated by spaces) MUST be between 100 and 120 characters total. Use spaces only.',
     "Do NOT end with a dangling connector/article (e.g. don't end with: and, or, for, with, to, in, of, the, a, an).",
     `CRITICAL: Every title MUST include the product name terms exactly as written in "${input.productName}" (do not autocorrect, do not replace with synonyms).`,
     'CRITICAL: Do NOT include any brand names, trademarked terms, company names, or seller/store names (e.g., Nike, Adidas, Apple, Disney). Strictly follow the user input without inventing brands.',
@@ -477,6 +483,7 @@ function buildKeywordsPrompt(input: { productName: string; category?: string; co
     'Keep keywords relevant to the product; do not invent a different primary product type (e.g. do not turn a hoodie into a t-shirt).',
     'Avoid duplicates; no numbering; no extra commentary.',
     'CRITICAL: NO punctuation (commas, colons, pipes, semicolons, etc.). Use ONLY spaces to separate keywords.',
+    'CRITICAL: Ensure the total length of keywords generated strictly targets 350 characters total. Generate many descriptive keywords.',
     'Return ONLY valid JSON in this exact shape: {"keywords":["..."]}',
   ]
     .filter(Boolean)
@@ -762,13 +769,23 @@ async function normalizeGeminiOutputPngBase64(
 
 const TRANSPARENT_BG = { r: 0, g: 0, b: 0, alpha: 0 };
 const WHITE_BG = { r: 255, g: 255, b: 255, alpha: 1 };
-const LIGHT_GRAY_BG = { r: 238, g: 238, b: 238, alpha: 1 }; // #eeeeee
+const LIGHT_GRAY_BG = { r: 192, g: 192, b: 192, alpha: 1 }; // #C0C0C0 - Silver, distinctly darker than white
 const WHITE_BACKGROUND_PROMPT = [
   'Background MUST be PURE SOLID WHITE (#FFFFFF), perfectly uniform, seamless, and clean.',
   'Isolated subject on absolute white void.',
   'NO texture, NO grain, NO noise, NO artifacts, NO dither, NO speckled patterns.',
   'NO room, NO studio scene, NO windows, NO wall texture, NO background objects, NO floor.',
   'NO checkerboard, NO gray studio box, NO environment, NO props.',
+  'NO frames, NO borders, NO boxes, NO mockups.',
+  'NO shadows, NO floor shadows, NO reflections, NO gradients, NO vignette.',
+].join(' ');
+
+const LIGHT_GRAY_BACKGROUND_PROMPT = [
+  'Background MUST be PURE SOLID LIGHT GREY (#EEEEEE), perfectly uniform, seamless, and clean.',
+  'Isolated subject on absolute light grey void.',
+  'NO texture, NO grain, NO noise, NO artifacts, NO dither, NO speckled patterns.',
+  'NO room, NO studio scene, NO windows, NO wall texture, NO background objects, NO floor.',
+  'NO checkerboard, NO white background, NO grey studio box, NO environment, NO props.',
   'NO frames, NO borders, NO boxes, NO mockups.',
   'NO shadows, NO floor shadows, NO reflections, NO gradients, NO vignette.',
 ].join(' ');
@@ -797,6 +814,15 @@ const APPAREL_WHITE_BACKGROUND_PROMPT = [
   'Do not add reflections, gloss, bloom, or highlight sparkle.',
 ].join(' ');
 
+const APPAREL_LIGHT_GRAY_BACKGROUND_PROMPT = [
+  'Background MUST be PURE SOLID UNIFORM LIGHT GREY (#EEEEEE), seamless and perfectly clean.',
+  'ZERO noise, ZERO grain, ZERO texture, ZERO artifacts in the background.',
+  'NO room, NO studio scene, NO props, NO floor.',
+  'NO cast shadows or floor shadows; background stays uniform digital grey.',
+  'Allow natural garment self-shadowing for folds/seams only (do not flatten the garment).',
+  'Do not add reflections, gloss, bloom, or highlight sparkle.',
+].join(' ');
+
 const HOODIE_MOCKUP_BACKGROUND_PROMPT = [
   'Background: light gray seamless paper (#eeeeee) (NOT pure white) with a soft natural shadow under hoodie only.',
   'Centered, straight-on front view. Clean ecommerce product photo (NOT 3D render).',
@@ -807,6 +833,16 @@ const HOODIE_MOCKUP_BACKGROUND_PROMPT = [
 const HOODIE_MOCKUP_NEGATIVE_PROMPT = [
   'NEGATIVE: glossy, shiny, reflective, wet look, plastic, vinyl, leather, specular highlights, overexposed, blown whites, HDR, bloom, lens flare, dramatic lighting, harsh shadows, high contrast, vignette, 3D render, CGI, octane, unreal engine, ray tracing, mannequin head, model, cropped, angled view, close-up.',
 ].join(' ');
+
+function getBackgroundPrompt(bgColor?: string) {
+  if (bgColor === 'lightgray') return LIGHT_GRAY_BACKGROUND_PROMPT;
+  return WHITE_BACKGROUND_PROMPT;
+}
+
+function getApparelBackgroundPrompt(bgColor?: string) {
+  if (bgColor === 'lightgray') return APPAREL_LIGHT_GRAY_BACKGROUND_PROMPT;
+  return APPAREL_WHITE_BACKGROUND_PROMPT;
+}
 
 function wantsBranding(text: string): boolean {
   const s = String(text ?? '').toLowerCase();
@@ -854,7 +890,7 @@ const FULL_FRAME_NEGATIVE_PROMPT = [
 ].join(' ');
 
 const NO_LOGO_GUARD_PROMPT =
-  'STRICT: Do NOT add any logos, emblems, crests, badges, stripes, numbers, text, typography, words, slogans, letters, wordmarks, patterns, watermarks, emails, phone numbers, URLs, QR codes, contact info, or banners. Fabric must be completely plain solid color only.';
+  'STRICT: Do NOT add any logos, emblems, crests, badges, stripes, numbers, text, typography, words, slogans, letters, wordmarks, patterns, watermarks, emails, contact info, team names, or brand names. Fabric must be completely plain solid color only. NO WRITING.';
 
 const WHITE_BACKGROUND_GUARD_PROMPT =
   'STRICT BACKGROUND: Pure solid white (#FFFFFF) only. No scenery, no stadium, no field, no grass, no sky, no trees, no crowd, no horizon, no floor, no props, no shapes or graphics. No shadows or drop shadows. If anything appears behind the product, replace it with solid white.';
@@ -1295,8 +1331,44 @@ async function ensureSolidWhiteBackgroundStrict(pngBase64: string) {
   } catch {
     // ignore cleanup failures and keep the original
   }
-
   return out;
+}
+
+// Aggressively remove white background. Used when we explicitly prompted for white.
+async function forceTransparentFromWhite(pngBase64: string) {
+  const normalized = normalizePngBase64(pngBase64);
+  const buf = Buffer.from(normalized, 'base64');
+  const { data, info } = await sharp(buf, { failOn: 'none' })
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const out = Buffer.from(data);
+
+  // Tolerance for "white". 
+  // Gemini might produce compression artifacts or slight shadows.
+  // Allow anything very bright (luma > 240) and low saturation to be transparent.
+  for (let i = 0; i < out.length; i += 4) {
+    const r = out[i];
+    const g = out[i + 1];
+    const b = out[i + 2];
+
+    // Check if pixel is near white
+    if (r > 240 && g > 240 && b > 240) {
+      out[i + 3] = 0; // Transparent
+    }
+    // Check for "near white" but maybe slightly grapy/warm
+    else if (r > 230 && g > 230 && b > 230) {
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      if (max - min < 10) { // Very neutral/greyish white
+        out[i + 3] = 0;
+      }
+    }
+  }
+
+  const png = await sharp(out, { raw: { width: info.width, height: info.height, channels: 4 } }).png().toBuffer();
+  return png.toString('base64');
 }
 
 async function stripSmallForegroundArtifactsOnWhiteBackground(pngBase64: string, sampleSize = 256) {
@@ -3153,19 +3225,19 @@ function buildViewPrompt(basePrompt: string, style: StyleKey, view: ViewKey, wid
   ].join(' ');
 }
 
-function buildBasePrompt(prompt: string, style: StyleKey, resolution: number, forceWhiteOverride?: boolean) {
-  const forceWhite =
-    typeof forceWhiteOverride === 'boolean' ? forceWhiteOverride : shouldForceWhiteBackgroundFromPrompt(prompt);
+function buildBasePrompt(prompt: string, style: StyleKey, resolution: number, bgColor?: string) {
   const hoodieMockup = isHoodieMockupPrompt(prompt);
+  const isLightGray = bgColor === 'lightgray';
+  const forceWhite = bgColor === 'white' || (!bgColor && shouldForceWhiteBackgroundFromPrompt(prompt));
   const brandingOk = wantsBranding(prompt);
   const backgroundOk = wantsBackgroundScene(prompt);
   const allow3d = wants3D(prompt);
   return [
+    !brandingOk ? NO_LOGO_GUARD_PROMPT : null,
     'Generate ONE base image that matches the user prompt.',
     'STRICT: Front view (head-on) unless the user prompt implies a different viewpoint (e.g. poster/logo).',
     'STRICT: Do not add socks, shoes, mannequins, models, people, faces, hands, or body parts unless the user prompt explicitly asks for them.',
     'No grids, no collages, no multi-panel layouts.',
-    !brandingOk ? NO_LOGO_GUARD_PROMPT : null,
     !backgroundOk ? WHITE_BACKGROUND_GUARD_PROMPT : null,
     !allow3d ? NO_3D_GUARD_PROMPT : null,
     !allow3d ? NO_SHADOW_GUARD_PROMPT : null,
@@ -3176,9 +3248,12 @@ function buildBasePrompt(prompt: string, style: StyleKey, resolution: number, fo
     FULL_FRAME_NEGATIVE_PROMPT,
     brandingOk ? LOGO_WATERMARK_FIDELITY_PROMPT : null,
     hoodieMockup ? null : allow3d ? null : NO_SHADOWS_PROMPT,
+    // CRITICAL FIX: If user wants Light Grey, we FORCE the model to generate Pure White (#FFFFFF) first.
+    // We then computationally remove the white background and flatten it onto our specific Light Grey (#D0D0D0).
+    // This is much more reliable than asking the model for grey directly, which often results in gradients or wrong shades that are hard to key out.
     hoodieMockup
       ? HOODIE_MOCKUP_BACKGROUND_PROMPT
-      : forceWhite
+      : (isLightGray || forceWhite)
         ? isApparelPrompt(prompt)
           ? APPAREL_WHITE_BACKGROUND_PROMPT
           : WHITE_BACKGROUND_PROMPT
@@ -3196,7 +3271,7 @@ function buildViewFromBasePrompt(
   height: number,
   userPrompt?: string,
   extraInstruction?: string,
-  forceWhiteOverride?: boolean,
+  bgColor?: string
 ) {
   const sideStrict =
     view === 'left'
@@ -3204,22 +3279,20 @@ function buildViewFromBasePrompt(
       : view === 'right'
         ? 'Generate the RIGHT SIDE view (camera positioned on the right side of the subject/object). Maintain exact same design. Do not mirror or reuse left side. Only change camera angle. Ensure it is clearly the right side view.'
         : null;
-  const forceWhite =
-    typeof forceWhiteOverride === 'boolean'
-      ? forceWhiteOverride
-      : shouldForceWhiteBackgroundFromPrompt(userPrompt || '');
+  const isLightGray = bgColor === 'lightgray';
+  const forceWhite = bgColor === 'white' || (!bgColor && shouldForceWhiteBackgroundFromPrompt(userPrompt || ''));
   const hoodieMockup = isHoodieMockupPrompt(userPrompt || '');
   const brandingOk = wantsBranding(userPrompt || '');
   const backgroundOk = wantsBackgroundScene(userPrompt || '');
   const allow3d = wants3D(userPrompt || '');
 
   return [
+    !brandingOk ? NO_LOGO_GUARD_PROMPT : null,
     `Create a single image of the SAME design from the ${viewLabels[view]} angle.`,
     `View requirement: ${viewSpecificInstructions[view]}`,
     sideStrict,
     extraInstruction?.trim() ? `IMPORTANT: ${extraInstruction.trim()}` : null,
     'Use this exact design. Do not change the main subject identity, colors, patterns, or layout. Only change camera angle.',
-    !brandingOk ? NO_LOGO_GUARD_PROMPT : null,
     !backgroundOk ? WHITE_BACKGROUND_GUARD_PROMPT : null,
     !allow3d ? NO_3D_GUARD_PROMPT : null,
     !allow3d ? NO_SHADOW_GUARD_PROMPT : null,
@@ -3236,9 +3309,10 @@ function buildViewFromBasePrompt(
       ? `User prompt (secondary reference): ${userPrompt.trim()}. The attached base image is the ground-truth design reference.`
       : null,
     hoodieMockup ? null : allow3d ? null : NO_SHADOWS_PROMPT,
+    // Same fix as base prompt: Force pure white generation for easy keying/replacement with grey
     hoodieMockup
       ? HOODIE_MOCKUP_BACKGROUND_PROMPT
-      : forceWhite
+      : (isLightGray || forceWhite)
         ? isApparelPrompt(userPrompt || '')
           ? APPAREL_WHITE_BACKGROUND_PROMPT
           : WHITE_BACKGROUND_PROMPT
@@ -3285,11 +3359,11 @@ function buildMannequinConversionPrompt(modelKey: MannequinModelKey) {
     'STRICT: Keep the same camera angle and view as the input image (front stays front; back stays back; left stays left; right stays right).',
     'STRICT: Do not invent new design elements. Do not mirror or flip.',
     'STRICT: Do not add socks, shoes, gloves, hats, or accessories unless they are clearly present in the input image.',
-    'Background: clean white or very light gray studio backdrop (no gradients, no heavy shadows).',
+    bgColor === 'lightgray' ? LIGHT_GRAY_BACKGROUND_PROMPT : 'Background: clean white or very light gray studio backdrop (no gradients, no heavy shadows).',
   ].join(' ');
 }
 
-function modelFrontPrompt(modelKey: MannequinModelKey, extraConstraints?: string) {
+function modelFrontPrompt(modelKey: MannequinModelKey, extraConstraints?: string, bgColor?: string) {
   return [
     `Generate a high-resolution, masterfully executed PHOTOREALISTIC studio photograph of a real adult ${modelKey} model wearing the exact same garment/apparel product from the reference image.`,
     'VIEW: Straight-on FRONT view.',
@@ -3300,11 +3374,11 @@ function modelFrontPrompt(modelKey: MannequinModelKey, extraConstraints?: string
     'STRICT CAMERA FRAMING: FULL BODY head-to-toe including the entire head and face. Wide-angle framing with clear empty space above the head and below the feet. Do NOT crop any body part or any clothing.',
     'STRICT: Preserve the EXACT garment design, colors, material texture, logos, prints, and branding from the reference image without any deviation.',
     extraConstraints?.trim() ? `IMPORTANT: ${extraConstraints.trim()}` : null,
-    'Background: pure, clean, uniform studio white/gray background that does not distract from the model.',
+    getBackgroundPrompt(bgColor),
   ].join(' ');
 }
 
-function modelBackPrompt(modelKey: MannequinModelKey, extraConstraints?: string) {
+function modelBackPrompt(modelKey: MannequinModelKey, extraConstraints?: string, bgColor?: string) {
   return [
     `Generate a high-resolution, masterfully executed PHOTOREALISTIC studio photograph of a real adult ${modelKey} model wearing the exact same garment/apparel product from the reference image.`,
     'VIEW: Straight-on BACK view (rear view).',
@@ -3315,11 +3389,11 @@ function modelBackPrompt(modelKey: MannequinModelKey, extraConstraints?: string)
     'STRICT CAMERA FRAMING: FULL BODY head-to-toe. Include the head and feet. Provide generous empty margin/padding around the entire figure. DO NOT CROP.',
     'STRICT: Preserve the EXACT garment design, colors, material texture, and branding from the reference image.',
     extraConstraints?.trim() ? `IMPORTANT: ${extraConstraints.trim()}` : null,
-    'Background: pure, clean, uniform studio white/gray background.',
+    getBackgroundPrompt(bgColor),
   ].join(' ');
 }
 
-function modelFrontPromptMaleFrom3d() {
+function modelFrontPromptMaleFrom3d(bgColor?: string) {
   return [
     'Generate a high-resolution, masterfully executed PHOTOREALISTIC studio sports photograph of a real adult male athlete wearing the exact same uniform from the reference image.',
     'VIEW: FRONT view. Neutral stance, kit clearly visible.',
@@ -3327,11 +3401,11 @@ function modelFrontPromptMaleFrom3d() {
     'REALISM: ENFORCE AUTHENTIC HUMAN DETAILS. Visible skin pores, natural skin sheen (not plastic), realistic muscle definition with natural shading, individual hair strands, and authentic facial features. ABSOLUTELY NO CGI, NO game character look, NO mannequin.',
     'STRICT CAMERA FRAMING: FULL BODY head-to-toe including the head and face. Wide-angle framing. Centered subject. Leave generous empty padding above the head and below the feet. DO NOT CROP.',
     'STRICT: Preserve the EXACT uniform design, colors, material texture, logos, prints, and branding from the reference image.',
-    'BACKGROUND: Pure, clean, seamless white/gray studio background.',
+    getBackgroundPrompt(bgColor),
   ].join(' ');
 }
 
-function modelBackPromptMaleFrom3d() {
+function modelBackPromptMaleFrom3d(bgColor?: string) {
   return [
     'Generate a high-resolution, masterfully executed PHOTOREALISTIC studio sports photograph of a real adult male athlete wearing the exact same uniform from the reference image.',
     'VIEW: Straight-on BACK view (rear).',
@@ -3339,11 +3413,11 @@ function modelBackPromptMaleFrom3d() {
     'REALISM: ENFORCE AUTHENTIC HUMAN TEXTURE. Visible skin pores, natural hair texture, and realistic human anatomy. No plastic or overly smooth surfaces.',
     'STRICT CAMERA FRAMING: FULL BODY head-to-toe. Centered subject. Leave generous empty margin above head and below feet. DO NOT CROP. DO NOT ZOOM.',
     'STRICT: Preserve the EXACT uniform design, colors, material texture, and branding from the reference image.',
-    'BACKGROUND: Pure, clean, seamless white/gray studio background.',
+    getBackgroundPrompt(bgColor),
   ].join(' ');
 }
 
-function buildUniformFrontPrompt(userPrompt: string, resolution: number) {
+function buildUniformFrontPrompt(userPrompt: string, resolution: number, bgColor?: string) {
   return [
     'Generate a 3D render of a sports uniform consisting ONLY of a shirt and shorts.',
     'STRICT: Do not add socks, shoes, gloves, hats, mannequins, people, or any body parts unless the user prompt explicitly asks for them.',
@@ -4015,7 +4089,7 @@ function stripNegativePromptLine(prompt: string): string {
   return s.replace(/\n\s*Negative prompt:\s*[\s\S]*$/i, '').trim();
 }
 
-async function normalizeHoodieMockupEcom(buffer: Buffer): Promise<Buffer> {
+async function normalizeHoodieMockupEcom(buffer: Buffer, bgColor?: string): Promise<Buffer> {
   // Goal: force a clean ecommerce look like the reference:
   // - uniform light gray background (#eeeeee)
   // - remove wall/gradient/backdrop/shadows that touch the edges
@@ -4134,19 +4208,22 @@ async function normalizeHoodieMockupEcom(buffer: Buffer): Promise<Buffer> {
   }
 
   if (minX > maxX || minY > maxY) {
-    return await sharp(buffer, { failOn: 'none' }).ensureAlpha().flatten({ background: LIGHT_GRAY_BG }).png().toBuffer();
+    const bg = bgColor === 'white' ? WHITE_BG : LIGHT_GRAY_BG;
+    return await sharp(buffer, { failOn: 'none' }).ensureAlpha().flatten({ background: bg }).png().toBuffer();
   }
 
   const maskFull = await sharp(mask, { raw: { width: sw, height: sh, channels: 1 } })
     .resize(width, height, { fit: 'fill' })
     .blur(0.6)
-    .png()
+    .raw()
     .toBuffer();
 
-  // Cutout subject.
+  // Cutout subject: replace alpha channel with mask.
   const cutout = await original
     .clone()
-    .composite([{ input: maskFull, blend: 'dest-in' }])
+    .ensureAlpha()
+    .removeAlpha()
+    .joinChannel(maskFull, { raw: { width, height, channels: 1 } })
     .png()
     .toBuffer();
 
@@ -4172,9 +4249,10 @@ async function normalizeHoodieMockupEcom(buffer: Buffer): Promise<Buffer> {
     .blur(Math.max(6, Math.round(Math.min(width, height) * 0.018)))
     .toBuffer();
 
-  // Compose on uniform light gray background.
+  // Compose on requested background.
+  const finalBg = bgColor === 'white' ? WHITE_BG : LIGHT_GRAY_BG;
   const bgLayer = await sharp({
-    create: { width, height, channels: 4, background: LIGHT_GRAY_BG },
+    create: { width, height, channels: 4, background: finalBg },
   })
     .composite([{ input: shadow }, { input: cutout }])
     .png()
@@ -4217,7 +4295,9 @@ async function generateViewImage(
       .png()
       .toBuffer()
     : rawIn;
-  const background = options?.background ?? (isHoodieMockupPrompt(prompt) ? LIGHT_GRAY_BG : WHITE_BG);
+
+  const desiredBg = (req.body as any)?.bgColor === 'lightgray' || options?.bgColor === 'lightgray' ? LIGHT_GRAY_BG : WHITE_BG;
+  const background = options?.background ?? desiredBg;
   const insetScale = 0.9;
   const insetWidth = Math.max(1, Math.round(targetWidth * insetScale));
   const insetHeight = Math.max(1, Math.round(targetHeight * insetScale));
@@ -4235,7 +4315,20 @@ async function generateViewImage(
     .png()
     .toBuffer();
 
-  const finalBuf = isHoodieMockupPrompt(prompt) ? await normalizeHoodieMockupEcom(resized) : resized;
+  let finalBuf: Buffer;
+  if (isHoodieMockupPrompt(prompt)) {
+    finalBuf = await normalizeHoodieMockupEcom(resized, options?.bgColor);
+  } else if (options?.bgColor === 'lightgray') {
+    // Directly flatten to light grey background - simpler and more reliable
+    const transparent = await ensureBackgroundlessPngBase64Strict(resized.toString('base64'));
+    finalBuf = await sharp(Buffer.from(transparent, 'base64'))
+      .ensureAlpha()
+      .flatten({ background: LIGHT_GRAY_BG })
+      .png()
+      .toBuffer();
+  } else {
+    finalBuf = resized;
+  }
 
   return {
     view,
@@ -4252,7 +4345,7 @@ async function generateViewImageFromBase(
   targetHeight: number,
   userPrompt?: string,
   extraInstruction?: string,
-  options?: { background?: { r: number; g: number; b: number; alpha: number }; forceWhiteOverride?: boolean }
+  options?: { background?: { r: number; g: number; b: number; alpha: number }; bgColor?: string }
 ) {
   const inlineData = pngBase64ToInlineData(baseImageBase64);
   const response = await generateContentWithRetry(
@@ -4272,7 +4365,7 @@ async function generateViewImageFromBase(
                   targetHeight,
                   userPrompt,
                   extraInstruction,
-                  options?.forceWhiteOverride
+                  options?.bgColor
                 ),
               },
               { inlineData },
@@ -4299,8 +4392,9 @@ async function generateViewImageFromBase(
       .png()
       .toBuffer()
     : rawIn;
-  const background =
-    options?.background ?? (isHoodieMockupPrompt(userPrompt || '') ? LIGHT_GRAY_BG : { r: 245, g: 246, b: 248, alpha: 1 });
+
+  const finalBg = options?.bgColor === 'lightgray' ? LIGHT_GRAY_BG : WHITE_BG;
+  const background = options?.background ?? finalBg;
   // IMPORTANT: do not intentionally shrink non-front views.
   // We always return an image that is exactly targetWidth × targetHeight,
   // and rely on prompt + post-processing for safe framing.
@@ -4309,7 +4403,20 @@ async function generateViewImageFromBase(
     .png()
     .toBuffer();
 
-  const finalBuf = isHoodieMockupPrompt(userPrompt || '') ? await normalizeHoodieMockupEcom(resized) : resized;
+  let finalBuf: Buffer;
+  if (isHoodieMockupPrompt(userPrompt || '')) {
+    finalBuf = await normalizeHoodieMockupEcom(resized, options?.bgColor);
+  } else if (options?.bgColor === 'lightgray') {
+    // Directly flatten to light grey background - simpler and more reliable
+    const transparent = await ensureBackgroundlessPngBase64Strict(resized.toString('base64'));
+    finalBuf = await sharp(Buffer.from(transparent, 'base64'))
+      .ensureAlpha()
+      .flatten({ background: LIGHT_GRAY_BG })
+      .png()
+      .toBuffer();
+  } else {
+    finalBuf = resized;
+  }
 
   return {
     view,
@@ -4588,7 +4695,7 @@ app.post('/api/generate-product-titles', async (req: Request, res: Response) => 
       const titlesRaw = normalizeLines(parsed?.titles, 180);
       const titles = titlesRaw
         .map((t) => trimDanglingTailWordsForTitle(trimIfLooksCutAtLimit(t, 120)))
-        .filter((t) => t.length >= 60)
+        .filter((t) => t.length >= 15)
         .filter((t) => !containsBlockedBrand(t))
         .filter((t) => titleMatchesUserInput(t, productName))
         .filter((t) => (category ? titleMatchesCategory(t, category) : true));
@@ -4657,6 +4764,11 @@ app.post('/api/generate-product-keywords', async (req: Request, res: Response) =
 
 app.post('/api/generate-base', async (req: Request, res: Response) => {
   const { prompt, resolution, width, height, referenceImageBase64, referenceImageMimeType } = req.body as GenerateBaseRequestBody;
+  console.log('[DEBUG] generate-base request:', {
+    prompt,
+    bgColor: (req.body as any)?.bgColor,
+    style: (req.body as any)?.style
+  });
   const styleIncoming = normalizeIncomingStyleKey((req.body as any)?.style);
   const requestedResolution =
     Number.isFinite(Number(width)) && Number.isFinite(Number(height)) && Number(width) === Number(height) && Number(width) > 0
@@ -4676,21 +4788,28 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
   }
 
   try {
-    const userPrompt = prompt.trim();
+    let userPrompt = prompt.trim();
+    if (!wantsBranding(userPrompt)) {
+      userPrompt = `PLAIN BLANK UNBRANDED ${userPrompt}`;
+    }
     const referenceInlineData = referenceImageBase64
       ? inlineDataFromAnyImageBase64({ base64: referenceImageBase64, mimeType: referenceImageMimeType })
       : null;
     const hoodieMockup = isHoodieMockupPrompt(userPrompt);
     const style: StyleKey = hoodieMockup ? 'realistic' : styleIncoming;
-    const forceWhite = hoodieMockup ? false : shouldForceWhiteBackgroundFromPrompt(userPrompt);
+    const incomingBg = (req.body as any)?.bgColor;
+    const isLightGray = incomingBg === 'lightgray';
+    const forceWhite = (hoodieMockup || isLightGray) ? false : shouldForceWhiteBackgroundFromPrompt(userPrompt);
     const enhanceOptions = {
       creativity: Number((req.body as any)?.creativity ?? 0.3),
       modelFormat: deriveModelFormatFromEnv(),
       aspectRatio: inferAspectRatio(Number(width), Number(height)),
+      bgColor: incomingBg,
+      productColor: (req.body as any)?.productColor,
     };
     const { promptForModel } = maybeEnhancePrompt(userPrompt, enhanceOptions, 'generate-base');
     const modelTextPrimary = [
-      buildBasePrompt(promptForModel, style, requestedResolution, forceWhite),
+      buildBasePrompt(promptForModel, style, requestedResolution, incomingBg),
       referenceInlineData
         ? 'Reference image provided: use it as a visual design reference. Preserve the same design identity while generating the front view.'
         : '',
@@ -4701,7 +4820,7 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
 
     const promptForModelFallback = stripNegativePromptLine(promptForModel);
     const modelTextFallback = [
-      buildBasePrompt(promptForModelFallback, style, requestedResolution, forceWhite),
+      buildBasePrompt(promptForModelFallback, style, requestedResolution, incomingBg),
       'IMPORTANT: Return an IMAGE only (no text).',
       referenceInlineData
         ? 'Reference image provided: use it as a visual design reference. Preserve the same design identity while generating the front view.'
@@ -4746,17 +4865,42 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
     }
 
     let baseImage = await normalizeGeminiOutputPngBase64(String(imagePart.data), requestedResolution, {
-      background: hoodieMockup ? LIGHT_GRAY_BG : WHITE_BG,
+      background: (hoodieMockup || isLightGray) ? LIGHT_GRAY_BG : WHITE_BG,
     });
     if (hoodieMockup) {
-      const clamped = await sharp(Buffer.from(baseImage, 'base64'), { failOn: 'none' })
+      if (isLightGray) {
+        // Special path: Remove BG first (from pure white), THEN modulate subject, THEN flatten to target grey.
+        const transparent = await forceTransparentFromWhite(baseImage);
+
+        const modulated = await sharp(Buffer.from(transparent, 'base64'), { failOn: 'none' })
+          .ensureAlpha()
+          .modulate({ brightness: 0.92, saturation: 1.0 })
+          .linear(1, -6)
+          .flatten({ background: LIGHT_GRAY_BG })
+          .png()
+          .toBuffer();
+
+        baseImage = modulated.toString('base64');
+      } else {
+        // Standard path: Modulate first (affects BG), then normalize
+        const clamped = await sharp(Buffer.from(baseImage, 'base64'), { failOn: 'none' })
+          .ensureAlpha()
+          .modulate({ brightness: 0.92, saturation: 1.0 })
+          .linear(1, -6)
+          .png()
+          .toBuffer();
+        const normalized = await normalizeHoodieMockupEcom(clamped, incomingBg);
+        baseImage = normalized.toString('base64');
+      }
+    } else if (isLightGray) {
+      // Generic items: remove background, then flatten
+      const transparent = await forceTransparentFromWhite(baseImage);
+      const flattened = await sharp(Buffer.from(transparent, 'base64'))
         .ensureAlpha()
-        .modulate({ brightness: 0.92, saturation: 1.0 })
-        .linear(1, -6)
+        .flatten({ background: LIGHT_GRAY_BG })
         .png()
         .toBuffer();
-      const normalized = await normalizeHoodieMockupEcom(clamped);
-      baseImage = normalized.toString('base64');
+      baseImage = flattened.toString('base64');
     } else if (forceWhite) {
       baseImage = await ensureSolidWhiteBackgroundStrict(baseImage);
     }
@@ -4768,7 +4912,11 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
 });
 
 app.post('/api/generate-views-from-base', async (req: Request, res: Response) => {
-  const { baseImageBase64, resolution, width, height, prompt } = req.body as GenerateViewsFromBaseRequestBody;
+  const { baseImageBase64, resolution, width, height, prompt, bgColor } = req.body as GenerateViewsFromBaseRequestBody;
+  console.log('[DEBUG] generate-views request:', {
+    prompt,
+    bgColor
+  });
   const styleIncoming = normalizeIncomingStyleKey((req.body as any)?.style);
   const viewsRaw = Array.isArray((req.body as any)?.views) ? (req.body as any).views : [];
   const views = viewsRaw
@@ -4803,11 +4951,15 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
     const userPrompt = (prompt || '').trim();
     const hoodieMockup = isHoodieMockupPrompt(userPrompt);
     const style: StyleKey = hoodieMockup ? 'realistic' : styleIncoming;
-    const forceWhite = hoodieMockup ? false : shouldForceWhiteBackgroundFromPrompt(userPrompt);
+    const incomingBg = (req.body as any)?.bgColor;
+    const isLightGray = incomingBg === 'lightgray';
+    const forceWhite = (hoodieMockup || isLightGray) ? false : shouldForceWhiteBackgroundFromPrompt(userPrompt);
     const enhanceOptions = {
       creativity: Number((req.body as any)?.creativity ?? 0.3),
       modelFormat: deriveModelFormatFromEnv(),
       aspectRatio: inferAspectRatio(Number(width), Number(height)),
+      bgColor: (req.body as any)?.bgColor,
+      productColor: (req.body as any)?.productColor,
     };
     const { promptForModel } = userPrompt
       ? maybeEnhancePrompt(userPrompt, enhanceOptions, 'generate-views-from-base')
@@ -4820,7 +4972,7 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
         requestedResolution,
         promptForModel,
         undefined,
-        forceWhite
+        incomingBg
       );
       assertPromptEnhancerSelectionDevOnly({
         label: 'generate-views-from-base',
@@ -4829,7 +4981,7 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
         modelText: sampleModelText,
       });
     }
-    const tileBackground = hoodieMockup ? LIGHT_GRAY_BG : WHITE_BG;
+    const tileBackground = (hoodieMockup || isLightGray) ? LIGHT_GRAY_BG : WHITE_BG;
     const grid = computeGrid(views.length);
     const tileWidth = Math.max(64, Math.floor(requestedResolution / grid.columns));
     const tileHeight = Math.max(64, Math.floor(requestedResolution / grid.rows));
@@ -4840,13 +4992,34 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
       .png()
       .toBuffer();
     if (hoodieMockup) {
-      baseFullBuffer = await sharp(baseFullBuffer, { failOn: 'none' })
+      if (isLightGray) {
+        // Special path: Remove BG first (from pure white), THEN modulate subject, THEN flatten to target grey.
+        const transparent = await forceTransparentFromWhite(baseFullBuffer.toString('base64'));
+
+        baseFullBuffer = await sharp(Buffer.from(transparent, 'base64'), { failOn: 'none' })
+          .ensureAlpha()
+          .modulate({ brightness: 0.92, saturation: 1.0 })
+          .linear(1, -6)
+          .flatten({ background: tileBackground })
+          .png()
+          .toBuffer();
+      } else {
+        baseFullBuffer = await sharp(baseFullBuffer, { failOn: 'none' })
+          .ensureAlpha()
+          .modulate({ brightness: 0.92, saturation: 1.0 })
+          .linear(1, -6)
+          .png()
+          .toBuffer();
+        baseFullBuffer = await normalizeHoodieMockupEcom(baseFullBuffer, incomingBg);
+      }
+    } else if (isLightGray) {
+      // Directly flatten to light grey background (remove bg first)
+      const transparent = await forceTransparentFromWhite(baseFullBuffer.toString('base64'));
+      baseFullBuffer = await sharp(Buffer.from(transparent, 'base64'))
         .ensureAlpha()
-        .modulate({ brightness: 0.92, saturation: 1.0 })
-        .linear(1, -6)
+        .flatten({ background: tileBackground })
         .png()
         .toBuffer();
-      baseFullBuffer = await normalizeHoodieMockupEcom(baseFullBuffer);
     }
 
     const generatedMap = new Map<ViewKey, Buffer>();
@@ -4870,7 +5043,7 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
           requestedResolution,
           promptForModel,
           undefined,
-          { background: tileBackground, forceWhiteOverride: forceWhite }
+          { background: tileBackground, bgColor: incomingBg }
         );
         const outBuf = forceWhite
           ? Buffer.from(await ensureSolidWhiteBackgroundStrict(generated.buffer.toString('base64')), 'base64')
@@ -4925,7 +5098,7 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
                 requestedResolution,
                 promptForModel,
                 undefined,
-                forceWhite
+                incomingBg
               ),
               'Return ONE image only.',
             ]
@@ -4974,7 +5147,7 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
                 requestedResolution,
                 promptForModel,
                 retryInstructions[attempt],
-                { background: tileBackground, forceWhiteOverride: forceWhite }
+                { background: tileBackground }
               );
               outBuf = forceWhite
                 ? Buffer.from(await ensureSolidWhiteBackgroundStrict(regenerated.buffer.toString('base64')), 'base64')
@@ -5220,7 +5393,7 @@ app.post('/api/uniform/convert-model', async (req: Request, res: Response) => {
 });
 
 app.post('/api/convert-style', async (req: Request, res: Response) => {
-  const { images, imageFrontBase64, imageBackBase64, styleKey } = req.body as ConvertStyleRequestBody;
+  const { images, imageFrontBase64, imageBackBase64, styleKey, bgColor } = req.body as ConvertStyleRequestBody;
   const normalizedStyle = normalizeIncomingStyleKey(styleKey);
 
   if (!normalizedStyle || !allowedBaseStyles.has(normalizedStyle)) {
@@ -5275,7 +5448,9 @@ app.post('/api/convert-style', async (req: Request, res: Response) => {
         throw new Error('Gemini response did not include an image.');
       }
 
-      const normalized = await normalizeGeminiOutputPngBase64(String(imagePart.data), undefined, { background: WHITE_BG });
+      const finalBg = bgColor === 'lightgray' ? LIGHT_GRAY_BG : WHITE_BG;
+      const normalized = await normalizeGeminiOutputPngBase64(String(imagePart.data), undefined, { background: finalBg });
+      if (bgColor === 'lightgray') return normalized;
       return await ensureSolidWhiteBackgroundPngBase64(normalized);
     };
 
@@ -5317,9 +5492,11 @@ app.post('/api/convert-style', async (req: Request, res: Response) => {
           const outRaw = await convertOne(originalPngBase64);
           if (!outRaw || typeof outRaw !== 'string' || !outRaw.trim()) throw new Error('Empty converted image.');
 
-          // Non-lineart conversions should keep consistent dimensions with the original view.
-          let out = await resizeToMatch(outRaw, target, WHITE_BG);
-          out = await ensureSolidWhiteBackgroundPngBase64(out);
+          const finalBg = bgColor === 'lightgray' ? LIGHT_GRAY_BG : WHITE_BG;
+          let out = await resizeToMatch(outRaw, target, finalBg);
+          if (bgColor !== 'lightgray') {
+            out = await ensureSolidWhiteBackgroundPngBase64(out);
+          }
           return { view, imageBase64: out };
         } catch (err) {
           lastErr = err;
@@ -5349,7 +5526,7 @@ app.post('/api/convert-style', async (req: Request, res: Response) => {
 });
 
 app.post('/api/convert-model', async (req: Request, res: Response) => {
-  const { images, imageFrontBase64, imageBackBase64, modelKey } = req.body as ConvertModelRequestBody;
+  const { images, imageFrontBase64, imageBackBase64, modelKey, bgColor } = req.body as ConvertModelRequestBody;
   const styleRaw =
     typeof (req.body as any)?.style === 'string'
       ? String((req.body as any).style)
@@ -5413,7 +5590,7 @@ app.post('/api/convert-model', async (req: Request, res: Response) => {
       if (constraints && isPromptEnhancerDebug() && !isProductionEnv()) {
         console.log('[ConvertModel]', { modelKey, view, referenceImageIncluded: true, constraints });
       }
-      return view === 'back' ? modelBackPrompt(modelKey, constraints) : modelFrontPrompt(modelKey, constraints);
+      return view === 'back' ? modelBackPrompt(modelKey, constraints, bgColor) : modelFrontPrompt(modelKey, constraints, bgColor);
     };
 
     const convertOne = async (pngBase64: string, view: ViewKey, target: { width: number; height: number }) => {
@@ -5450,9 +5627,12 @@ app.post('/api/convert-model', async (req: Request, res: Response) => {
           const imagePart = parts?.find((part: any) => part.inlineData?.data)?.inlineData;
           if (!imagePart?.data) throw new Error('Gemini response did not include an image.');
 
-          let out = await normalizeGeminiOutputPngBase64(String(imagePart.data), undefined, { background: WHITE_BG });
-          out = await ensureSolidWhiteBackgroundStrict(out);
-          out = await resizeToMatch(out, target, WHITE_BG);
+          const finalBg = bgColor === 'lightgray' ? LIGHT_GRAY_BG : WHITE_BG;
+          let out = await normalizeGeminiOutputPngBase64(String(imagePart.data), undefined, { background: finalBg });
+          if (bgColor !== 'lightgray') {
+            out = await ensureSolidWhiteBackgroundStrict(out);
+          }
+          out = await resizeToMatch(out, target, finalBg);
 
           const score = await scoreCroppingRiskOnWhiteBackground(out).catch(() => 9999);
           if (score < bestScore) {

@@ -80,6 +80,7 @@ export function buildHoodieMockupPrompt(args: {
     hoodieColor?: string;
     brandName?: string;
     is3D?: boolean;
+    bgColor?: string;
 }): string {
     const basePrompt = String(args.basePrompt ?? '').trim();
     const hoodieColorRaw = String(args.hoodieColor ?? '').trim();
@@ -94,9 +95,17 @@ export function buildHoodieMockupPrompt(args: {
     const placementLine = describeLogoPlacement(args.logoPlacement);
     const brandName = String(args.brandName ?? '').trim();
 
-    // Determine background color: light gray for white products, pure white for others
+    // Determine background color: light gray for white products, pure white for others.
+    // If an explicit bgColor is provided, respect it.
     const isWhiteProduct = /\b(white|off-white|off white|cream|ivory)\b/i.test(hoodieColor);
-    const backgroundColor = isWhiteProduct ? 'LIGHT GRAY background (#E8E8E8)' : 'PURE WHITE background (#FFFFFF)';
+    let backgroundColor = '';
+    if (args.bgColor === 'lightgray') {
+        backgroundColor = 'LIGHT GRAY background (#EEEEEE)';
+    } else if (args.bgColor === 'white') {
+        backgroundColor = 'PURE WHITE background (#FFFFFF)';
+    } else {
+        backgroundColor = isWhiteProduct ? 'LIGHT GRAY background (#EEEEEE)' : 'PURE WHITE background (#FFFFFF)';
+    }
 
     // Build plain or 3D template
     let template: string;

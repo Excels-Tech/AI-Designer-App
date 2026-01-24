@@ -9,6 +9,8 @@ export interface EnhanceOptions {
   modelFormat?: ModelFormat;
   stylePreset?: string;
   aspectRatio?: AspectRatio;
+  bgColor?: string;
+  productColor?: string;
 }
 
 function clamp01(n: number) {
@@ -129,7 +131,7 @@ function uniqueNonEmpty(parts: string[]) {
   return out;
 }
 
-export function enhancePrompt(prompt: string, options: EnhanceOptions = { }): { enhancedPrompt: string; negativePrompt: string } {
+export function enhancePrompt(prompt: string, options: EnhanceOptions = {}): { enhancedPrompt: string; negativePrompt: string } {
   const base = normalizePrompt(prompt);
   const creativity = clamp01(options.creativity ?? 0.3);
   const modelFormat: ModelFormat = options.modelFormat ?? 'sdxl';

@@ -793,7 +793,11 @@ export function maybeEnhancePrompt(
 
   // Hoodie mockups must remain clean ecommerce product shots; avoid cinematic/film prompt additions entirely.
   if (firstApparelKeyword === 'hoodie' && apparelMode !== 'fashion') {
-    const enhancedPrompt = buildHoodieMockupPrompt({ basePrompt: userPrompt });
+    const enhancedPrompt = buildHoodieMockupPrompt({
+      basePrompt: userPrompt,
+      bgColor: options.bgColor,
+      hoodieColor: options.productColor,
+    });
     const hash = hashShort(enhancedPrompt);
     const negativePrompt = enhancePrompt('', options).negativePrompt;
     if (isPromptEnhancerDebug() && !isProductionEnv()) {
@@ -981,27 +985,27 @@ export function maybeEnhancePrompt(
         .map((s) => s.trim())
         .filter(Boolean)
     );
-      [
-        'stadium',
-        'arena',
-        'crowd',
-        'fans',
-        'bleachers',
-        'field',
-        'pitch',
-        'grass',
-        'sky',
-        'sunset',
-        'horizon',
-        'landscape',
-        'room',
-        'interior',
-        'gradient',
-        'vignette',
-        'floor shadow',
-        'ground shadow',
-        'scene',
-        'background',
+    [
+      'stadium',
+      'arena',
+      'crowd',
+      'fans',
+      'bleachers',
+      'field',
+      'pitch',
+      'grass',
+      'sky',
+      'sunset',
+      'horizon',
+      'landscape',
+      'room',
+      'interior',
+      'gradient',
+      'vignette',
+      'floor shadow',
+      'ground shadow',
+      'scene',
+      'background',
       'environment',
       'props',
       'shape backdrop',

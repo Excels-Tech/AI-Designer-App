@@ -17,8 +17,8 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
     const [keywords, setKeywords] = useState<string[]>([]);
     const [titlesLoading, setTitlesLoading] = useState(false);
     const [keywordsLoading, setKeywordsLoading] = useState(false);
-    const [titlesCount, setTitlesCount] = useState<100 | 120>(120);
-    const [keywordsCount, setKeywordsCount] = useState<300 | 350>(350);
+    const [titlesCount, setTitlesCount] = useState<number>(15);
+    const [keywordsCount, setKeywordsCount] = useState<number>(80);
 
     const [copiedKey, setCopiedKey] = useState<string | null>(null);
     const copiedTimerRef = useRef<number | null>(null);
@@ -59,8 +59,8 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
 
     const generateTitles = async () => {
         const candidate = normalizeQuery(titlesFieldText);
-        const looksLikeOutput = titles.length > 0 && normalizeQuery(titles.join(' ')) === candidate;
-        const query = (looksLikeOutput ? titlesLastQuery : candidate).trim();
+        // Use candidate first; fallback to last query for regeneration if input is hidden/empty.
+        const query = candidate || titlesLastQuery;
 
         if (!query) {
             setError('Product name is required.');
@@ -92,8 +92,8 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
 
     const generateKeywords = async () => {
         const candidate = normalizeQuery(keywordsFieldText);
-        const looksLikeOutput = keywords.length > 0 && normalizeQuery(keywords.join(' ')) === candidate;
-        const query = (looksLikeOutput ? keywordsLastQuery : candidate).trim();
+        // Use candidate first; fallback to last query for regeneration if input is hidden/empty.
+        const query = candidate || keywordsLastQuery;
 
         if (!query) {
             setError('Product name is required.');
@@ -142,17 +142,7 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
         return s;
     };
 
-    const pickBestTitleToRange = (items: string[], minChars: number, maxChars: number) => {
-        const normalized = items.map((t) => stripDanglingTitleTail(normalizeOneLine(t))).filter(Boolean);
-        // Prefer titles already within range.
-        const inRange = normalized.filter((t) => t.length >= minChars && t.length <= maxChars);
-        if (inRange.length) return inRange.sort((a, b) => b.length - a.length)[0]!;
-        // Otherwise pick the longest <= max, then clean tail.
-        const under = normalized.filter((t) => t.length <= maxChars);
-        if (under.length) return under.sort((a, b) => b.length - a.length)[0]!;
-        // Fallback: return first (uncut) normalized title.
-        return normalized[0] ?? '';
-    };
+
 
     const packItemsToLimitNoPartial = (items: string[], separator: string, maxChars: number) => {
         const normalized = items.map(normalizeOneLine).filter(Boolean);
@@ -211,14 +201,14 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
     // Keep outputs within requested character ranges whenever generated.
     const cleanPunctuation = (s: string) => s.replace(/[|,;:!]/g, ' ').replace(/\s+/g, ' ').trim();
 
-    // We want ONE optimized title (100-120 chars) and one set of keywords (up to 350 chars).
-    const rawBestTitle = pickBestTitleToRange(titles, 100, 120);
-    const titlesResultLimited = cleanPunctuation(rawBestTitle);
-    const titlesBadges = titlesResultLimited ? [titlesResultLimited] : [];
+    // We want 2-3 optimized titles that combined hit 100-120 chars total.
+    const titlesPackedStr = packItemsToRange(titles.map(t => stripDanglingTitleTail(normalizeOneLine(t))), ' ||| ', 100, 120, 120);
+    const titlesBadges = titlesPackedStr.split(' ||| ').map(cleanPunctuation).filter(Boolean);
+    const titlesResultLimited = titlesBadges.join(' ');
 
-    // Keywords: pack full keywords up to a safe max within range.
-    const keywordsPacked = packItemsToLimitNoPartial(keywords, '|||', 340);
-    const keywordsBadges = keywordsPacked.split('|||').map(cleanPunctuation).filter(Boolean);
+    // Pack keywords to be strictly between 300 and 350 chars total.
+    const packedKeywordsStr = packItemsToRange(keywords, ' ||| ', 300, 350, 350);
+    const keywordsBadges = packedKeywordsStr.split(' ||| ').map(cleanPunctuation).filter(Boolean);
     const keywordsResultLimited = keywordsBadges.join(' ');
 
     const calcChWidth = (value: string) => `${Math.min(600, Math.max(28, normalizeQuery(value).length + 2))}ch`;
@@ -295,14 +285,19 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
                             </span>
                         </div>
                     </div>
-                    <ScrollAreaPrimitive.Root type="always" className="w-full min-h-[40px] max-h-32 rounded-xl border border-slate-200 bg-slate-50 overflow-hidden">
+                    <ScrollAreaPrimitive.Root type="always" className="w-full min-h-[40px] max-h-16 rounded-xl border border-slate-200 bg-slate-50 overflow-hidden">
                         <ScrollAreaPrimitive.Viewport className="h-full w-full">
-                            <div className="px-3 py-2 flex flex-wrap items-center gap-2">
+                            <div className="px-3 py-2 flex items-center gap-2 whitespace-nowrap">
                                 {titlesBadges.length > 0 ? (
                                     titlesBadges.map((title, idx) => (
                                         <div
                                             key={idx}
-                                            className="inline-flex items-center px-4 py-2 rounded-xl text-base font-medium bg-gradient-to-r from-purple-500 to-violet-500 text-white shadow-sm"
+                                            onClick={() => {
+                                                setTitlesFieldText(titlesLastQuery);
+                                                setTitles([]);
+                                            }}
+                                            className="inline-flex items-center px-4 py-2 rounded-xl text-sm font-medium bg-slate-100 text-slate-700 border border-slate-200 shadow-sm whitespace-nowrap flex-shrink-0 cursor-pointer"
+                                            title="Click to edit prompt"
                                         >
                                             {title}
                                         </div>
@@ -356,18 +351,27 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
                             </span>
                         </div>
                     </div>
-                    <ScrollAreaPrimitive.Root type="always" className="w-full min-h-[40px] max-h-32 rounded-xl border border-slate-200 bg-slate-50 overflow-hidden">
+                    <ScrollAreaPrimitive.Root type="always" className="w-full min-h-[40px] max-h-16 rounded-xl border border-slate-200 bg-slate-50 overflow-hidden">
                         <ScrollAreaPrimitive.Viewport className="h-full w-full">
-                            <div className="px-3 py-2 flex flex-wrap items-center gap-2">
+                            <div className="px-3 py-2 flex items-center gap-2 whitespace-nowrap">
                                 {keywordsBadges.length > 0 ? (
-                                    keywordsBadges.map((keyword, idx) => (
-                                        <span
-                                            key={idx}
-                                            className="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium bg-gradient-to-r from-purple-500 to-violet-500 text-white"
-                                        >
-                                            {keyword}
-                                        </span>
-                                    ))
+                                    <div
+                                        className="flex items-center gap-2 cursor-pointer w-full"
+                                        onClick={() => {
+                                            setKeywordsFieldText(keywordsLastQuery);
+                                            setKeywords([]);
+                                        }}
+                                        title="Click to edit prompt"
+                                    >
+                                        {keywordsBadges.map((keyword, idx) => (
+                                            <div
+                                                key={idx}
+                                                className="inline-flex items-center px-4 py-2 rounded-xl text-sm font-medium bg-slate-100 text-slate-700 border border-slate-200 shadow-sm whitespace-nowrap flex-shrink-0"
+                                            >
+                                                {keyword}
+                                            </div>
+                                        ))}
+                                    </div>
                                 ) : (
                                     <input
                                         value={keywordsFieldText}
