@@ -10,7 +10,7 @@ export const templates = {
         { phrase: 'editorial style', weight: 0.9 },
         { phrase: 'concept art', weight: 0.8 },
         { phrase: 'illustration', weight: 0.8 },
-        { phrase: '3D render', weight: 0.7 },
+        // Remove 3D bias for apparel/product; keep photoreal emphasis.
         { phrase: 'painterly', weight: 0.7 },
         { phrase: 'surreal', weight: 0.6 },
       ],

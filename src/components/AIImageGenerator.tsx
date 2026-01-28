@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useEffect, useLayoutEffect, type ReactNode, type CSSProperties } from 'react';
+import { useMemo, useRef, useState, useEffect, useLayoutEffect, useCallback, type ReactNode, type CSSProperties } from 'react';
 import {
   Sparkles,
   Wand2,
@@ -25,7 +25,7 @@ import { ListingAssistantInline } from './ListingAssistantInline';
 type ArtStyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor';
 type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'closeUp' | 'top';
 type FramingMode = 'preserve' | 'zoomIn' | 'zoomOut';
-type MannequinModelKey = 'male' | 'female' | 'boy' | 'girl';
+type MannequinModelKey = 'none' | 'male' | 'female' | 'boy' | 'girl';
 
 interface AIImageGeneratorProps {
   onGenerate?: (composite: string) => void;
@@ -109,6 +109,15 @@ const bgColorOptions = [
   { id: 'lightgray', label: 'Light Grey' },
 ];
 
+const resolveBgColorHex = (bg?: string | null) => {
+  const key = (bg || 'white').toLowerCase();
+  if (key === 'lightgray' || key === 'lightgrey') return '#f3f4f6';
+  return '#ffffff';
+};
+
+const isWhiteBg = (bg?: string | null) => (bg || 'white').toLowerCase() === 'white';
+const isWhiteProduct = (productColor?: string | null) => (productColor || '').toLowerCase() === 'white';
+
 const productColorOptions = [
   { id: 'black', label: 'Black' },
   { id: 'white', label: 'White' },
@@ -125,6 +134,7 @@ const productColorOptions = [
 ];
 
 const mannequinOptions: { id: MannequinModelKey; label: string }[] = [
+  { id: 'none', label: 'None' },
   { id: 'male', label: 'Male' },
   { id: 'female', label: 'Female' },
   { id: 'boy', label: 'Boy' },
@@ -359,7 +369,8 @@ function cropCanvasToBoundsWithPadding(
     paddingPercent = 0.25,
     minPaddingPx = 120,
     verticalPaddingMultiplier = 1.2,
-  }: { paddingPercent?: number; minPaddingPx?: number; verticalPaddingMultiplier?: number } = {}
+    bgColor = 'white',
+  }: { paddingPercent?: number; minPaddingPx?: number; verticalPaddingMultiplier?: number; bgColor?: string } = {}
 ): HTMLCanvasElement {
   const { width, height } = canvas;
   const contentW = Math.max(1, bounds.right - bounds.left + 1);
@@ -388,23 +399,34 @@ function cropCanvasToBoundsWithPadding(
   const outCtx = out.getContext('2d', { willReadFrequently: true });
   if (!outCtx) return canvas;
 
-  outCtx.fillStyle = '#ffffff';
+  outCtx.fillStyle = resolveBgColorHex(bgColor);
   outCtx.fillRect(0, 0, out.width, out.height);
   outCtx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
   return out;
 }
 
-function cropCanvasLoose(canvas: HTMLCanvasElement, paddingPercent = 0.25): HTMLCanvasElement {
-  const b1 = getContentBounds(canvas, { treatNearWhiteAsEmpty: true });
+function cropCanvasLoose(
+  canvas: HTMLCanvasElement,
+  paddingPercent = 0.25,
+  bgColor = 'white',
+  productColor?: string | null
+): HTMLCanvasElement {
+  const treatNearWhite = isWhiteBg(bgColor) && !isWhiteProduct(productColor);
+  const b1 = treatNearWhite ? getContentBounds(canvas, { treatNearWhiteAsEmpty: true }) : null;
   const b2 = getContentBounds(canvas, { treatNearWhiteAsEmpty: false });
   const bounds = unionBounds(b1, b2);
   if (!bounds) return canvas;
 
   // First pass (loose).
-  let out = cropCanvasToBoundsWithPadding(canvas, bounds, { paddingPercent, minPaddingPx: 120, verticalPaddingMultiplier: 1.2 });
+  let out = cropCanvasToBoundsWithPadding(canvas, bounds, {
+    paddingPercent,
+    minPaddingPx: 120,
+    verticalPaddingMultiplier: 1.2,
+    bgColor,
+  });
 
   // Safeguard: if content still touches edges, increase padding and redo.
-  const postBounds = getContentBounds(out, { treatNearWhiteAsEmpty: false });
+  const postBounds = getContentBounds(out, { treatNearWhiteAsEmpty: treatNearWhite });
   if (postBounds) {
     const marginLeft = postBounds.left;
     const marginTop = postBounds.top;
@@ -417,6 +439,7 @@ function cropCanvasLoose(canvas: HTMLCanvasElement, paddingPercent = 0.25): HTML
         paddingPercent: Math.max(0.35, paddingPercent),
         minPaddingPx: 160,
         verticalPaddingMultiplier: 1.3,
+        bgColor,
       });
     }
   }
@@ -509,7 +532,7 @@ async function getImageSize(url: string): Promise<{ width: number; height: numbe
   return { width, height };
 }
 
-async function ensurePngDataUrlSquareSize(dataUrl: string, target: number): Promise<string> {
+async function ensurePngDataUrlSquareSize(dataUrl: string, target: number, bgColor = 'white'): Promise<string> {
   const src = String(dataUrl || '').trim();
   if (!src.startsWith('data:image/')) return src;
   if (!Number.isFinite(target) || target <= 0) return src;
@@ -529,7 +552,7 @@ async function ensurePngDataUrlSquareSize(dataUrl: string, target: number): Prom
   ctx.imageSmoothingEnabled = true;
   // @ts-expect-error some TS libdom versions type this as limited values
   ctx.imageSmoothingQuality = 'high';
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = resolveBgColorHex(bgColor);
   ctx.fillRect(0, 0, target, target);
 
   const iw = img.naturalWidth || img.width;
@@ -544,10 +567,19 @@ async function ensurePngDataUrlSquareSize(dataUrl: string, target: number): Prom
   return canvas.toDataURL('image/png');
 }
 
-async function fitImageToFrame(imageUrl: string, targetSize: number, paddingRatio = 0.06): Promise<string> {
+async function fitImageToFrame(
+  imageUrl: string,
+  targetSize: number,
+  paddingRatio = 0.06,
+  bgColor = 'white',
+  productColor?: string | null
+): Promise<string> {
   const src = String(imageUrl || '').trim();
   if (!src) throw new Error('Missing image source.');
   if (!Number.isFinite(targetSize) || targetSize <= 0) throw new Error('Invalid target size.');
+  const bgHex = resolveBgColorHex(bgColor);
+  const allowWhiteNormalization = !isWhiteProduct(productColor);
+  const treatNearWhite = isWhiteBg(bgColor) && allowWhiteNormalization;
 
   const img = await loadImageElement(src);
   const width = img.naturalWidth || img.width;
@@ -560,11 +592,13 @@ async function fitImageToFrame(imageUrl: string, targetSize: number, paddingRati
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) throw new Error('Canvas not supported.');
 
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = bgHex;
   ctx.fillRect(0, 0, width, height);
   ctx.drawImage(img, 0, 0, width, height);
-  // Reduce “ghost” gray background noise so content bounds are tighter and more consistent.
-  normalizeCanvasBackgroundToWhite(canvas, { bgDistanceThreshold: 40, minBrightness: 150 });
+  // Reduce background noise only when the intended background is white; otherwise keep the chosen tone intact.
+  if (treatNearWhite && allowWhiteNormalization) {
+    normalizeCanvasBackgroundToWhite(canvas, { bgDistanceThreshold: 40, minBrightness: 150 });
+  }
 
   const detectBounds = () => {
     // Prefer a density-based bbox (robust to tiny noise specks far from the subject).
@@ -632,12 +666,19 @@ async function fitImageToFrame(imageUrl: string, targetSize: number, paddingRati
     }
 
     // Fallback: pick the tightest near-white bounds (avoid the non-filtered bounds which becomes full-canvas).
-    const candidates = [
-      getContentBounds(canvas, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 240 }),
-      getContentBounds(canvas, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 245 }),
-      getContentBounds(canvas, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 250 }),
-      getContentBounds(canvas, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 252 }),
-    ].filter(Boolean) as { left: number; top: number; right: number; bottom: number }[];
+    const candidates = treatNearWhite
+      ? [
+          getContentBounds(canvas, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 240 }),
+          getContentBounds(canvas, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 245 }),
+          getContentBounds(canvas, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 250 }),
+          getContentBounds(canvas, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 252 }),
+        ].filter(Boolean) as { left: number; top: number; right: number; bottom: number }[]
+      : [getContentBounds(canvas, { treatNearWhiteAsEmpty: false })].filter(Boolean) as {
+          left: number;
+          top: number;
+          right: number;
+          bottom: number;
+        }[];
 
     if (!candidates.length) return null;
 
@@ -690,7 +731,7 @@ async function fitImageToFrame(imageUrl: string, targetSize: number, paddingRati
     outCtx.imageSmoothingEnabled = true;
     // @ts-expect-error some TS libdom versions type this as limited values
     outCtx.imageSmoothingQuality = 'high';
-    outCtx.fillStyle = '#ffffff';
+    outCtx.fillStyle = bgHex;
     outCtx.fillRect(0, 0, targetSize, targetSize);
 
     // Square crop -> square output (no extra letterboxing).
@@ -707,7 +748,7 @@ async function fitImageToFrame(imageUrl: string, targetSize: number, paddingRati
   let out = renderFit(bounds, paddingRatio, minPad1);
 
   // Auto-tighten: if subject still doesn't fill the frame enough, run a second tighter pass.
-  const postBounds = getContentBounds(out, { treatNearWhiteAsEmpty: true, nearWhiteThreshold: 245 });
+  const postBounds = getContentBounds(out, { treatNearWhiteAsEmpty: treatNearWhite, nearWhiteThreshold: 245 });
   if (postBounds) {
     const fillW = (postBounds.right - postBounds.left + 1) / targetSize;
     const fillH = (postBounds.bottom - postBounds.top + 1) / targetSize;
@@ -1206,7 +1247,8 @@ function cropCanvasToContent(
   {
     targetFillRatio = 0.85,
     paddingPercent = 0.1,
-  }: { targetFillRatio?: number; paddingPercent?: number } = {}
+    bgColor = 'white',
+  }: { targetFillRatio?: number; paddingPercent?: number; bgColor?: string } = {}
 ): HTMLCanvasElement {
   const bounds =
     getContentBounds(canvas, { treatNearWhiteAsEmpty: true }) ??
@@ -1250,13 +1292,13 @@ function cropCanvasToContent(
   const outCtx = out.getContext('2d', { willReadFrequently: true });
   if (!outCtx) return canvas;
 
-  outCtx.fillStyle = '#ffffff';
+  outCtx.fillStyle = resolveBgColorHex(bgColor);
   outCtx.fillRect(0, 0, out.width, out.height);
   outCtx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
   return out;
 }
 
-async function composeCompositeFromTiles(tiles: GeneratedImage[], resolution: number): Promise<string> {
+async function composeCompositeFromTiles(tiles: GeneratedImage[], resolution: number, bgColor = 'white'): Promise<string> {
   const columns = 2;
   const rows = 2;
   const tileWidth = Math.max(64, Math.floor(resolution / columns));
@@ -1268,7 +1310,7 @@ async function composeCompositeFromTiles(tiles: GeneratedImage[], resolution: nu
 
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) throw new Error('Failed to initialize canvas.');
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = resolveBgColorHex(bgColor);
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   const imgs = await Promise.all(tiles.map((tile) => loadImageElement(tile.src)));
@@ -1281,7 +1323,7 @@ async function composeCompositeFromTiles(tiles: GeneratedImage[], resolution: nu
   return canvas.toDataURL('image/png');
 }
 
-async function addPaddingToImage(file: File, paddingPercent = PADDING_PERCENT): Promise<File> {
+async function addPaddingToImage(file: File, paddingPercent = PADDING_PERCENT, bgColor = 'white'): Promise<File> {
   const blobUrl = URL.createObjectURL(file);
   try {
     const img = new Image();
@@ -1307,7 +1349,7 @@ async function addPaddingToImage(file: File, paddingPercent = PADDING_PERCENT): 
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) throw new Error('Canvas not supported.');
 
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = resolveBgColorHex(bgColor);
     ctx.fillRect(0, 0, newWidth, newHeight);
 
     const dx = Math.round((newWidth - width) / 2);
@@ -1460,11 +1502,14 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     return `data:image/png;base64,${base64}`;
   };
 
-  const ensureTrimmedPngDataUrl = async (src: string) => {
+  const ensureTrimmedPngDataUrl = async (src: string, bgColor = 'white', productColor?: string | null) => {
     if (!src) throw new Error('Missing image source.');
 
     const trimmedSrc = src.trim();
     const isDataUrl = /^data:image\//i.test(trimmedSrc);
+    const bgHex = resolveBgColorHex(bgColor);
+    const treatNearWhite = isWhiteBg(bgColor);
+    const allowWhiteNormalization = !isWhiteProduct(productColor);
 
     let objectUrlToRevoke: string | null = null;
     try {
@@ -1492,24 +1537,26 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) throw new Error('Canvas not supported.');
 
-      // Force a white background so previews/downloads never show gray/transparent backgrounds.
-      ctx.fillStyle = '#ffffff';
+      // Fill with the selected background so previews/downloads keep the chosen tone.
+      ctx.fillStyle = bgHex;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, 0, 0, width, height);
 
-      // Normalize light neutral backgrounds to pure white.
-      normalizeCanvasBackgroundToWhite(canvas);
+      // Normalize light neutral backgrounds only when white is intended and product isn't white (avoid washing out white garments).
+      if (treatNearWhite && allowWhiteNormalization) {
+        normalizeCanvasBackgroundToWhite(canvas);
+      }
 
       // Loose crop: remove excess whitespace but keep the full subject safely in frame.
-      const croppedCanvas = cropCanvasLoose(canvas, 0.25);
+      const croppedCanvas = cropCanvasLoose(canvas, 0.25, bgColor, productColor);
 
-      // Ensure final export is solid white background PNG.
+      // Ensure final export keeps the selected solid background.
       const out = document.createElement('canvas');
       out.width = croppedCanvas.width;
       out.height = croppedCanvas.height;
       const outCtx = out.getContext('2d', { willReadFrequently: true });
       if (!outCtx) throw new Error('Canvas not supported.');
-      outCtx.fillStyle = '#ffffff';
+      outCtx.fillStyle = bgHex;
       outCtx.fillRect(0, 0, out.width, out.height);
       outCtx.drawImage(croppedCanvas, 0, 0);
 
@@ -1583,7 +1630,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const [uploadedImageDataUrl, setUploadedImageDataUrl] = useState<string | null>(null);
   const [uploadedImageName, setUploadedImageName] = useState<string | null>(null);
   const [uploadedImageFile, setUploadedImageFile] = useState<File | null>(null);
-  const [selectedModel, setSelectedModel] = useState<MannequinModelKey>('male');
+  const [selectedModel, setSelectedModel] = useState<MannequinModelKey>('none');
   const [savedDesignId, setSavedDesignId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1598,9 +1645,19 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const pendingResolutionClearRef = useRef(false);
 
-  useEffect(() => {
-    setUserId(getUserId());
-  }, []);
+  const baseVariant = useMemo(() => variants.find((v) => v.kind === 'base') ?? null, [variants]);
+  const baseHasAnyImage = useMemo(() => (baseVariant?.images?.length ?? 0) > 0, [baseVariant]);
+
+useEffect(() => {
+  setUserId(getUserId());
+}, []);
+
+useEffect(() => {
+  if (selectedModel === 'none') return;
+  const base = variants.find((v) => v.kind === 'base') ?? null;
+  if (base) void generateModelPreviewIfReady(selectedModel, base);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [selectedModel, variants]);
 
   useEffect(() => {
     // Clear old results whenever the user changes resolution so we never mix sizes.
@@ -1650,12 +1707,119 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const styleButtonLabel = 'Style';
   const hasReferenceImage = Boolean(uploadedImageDataUrl || uploadedImageFile);
   const hasSingleEditResult = false;
-  const baseVariant = useMemo(() => variants.find((v) => v.kind === 'base') ?? null, [variants]);
+
+  const generateModelPreviewIfReady = useCallback(
+    async (modelKey: MannequinModelKey, base: GeneratedVariant | null) => {
+      if (modelKey === 'none') {
+        console.debug('[model] skip (model none)');
+        return;
+      }
+      if (!base || !(base.images || []).length) {
+        console.debug('[model] skip (no base images)');
+        return;
+      }
+
+      const existing = variants.find((v) => v.kind === 'model_preview' && v.modelKey === modelKey);
+      if (existing) {
+        console.debug('[model] skip (already exists for model)', modelKey);
+        return;
+      }
+
+      const primary = base.images.find((img) => img.view === 'front') || base.images[0];
+      const secondary = base.images.find((img) => img.view === 'back') || primary;
+      const sources = [
+        { view: 'front' as ViewKey, imageBase64: primary.imageBase64 ?? stripPngDataUrl(primary.src) ?? '' },
+        { view: 'back' as ViewKey, imageBase64: secondary.imageBase64 ?? stripPngDataUrl(secondary.src) ?? '' },
+      ];
+
+      console.debug('[model] generating model previews', { modelKey, sources: sources.length, baseId: base.id });
+
+      setIsGenerating(true);
+      setStatusMessage(`Generating ${modelKey} model previews...`);
+      setError(null);
+      try {
+        const resp = await authFetch('/api/convert-model', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            images: sources,
+            modelKey,
+            style: 'realistic',
+            bgColor: selectedBgColor,
+            views: ['front', 'back'],
+          }),
+        });
+        const payload = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(payload.error || 'Model conversion failed.');
+        if (!Array.isArray(payload.converted)) throw new Error('Model conversion failed.');
+
+        console.debug('[model] convert-model returned', payload.converted?.length);
+
+        const viewToBase64 = new Map<ViewKey, string>();
+        for (const it of payload.converted as Array<{ view: ViewKey; imageBase64: string }>) {
+          if (it?.view && it?.imageBase64) viewToBase64.set(it.view, it.imageBase64);
+        }
+
+        const orderedImages: GeneratedImage[] = ['front', 'back'].map((view) => {
+          const imageBase64 = viewToBase64.get(view);
+          if (!imageBase64) throw new Error(`Missing model preview view: ${view}`);
+          return { view: view as ViewKey, src: `data:image/png;base64,${imageBase64}`, imageBase64, width: resolution, height: resolution };
+        });
+
+        const composite = await composeCompositeFromTiles(orderedImages, resolution, selectedBgColor);
+        const modelVariant: GeneratedVariant = {
+          id: crypto.randomUUID(),
+          kind: 'model_preview',
+          styleLabel: 'Realistic',
+          styleKey: 'realistic',
+          modelLabel: mannequinOptions.find((opt) => opt.id === modelKey)?.label ?? String(modelKey),
+          modelKey,
+          views: orderedImages.map((i) => i.view),
+          composite,
+          images: await Promise.all(
+            orderedImages.map(async (img) => {
+              const fittedSrc = await fitImageToFrame(img.src, resolution, 0.01, selectedBgColor, selectedProductColor);
+              const fixedSrc = await ensurePngDataUrlSquareSize(fittedSrc, resolution, selectedBgColor);
+              return {
+                ...img,
+                src: fixedSrc,
+                imageBase64: stripPngDataUrl(fixedSrc) || img.imageBase64,
+                width: resolution,
+                height: resolution,
+              };
+            })
+          ),
+        };
+
+        setVariants((prev) => {
+          const keep = prev.filter((v) => !(v.kind === 'model_preview' && v.modelKey === modelKey));
+          return [...keep, modelVariant];
+        });
+        setStatusMessage('Model previews generated.');
+      } catch (err: any) {
+        setError(err?.message || 'Model conversion failed.');
+      } finally {
+        setIsGenerating(false);
+      }
+    },
+    [resolution, selectedBgColor, selectedProductColor, variants]
+  );
   const globalResolutionValue = useMemo(() => `${resolution}×${resolution}`, [resolution]);
 
-  useEffect(() => {
-    setSelectedViews((prev) => normalizeViews(prev));
-  }, []);
+useEffect(() => {
+  setSelectedViews((prev) => normalizeViews(prev));
+}, []);
+
+useEffect(() => {
+  if (selectedModel === 'none') return;
+  if (!baseHasAnyImage) {
+    if (hasAnyResult) setStatusMessage('Generate product first to apply model');
+    return;
+  }
+  const existing = variants.find((v) => v.kind === 'model_preview' && v.modelKey === selectedModel);
+  if (!existing) void handleConvertModel(selectedModel);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [selectedModel, baseHasAnyImage, variants]);
 
   const toggleView = (viewId: ViewKey) => {
     setSelectedViews((prev) => {
@@ -1741,9 +1905,15 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
     }
     if (selectedProductColor) {
       colorModifiers += ` The product color is ${selectedProductColor}.`;
+      if (selectedProductColor === 'white') {
+        // Reinforce white garments so they aren't interpreted as background/transparent.
+        colorModifiers +=
+          ' Pure white (not grey), opaque fabric, visible stitching and texture, realistic shadows, do not make the garment translucent, do not tint the garment grey. The hoodie color must be pure white (#ffffff), not grey or off-white. The fabric is opaque white cotton fleece with visible stitching and texture. Maintain strong highlights and shadows while keeping the garment white. Do NOT tint the garment grey to increase contrast with the background.';
+      }
     }
 
-    const finalPrompt = appendPromptModifier(safePrompt, `Variation: ${variation}. ${colorModifiers} RequestId: ${requestId}.`);
+    const extraRealism = effectiveStyle === '3d' ? ' Photorealistic studio photo, NOT 3D render, NOT CGI.' : '';
+    const finalPrompt = appendPromptModifier(safePrompt, `Variation: ${variation}. ${colorModifiers}${extraRealism} RequestId: ${requestId}.`);
 
     const normalizedViews = normalizeViews(selectedViews);
     if (!normalizedViews.length) {
@@ -1825,10 +1995,20 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       });
 
       setStatusMessage('Preparing images...');
+      if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+        console.debug('[AIImageGenerator] postprocess config', {
+          bgColor: selectedBgColor,
+          resolvedBg: resolveBgColorHex(selectedBgColor),
+          productColor: selectedProductColor,
+          isWhiteBg: isWhiteBg(selectedBgColor),
+          isWhiteProduct: isWhiteProduct(selectedProductColor),
+          treatNearWhiteAsEmpty: isWhiteBg(selectedBgColor) && !isWhiteProduct(selectedProductColor),
+        });
+      }
       const croppedImages: GeneratedImage[] = await Promise.all(
         orderedImages.map(async (img) => {
-          const fittedSrc = await fitImageToFrame(img.src, resolution, 0.01);
-          const fixedSrc = await ensurePngDataUrlSquareSize(fittedSrc, resolution);
+          const fittedSrc = await fitImageToFrame(img.src, resolution, 0.01, selectedBgColor, selectedProductColor);
+          const fixedSrc = await ensurePngDataUrlSquareSize(fittedSrc, resolution, selectedBgColor);
           return {
             ...img,
             src: fixedSrc,
@@ -1854,6 +2034,14 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
       setHasResultFlag(true);
       setStatusMessage('Generated views successfully.');
       onGenerate?.(composite);
+
+      if (selectedModel !== 'none') {
+        console.debug('[model] post-base generation trigger', {
+          selectedModel,
+          images: croppedImages.length,
+        });
+        await generateModelPreviewIfReady(selectedModel, baseVariant);
+      }
 
       void Promise.all(
         croppedImages.map(async (img) => {
@@ -1938,7 +2126,7 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         return { view, src: `data:image/png;base64,${imageBase64}`, imageBase64, width: resolution, height: resolution };
       });
 
-      const composite = await composeCompositeFromTiles(orderedImages, resolution);
+      const composite = await composeCompositeFromTiles(orderedImages, resolution, selectedBgColor);
       const styleVariant: GeneratedVariant = {
         id: crypto.randomUUID(),
         kind: 'style_converted',
@@ -1948,8 +2136,8 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         composite,
         images: await Promise.all(
           orderedImages.map(async (img) => {
-            const fittedSrc = await fitImageToFrame(img.src, resolution, 0.01);
-            const fixedSrc = await ensurePngDataUrlSquareSize(fittedSrc, resolution);
+            const fittedSrc = await fitImageToFrame(img.src, resolution, 0.01, selectedBgColor, selectedProductColor);
+            const fixedSrc = await ensurePngDataUrlSquareSize(fittedSrc, resolution, selectedBgColor);
             return {
               ...img,
               src: fixedSrc,
@@ -1975,81 +2163,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   };
 
   const handleConvertModel = async (modelKey: MannequinModelKey) => {
+    if (modelKey === 'none') return;
     const base = variants.find((v) => v.kind === 'base') ?? null;
-    if (!base) return;
-
-    const modelSourceImages = base.images.filter((img) => img.view === 'front' || img.view === 'back');
-    if (!modelSourceImages.length) {
-      setError('Missing base front/back views for model conversion.');
-      return;
-    }
-
-    setIsGenerating(true);
-    setStatusMessage(`Generating ${modelKey} mannequin previews...`);
-    setError(null);
-
-    try {
-      const resp = await authFetch('/api/convert-model', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          images: modelSourceImages.map((img) => ({ view: img.view, imageBase64: img.imageBase64 ?? '' })),
-          modelKey,
-          // regardless of the selected generation style.
-          style: 'realistic',
-          bgColor: selectedBgColor,
-        }),
-      });
-      const payload = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(payload.error || 'Model conversion failed.');
-      if (!Array.isArray(payload.converted)) throw new Error('Model conversion failed.');
-
-      const viewToBase64 = new Map<ViewKey, string>();
-      for (const it of payload.converted as Array<{ view: ViewKey; imageBase64: string }>) {
-        if (it?.view && it?.imageBase64) viewToBase64.set(it.view, it.imageBase64);
-      }
-
-      const orderedImages: GeneratedImage[] = modelSourceImages.map((img) => img.view).map((view) => {
-        const imageBase64 = viewToBase64.get(view);
-        if (!imageBase64) throw new Error(`Missing model preview view: ${view}`);
-        return { view, src: `data:image/png;base64,${imageBase64}`, imageBase64, width: resolution, height: resolution };
-      });
-
-      const composite = await composeCompositeFromTiles(orderedImages, resolution);
-      const modelVariant: GeneratedVariant = {
-        id: crypto.randomUUID(),
-        kind: 'model_preview',
-        styleLabel: 'Realistic',
-        styleKey: 'realistic',
-        modelLabel: mannequinOptions.find((opt) => opt.id === modelKey)?.label ?? String(modelKey),
-        modelKey,
-        views: orderedImages.map((i) => i.view),
-        composite,
-        images: await Promise.all(
-          orderedImages.map(async (img) => {
-            const fittedSrc = await fitImageToFrame(img.src, resolution, 0.01);
-            const fixedSrc = await ensurePngDataUrlSquareSize(fittedSrc, resolution);
-            return {
-              ...img,
-              src: fixedSrc,
-              imageBase64: stripPngDataUrl(fixedSrc) || img.imageBase64,
-              width: resolution,
-              height: resolution,
-            };
-          })
-        ),
-      };
-
-      setVariants((prev) => {
-        const keep = prev.filter((v) => v.kind !== 'model_preview');
-        return [...keep, modelVariant];
-      });
-      setStatusMessage('Model previews generated.');
-    } catch (err: any) {
-      setError(err?.message || 'Model conversion failed.');
-    } finally {
-      setIsGenerating(false);
-    }
+    await generateModelPreviewIfReady(modelKey, base);
   };
 
   const handleSaveDesign = async () => {
@@ -2091,7 +2207,9 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
         const nameWithSuffix = `${finalName}${suffix}`.slice(0, 60);
 
         const viewsToSave = (variant.images || []).map((img) => img.view);
-        const imageDataUrls = await Promise.all(variant.images.map((img) => ensureTrimmedPngDataUrl(img.src)));
+        const imageDataUrls = await Promise.all(
+          variant.images.map((img) => ensureTrimmedPngDataUrl(img.src, selectedBgColor, selectedProductColor))
+        );
 
         const payload = {
           name: nameWithSuffix,
@@ -2492,14 +2610,17 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
                         onClick={() => {
                           setSelectedModel(m.id);
                           setOpenMenu(null);
-                          if (variants.some(v => v.kind === 'base')) {
-                            handleConvertModel(m.id);
+                          const base = variants.find(v => v.kind === 'base');
+                          if (m.id !== 'none') {
+                            if (base) void generateModelPreviewIfReady(m.id, base);
+                            else setStatusMessage('Generate product first to apply model');
                           }
                         }}
                         className={clsx(
                           "w-full h-[40px] px-3 rounded-lg text-sm border text-left transition-all",
                           selectedModel === m.id ? "bg-purple-50 border-purple-200 text-purple-700" : "hover:bg-slate-50 border-slate-100"
                         )}
+                        title={m.id !== 'none' && !baseVariant ? 'Generate product first to apply model' : undefined}
                       >
                         {m.label}
                       </button>

@@ -597,16 +597,33 @@ function isAnimalPrompt(p: string): boolean {
   return animals.some((w) => keywordPattern(w).test(s));
 }
 
+function userRequestedBranding(p: string): boolean {
+  const s = extractUserRequestSegment(p).toLowerCase();
+  if (!s.trim()) return false;
+  return /\b(logo|logotype|wordmark|brand(ed)?|branding|badge|crest|emblem|icon|print|printed|graphic|pattern|design|text|number|sponsor|leaf\s+logo|chest\s+logo|front\s+print)\b/.test(s);
+}
+
 function applyApparelModePreface(p: string, mode: ApparelMode): string {
   if (mode === 'none') return String(p ?? '').trim();
 
-  const mockupPreface =
-    'Apparel mockup/product photo as requested. Ensure the print/placement is clearly visible and readable. Keep it as a single garment/product presentation; use even lighting with minimal shadows (no drop shadow) unless requested; styling may vary.';
+  const wantsBranding = userRequestedBranding(p);
+
+  const mockupPrefaceParts = [
+    'Apparel mockup/product photo as requested. Photorealistic studio product photo (NOT 3D render, NOT CGI, NOT illustration).',
+    wantsBranding
+      ? null
+      : 'Blank unbranded garment by default: no logos, no emblems, no icons, no text, no graphics, no watermark, no corner overlays.',
+    'Ensure any requested print/placement is clearly visible and readable.',
+    'Keep it as a single garment/product presentation; use soft, even lighting with only subtle natural contact shadow; no heavy drop shadows; background stays clean white.',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
   const fashionPreface =
     'Fashion photo as requested. One person/model wearing the garment; encourage natural pose, movement, and expression. Let background and mood support the scene while keeping the clothing clearly visible.';
   const neutralPreface = 'High quality apparel image. Focus on material, fit, and silhouette; choose a composition that matches the request.';
 
-  const selected = mode === 'mockup' ? mockupPreface : mode === 'fashion' ? fashionPreface : neutralPreface;
+  const selected = mode === 'mockup' ? mockupPrefaceParts : mode === 'fashion' ? fashionPreface : neutralPreface;
   const body = stripKnownApparelPrefacesFromPrompt(String(p ?? ''));
   if (!body) return selected;
   return `${selected} ${body}`.replace(/\s+/g, ' ').trim();

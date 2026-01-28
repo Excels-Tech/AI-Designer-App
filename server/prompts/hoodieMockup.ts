@@ -87,10 +87,15 @@ export function buildHoodieMockupPrompt(args: {
     const inferred = inferBaseColorFromPrompt(basePrompt);
     const is3D = args.is3D === true;
 
+    const isExplicitWhite = /\bwhite\b/i.test(hoodieColorRaw);
     const hoodieColor =
-        hoodieColorRaw ||
-        (inferred && /\b(white|off white|off-white)\b/i.test(inferred) ? 'off-white (#f7f7f7)' : inferred) ||
-        'off-white (#f7f7f7)';
+        (hoodieColorRaw
+            ? isExplicitWhite
+                ? 'pure white (#FFFFFF)'
+                : hoodieColorRaw
+            : inferred && /\b(white|off white|off-white)\b/i.test(inferred)
+                ? 'pure white (#FFFFFF)'
+                : inferred) || 'off-white (#f7f7f7)';
 
     const placementLine = describeLogoPlacement(args.logoPlacement);
     const brandName = String(args.brandName ?? '').trim();
@@ -100,38 +105,46 @@ export function buildHoodieMockupPrompt(args: {
     const isWhiteProduct = /\b(white|off-white|off white|cream|ivory)\b/i.test(hoodieColor);
     let backgroundColor = '';
     if (args.bgColor === 'lightgray') {
-        backgroundColor = 'LIGHT GRAY background (#EEEEEE)';
+        backgroundColor = isWhiteProduct ? 'LIGHT GRAY background (#DADADA)' : 'LIGHT GRAY background (#EEEEEE)';
     } else if (args.bgColor === 'white') {
         backgroundColor = 'PURE WHITE background (#FFFFFF)';
     } else {
-        backgroundColor = isWhiteProduct ? 'LIGHT GRAY background (#EEEEEE)' : 'PURE WHITE background (#FFFFFF)';
+        backgroundColor = isWhiteProduct ? 'LIGHT GRAY background (#DADADA)' : 'PURE WHITE background (#FFFFFF)';
     }
 
     // Build plain or 3D template
     let template: string;
     let negative: string;
+    const catalogFlat = isWhiteProduct; // Force catalog-flat mode for white garments.
 
-    if (is3D) {
+    if (catalogFlat) {
+        const whiteFabricControl = `WHITE FABRIC CRITICAL: Garment must be pure white (#FFFFFF) with uniform matte cotton texture. Garment must remain brighter than the background everywhere. Do NOT tint the garment gray to match the background. Even luminance across the entire garment.`;
+
+        template = `E-commerce catalog flat render (NOT a photo, NOT realistic). Plain cotton hoodie in ${hoodieColor}. Front view on ${backgroundColor}. ${whiteFabricControl} Flat, uniform, vector-like lighting; NO directional lighting, NO cast shadows, NO depth shading, NO global illumination gradients, NO ambient occlusion. Even luminance across the garment; garment brighter than background everywhere. Do NOT apply left-to-right or top-to-bottom brightness gradients on the garment. Hood interior darkness must not influence exterior fabric brightness. Keep the hoodie completely unbranded and plain (no logos, no text, no graphics, no labels). Background must stay perfectly clean and uniform with zero shadows or gradients.`;
+
+        negative =
+            'NEGATIVE: realistic photo, photography, studio lighting, directional light, shadows, shading, gradient lighting, ambient occlusion, glossy, shiny, reflective, plastic, vinyl, leather, specular, wet look, bloom, lens flare, vignette, gradient background, noise, grain, texture on background, props, scene, people, mannequin.';
+    } else if (is3D) {
         // 3D Mode - photorealistic but plain, no branding
         const whiteFabricControl = isWhiteProduct
             ? 'WHITE FABRIC CRITICAL: Render true matte cotton white fabric (#F5F5F5 to #FAFAFA). The fabric MUST be completely matte with ZERO shine, ZERO gloss, ZERO specularity, ZERO reflections. ABSOLUTELY NO plastic appearance, NO vinyl look, NO wet appearance, NO glossy surface, NO shiny patches, NO highlight sparkle. The cotton must look dry, soft, and completely non-reflective. Maintain visible seams and fabric texture through subtle shading only. Proper exposure - avoid overexposed blown whites while keeping fabric detail visible. Clean, uniform white cotton surface free of noise, grain, or speckles.'
             : '';
 
-        template = `Photorealistic 3D product render of a plain cotton hoodie in ${hoodieColor}. Front view. ${backgroundColor}. ${whiteFabricControl} Keep the hoodie completely unbranded and plain (no logos, no text, no graphics, no labels). Soft, even studio lighting, neutral exposure, clean fabric detail, minimal/no visible shadow on the background.`;
+        template = `Photorealistic 3D product render of a plain cotton hoodie in ${hoodieColor}. Front view. ${backgroundColor}. ${whiteFabricControl} Keep the hoodie completely unbranded and plain (no logos, no text, no graphics, no labels). Flat, uniform, front-facing catalog lighting only; zero directional lighting, zero global illumination gradients, zero ambient occlusion. Fabric brightness must stay uniform across the entire garment and always be brighter than the background everywhere.`;
 
         negative =
             'NEGATIVE: shiny, glossy, gloss, shine, specularity, specular, specular highlight, reflective, reflections, reflection, wet look, wet appearance, plastic, vinyl, leather, satin, silk, lustrous, polished, sheen, glint, sparkle, highlight sparkle, blown highlights, overexposed, clipped whites, hot spots, glare, metallic, pearlescent, iridescent, shimmer, glass-like, smooth plastic, PVC, latex, text, logo, wordmark, brand name, numbers, slogans, labels, embroidery, print, pattern, graphic, sticker, decal, watermark, cartoon, line art, flat vector, illustration, noisy background, grain, gradient background, vignette, props, room, scene, people, mannequin head, body, noise, grainy texture, speckles, salt-and-pepper noise, film grain, digital noise, artifacts, compression artifacts.';
     } else {
         // Realistic Mode - Professional product photography with realistic fabric texture but NO shadows
         const whiteFabricControl = isWhiteProduct
-            ? `\n\nWHITE FABRIC CRITICAL: Render authentic matte cotton white fabric (#F5F5F5 to #FAFAFA). ENFORCE COMPLETELY MATTE FINISH - ZERO shine, ZERO gloss, ZERO specularity, ZERO reflections, ZERO highlight sparkle. The fabric MUST appear completely non-reflective like dry cotton fleece. ABSOLUTELY NO plastic appearance, NO vinyl surface, NO wet look, NO glossy patches, NO shiny areas, NO specular highlights, NO reflective surface. The cotton must look soft, dry, and diffusely lit with uniform matte texture across the entire garment. Preserve fabric detail only through subtle natural shadow in folds and seams - NO noise, NO grain, NO speckles. Balanced exposure showing fabric texture without overexposed hot spots or blown whites. The surface must be uniformly matte like real uncoated cotton sweatshirt fabric.`
+            ? `\n\nWHITE FABRIC CRITICAL: Render authentic matte cotton white fabric (#F5F5F5 to #FAFAFA). ENFORCE COMPLETELY MATTE FINISH - ZERO shine, ZERO gloss, ZERO specularity, ZERO reflections, ZERO highlight sparkle. The fabric MUST appear completely non-reflective like dry cotton fleece. ABSOLUTELY NO plastic appearance, NO vinyl surface, NO wet look, NO glossy patches, NO shiny areas, NO specular highlights, NO reflective surface. The cotton must look soft, dry, and diffusely lit with uniform matte texture across the entire garment. Preserve fabric detail only through subtle natural shadow in folds and seams - NO noise, NO grain, NO speckles. Balanced exposure showing fabric texture without overexposed hot spots or blown whites. The surface must be uniformly matte like real uncoated cotton sweatshirt fabric. Do NOT tint the garment gray to match the background.`
             : '';
 
         template = `Professional ecommerce product photo of a plain cotton hoodie in ${hoodieColor}. Front view on ${backgroundColor}. 
     
 CRITICAL FABRIC REALISM: Render realistic 3D cotton fabric with natural texture - visible cotton weave, subtle fabric grain, natural cotton matte finish. Show realistic garment structure with proper hood shape, natural fabric folds at elbows and torso, ribbed cuffs and hem with knit texture detail, kangaroo pocket with depth and fabric overlap. The hoodie must look like a real physical cotton garment with dimensional fabric draping and natural material properties.${whiteFabricControl}
 
-LIGHTING: Even, diffuse studio lighting from all angles. Completely shadowless illumination - the background must show ZERO shadows, ZERO cast shadows, ZERO drop shadows, ZERO ground shadows. Use wraparound lighting that eliminates all shadow artifacts while preserving fabric detail and depth through subtle fabric self-shadowing only (natural shading within fabric folds).
+LIGHTING RULES (MANDATORY): Flat, uniform, front-facing catalog lighting. ZERO directional lighting, ZERO side lighting, ZERO rim lighting, ZERO global illumination gradients, ZERO ambient occlusion. Fabric brightness must stay uniform across the entire garment and always be brighter than the background everywhere. Do NOT apply left-to-right or top-to-bottom brightness gradients on the garment. Hood interior darkness must not influence exterior fabric brightness. ZERO shadows, ZERO cast shadows, ZERO drop/ground shadows.
 
 BACKGROUND: ${backgroundColor} must be perfectly clean, uniform, and completely free of any shadows or darkening. Pure solid color with zero gradient, zero noise, zero texture.
 

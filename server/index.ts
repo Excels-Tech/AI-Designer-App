@@ -51,7 +51,7 @@ import { stripKeysDeep } from './utils/stripKeysDeep';
 
 type StyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor' | 'modelMale' | 'modelFemale' | 'modelKid';
 type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'closeUp' | 'top';
-type MannequinModelKey = 'male' | 'female';
+type MannequinModelKey = 'male' | 'female' | 'boy' | 'girl';
 type UniformViewKey = 'front' | 'back' | 'left' | 'right';
 
 interface GenerateRequestBody {
@@ -824,7 +824,8 @@ const APPAREL_LIGHT_GRAY_BACKGROUND_PROMPT = [
 ].join(' ');
 
 const HOODIE_MOCKUP_BACKGROUND_PROMPT = [
-  'Background: light gray seamless paper (#eeeeee) (NOT pure white) with a soft natural shadow under hoodie only.',
+  'Background MUST be PURE SOLID UNIFORM LIGHT GRAY (#eeeeee), seamless and perfectly clean (NO gradients, NO texture, NO noise).',
+  'ZERO cast shadows, ZERO ground/drop shadows; background stays perfectly flat and even.',
   'Centered, straight-on front view. Clean ecommerce product photo (NOT 3D render).',
   'Leave 8-10% margin around hoodie; no cropping.',
   'NO reflections, NO glossy floor, NO gradient backdrop, NO vignette, NO props, NO scene.',
@@ -847,7 +848,13 @@ function getApparelBackgroundPrompt(bgColor?: string) {
 function wantsBranding(text: string): boolean {
   const s = String(text ?? '').toLowerCase();
   if (!s.trim()) return false;
-  return /\b(logo|badge|crest|emblem|wordmark|sponsor|branding|brand name|text|number|jersey)\b/.test(s);
+  return /\b(logo|brand|branding|brand name|watermark|signature|text|typography|label|emblem|icon|monogram|slogan|print|graphic|badge|crest|wordmark|number|jersey)\b/.test(
+    s
+  );
+}
+
+function userRequestedBrandingServer(text: string): boolean {
+  return wantsBranding(text);
 }
 
 function wantsBackgroundScene(text: string): boolean {
@@ -891,6 +898,9 @@ const FULL_FRAME_NEGATIVE_PROMPT = [
 
 const NO_LOGO_GUARD_PROMPT =
   'STRICT: Do NOT add any logos, emblems, crests, badges, stripes, numbers, text, typography, words, slogans, letters, wordmarks, patterns, watermarks, emails, contact info, team names, or brand names. Fabric must be completely plain solid color only. NO WRITING.';
+
+const NO_LOGO_NEGATIVE =
+  'NEGATIVE: logo, watermark, signature, brand, branding, emblem, icon, text, letters, monogram, badge, label, wordmark, corner overlay.';
 
 const WHITE_BACKGROUND_GUARD_PROMPT =
   'STRICT BACKGROUND: Pure solid white (#FFFFFF) only. No scenery, no stadium, no field, no grass, no sky, no trees, no crowd, no horizon, no floor, no props, no shapes or graphics. No shadows or drop shadows. If anything appears behind the product, replace it with solid white.';
@@ -3206,6 +3216,7 @@ function buildViewPrompt(basePrompt: string, style: StyleKey, view: ViewKey, wid
     `View requirement: ${viewSpecificInstructions[view]}`,
     `No grids, no collages, no multi-panel layouts. One centered subject.`,
     !brandingOk ? NO_LOGO_GUARD_PROMPT : null,
+    !brandingOk ? NO_LOGO_NEGATIVE : null,
     !backgroundOk ? WHITE_BACKGROUND_GUARD_PROMPT : null,
     !allow3d ? NO_3D_GUARD_PROMPT : null,
     NO_SHADOW_GUARD_PROMPT,
@@ -3234,6 +3245,7 @@ function buildBasePrompt(prompt: string, style: StyleKey, resolution: number, bg
   const allow3d = wants3D(prompt);
   return [
     !brandingOk ? NO_LOGO_GUARD_PROMPT : null,
+    !brandingOk ? NO_LOGO_NEGATIVE : null,
     'Generate ONE base image that matches the user prompt.',
     'STRICT: Front view (head-on) unless the user prompt implies a different viewpoint (e.g. poster/logo).',
     'STRICT: Do not add socks, shoes, mannequins, models, people, faces, hands, or body parts unless the user prompt explicitly asks for them.',
@@ -3288,6 +3300,7 @@ function buildViewFromBasePrompt(
 
   return [
     !brandingOk ? NO_LOGO_GUARD_PROMPT : null,
+    !brandingOk ? NO_LOGO_NEGATIVE : null,
     `Create a single image of the SAME design from the ${viewLabels[view]} angle.`,
     `View requirement: ${viewSpecificInstructions[view]}`,
     sideStrict,
@@ -3347,47 +3360,94 @@ function buildStyleConversionPrompt(style: StyleKey) {
 }
 
 function buildMannequinConversionPrompt(modelKey: MannequinModelKey) {
+  const subject =
+    modelKey === 'boy'
+      ? 'real boy (male child, age ~8–12)'
+      : modelKey === 'girl'
+        ? 'real girl (female child, age ~8–12)'
+        : modelKey === 'male'
+          ? 'real adult male model'
+          : 'real adult female model';
   return [
-    `Generate a high-resolution PHOTOREALISTIC studio photograph of a real ${modelKey} human athlete wearing the exact same soccer uniform from the reference image.`,
-    'STRICT: REAL human athlete (NOT mannequin, NOT doll, NOT statue, NOT dummy).',
-    'STRICT: REAL CAMERA PHOTO. Professional ecommerce studio photography. Natural skin texture and realistic facial details.',
+    `Generate a high-resolution REAL DSLR PHOTO of a ${subject} wearing the exact same garment from the reference image.`,
+    modelKey === 'boy'
+      ? 'NOT girl, NOT female.'
+      : modelKey === 'girl'
+        ? 'NOT boy, NOT male.'
+        : modelKey === 'male'
+          ? 'NOT female.'
+          : 'NOT male.',
+    'STRICT: REAL human (NOT mannequin, NOT doll, NOT statue, NOT dummy, NOT CGI, NOT 3D, NOT digital avatar, NO beauty filter).',
+    'NO CGI. NO 3D. REAL DSLR PHOTO ONLY.',
+    'REALISM: natural skin pores, subtle blemishes, fine hair strands, imperfect symmetry, realistic hands/fingers. NOT plastic skin, NOT over-smoothed.',
     'STRICT CAMERA FRAMING: FULL BODY including head and face. Head-to-toe. Wide full-body photo. Centered subject. Leave generous margin above head and below feet. Do NOT crop.',
     FULL_FRAME_POSITIVE_PROMPT,
     FULL_FRAME_NEGATIVE_PROMPT,
-    'STRICT: NOT 3D render. NOT CGI. NOT illustration. NOT stylized. NOT line art. NOT watercolor.',
+    'STRICT: NOT 3D render. NOT CGI. NOT illustration. NOT stylized. NOT line art. NOT watercolor. REAL DSLR PHOTO ONLY.',
     'STRICT: Preserve the exact uniform design and all details: colors, patterns, logos, text, placement, numbering, and branding.',
+    'Do NOT add any new logos, graphics, text, or watermarks. Keep garment and background unbranded unless clearly present in the reference.',
     'STRICT: Keep the same camera angle and view as the input image (front stays front; back stays back; left stays left; right stays right).',
-    'STRICT: Do not invent new design elements. Do not mirror or flip.',
+    'STRICT: Do not invent new design elements. Do not mirror or flip. Do NOT invent any new logos/graphics; keep garment exactly as in reference.',
     'STRICT: Do not add socks, shoes, gloves, hats, or accessories unless they are clearly present in the input image.',
-    bgColor === 'lightgray' ? LIGHT_GRAY_BACKGROUND_PROMPT : 'Background: clean white or very light gray studio backdrop (no gradients, no heavy shadows).',
+    'Background: clean white or very light gray studio backdrop (no gradients, no heavy shadows).',
   ].join(' ');
 }
 
 function modelFrontPrompt(modelKey: MannequinModelKey, extraConstraints?: string, bgColor?: string) {
+  const subject =
+    modelKey === 'boy'
+      ? 'real boy (male child, age ~8–12)'
+      : modelKey === 'girl'
+        ? 'real girl (female child, age ~8–12)'
+        : modelKey === 'male'
+          ? 'real adult male model'
+          : 'real adult female model';
   return [
-    `Generate a high-resolution, masterfully executed PHOTOREALISTIC studio photograph of a real adult ${modelKey} model wearing the exact same garment/apparel product from the reference image.`,
+    `Generate a high-resolution REAL DSLR PHOTO of a ${subject} wearing the exact same garment/apparel product from the reference image.`,
+    modelKey === 'boy'
+      ? 'NOT girl, NOT female.'
+      : modelKey === 'girl'
+        ? 'NOT boy, NOT male.'
+        : modelKey === 'male'
+          ? 'NOT female.'
+          : 'NOT male.',
     'VIEW: Straight-on FRONT view.',
-    'CAMERA: Professional DSLR photo, 85mm f/1.8 lens look. Razor-sharp focus on the model and garment with natural shallow depth of field. High dynamic range with authentic film-like contrast.',
-    'REALISM: ENFORCE AUTHENTIC HUMAN TEXTURE. Visible skin pores, natural skin micro-variation, fine hair strands, subtle facial asymmetry, and realistic moisture in the eyes. ABSOLUTELY NO plastic skin, NO uncanny valley smoothness, NO AI-generated "perfect" look.',
-    'STRICT: REAL human model (NOT a mannequin, NOT a CGI character, NOT a digital avatar, NOT a statue).',
-    'LIGHTING: Professional high-end fashion studio lighting (softbox or Rembrandt lighting). Use directional light to create natural depth, realistic shadows in fabric folds, and believable skin highlights.',
-    'STRICT CAMERA FRAMING: FULL BODY head-to-toe including the entire head and face. Wide-angle framing with clear empty space above the head and below the feet. Do NOT crop any body part or any clothing.',
-    'STRICT: Preserve the EXACT garment design, colors, material texture, logos, prints, and branding from the reference image without any deviation.',
+    'CAMERA: Professional DSLR photo, 85mm look. Razor-sharp focus on model and garment.',
+    'REALISM: natural skin pores, subtle blemishes, fine hair strands, imperfect symmetry, realistic hands/fingers. ABSOLUTELY NO plastic skin, NO CGI, NO 3D, NO digital avatar, NO beauty filter.',
+    'STRICT: REAL human model (NOT mannequin, NOT CGI, NOT digital avatar, NOT statue).',
+    'LIGHTING: Flat, even catalog lighting using soft studio softbox with subtle natural shadows; no harsh shadows; avoid cutout/flat look.',
+    'STRICT CAMERA FRAMING: FULL BODY head-to-toe including the entire head and face. Clear empty space above the head and below the feet. Do NOT crop any body part or any clothing.',
+    'STRICT: Preserve the EXACT garment design, colors, material texture, logos, prints, and branding from the reference image without any deviation. Do NOT invent new logos/graphics unless clearly present. Do NOT add watermarks.',
     extraConstraints?.trim() ? `IMPORTANT: ${extraConstraints.trim()}` : null,
     getBackgroundPrompt(bgColor),
   ].join(' ');
 }
 
 function modelBackPrompt(modelKey: MannequinModelKey, extraConstraints?: string, bgColor?: string) {
+  const subject =
+    modelKey === 'boy'
+      ? 'real boy (male child, age ~8–12)'
+      : modelKey === 'girl'
+        ? 'real girl (female child, age ~8–12)'
+        : modelKey === 'male'
+          ? 'real adult male model'
+          : 'real adult female model';
   return [
-    `Generate a high-resolution, masterfully executed PHOTOREALISTIC studio photograph of a real adult ${modelKey} model wearing the exact same garment/apparel product from the reference image.`,
+    `Generate a high-resolution REAL DSLR PHOTO of a ${subject} wearing the exact same garment/apparel product from the reference image.`,
+    modelKey === 'boy'
+      ? 'NOT girl, NOT female.'
+      : modelKey === 'girl'
+        ? 'NOT boy, NOT male.'
+        : modelKey === 'male'
+          ? 'NOT female.'
+          : 'NOT male.',
     'VIEW: Straight-on BACK view (rear view).',
-    'CAMERA: Professional DSLR photo, 85mm f/1.8 lens look. Match the exact framing, distance, and focal length of the front view for a consistent pair.',
-    'REALISM: ENFORCE AUTHENTIC HUMAN TEXTURE. Visible skin pores on the neck/limbs, natural hair texture (back of head), and realistic human anatomy. No plastic or overly smooth surfaces.',
-    'STRICT: REAL human model (NOT a mannequin, NOT a CGI character, NOT a digital avatar, NOT a statue).',
-    'LIGHTING: Professional high-end fashion studio lighting. Ensure the back of the garment is clearly illuminated with realistic shading in folds and seams.',
+    'CAMERA: Professional DSLR photo, 85mm look. Match framing, distance, and focal length of the front view for a consistent pair.',
+    'REALISM: natural skin pores on neck/limbs, natural hair texture, realistic anatomy. No plastic or overly smooth surfaces. NO CGI, NO 3D, NO digital avatar.',
+    'STRICT: REAL human model (NOT mannequin, NOT CGI, NOT digital avatar, NOT statue).',
+    'LIGHTING: Flat, even catalog lighting using soft studio softbox with subtle natural shadows; avoid harsh shadows or cutout look.',
     'STRICT CAMERA FRAMING: FULL BODY head-to-toe. Include the head and feet. Provide generous empty margin/padding around the entire figure. DO NOT CROP.',
-    'STRICT: Preserve the EXACT garment design, colors, material texture, and branding from the reference image.',
+    'STRICT: Preserve the EXACT garment design, colors, material texture, and branding from the reference image. Do NOT invent new logos/graphics unless clearly present. Do NOT add watermarks.',
     extraConstraints?.trim() ? `IMPORTANT: ${extraConstraints.trim()}` : null,
     getBackgroundPrompt(bgColor),
   ].join(' ');
@@ -4089,7 +4149,11 @@ function stripNegativePromptLine(prompt: string): string {
   return s.replace(/\n\s*Negative prompt:\s*[\s\S]*$/i, '').trim();
 }
 
-async function normalizeHoodieMockupEcom(buffer: Buffer, bgColor?: string): Promise<Buffer> {
+export async function normalizeHoodieMockupEcom(
+  buffer: Buffer,
+  bgColor?: string,
+  options?: { noShadow?: boolean }
+): Promise<Buffer> {
   // Goal: force a clean ecommerce look like the reference:
   // - uniform light gray background (#eeeeee)
   // - remove wall/gradient/backdrop/shadows that touch the edges
@@ -4227,6 +4291,18 @@ async function normalizeHoodieMockupEcom(buffer: Buffer, bgColor?: string): Prom
     .png()
     .toBuffer();
 
+  // Compose on requested background. Optionally add synthetic shadow.
+  const finalBg = bgColor === 'white' ? WHITE_BG : LIGHT_GRAY_BG;
+
+  if (options?.noShadow) {
+    return await sharp({
+      create: { width, height, channels: 4, background: finalBg },
+    })
+      .composite([{ input: cutout }])
+      .png()
+      .toBuffer();
+  }
+
   // Synthetic soft shadow under hoodie (computed from bbox in small space, scaled to full size).
   const scaleX = width / sw;
   const scaleY = height / sh;
@@ -4249,8 +4325,6 @@ async function normalizeHoodieMockupEcom(buffer: Buffer, bgColor?: string): Prom
     .blur(Math.max(6, Math.round(Math.min(width, height) * 0.018)))
     .toBuffer();
 
-  // Compose on requested background.
-  const finalBg = bgColor === 'white' ? WHITE_BG : LIGHT_GRAY_BG;
   const bgLayer = await sharp({
     create: { width, height, channels: 4, background: finalBg },
   })
@@ -4267,7 +4341,7 @@ async function generateViewImage(
   view: ViewKey,
   targetWidth: number,
   targetHeight: number,
-  options?: { background?: { r: number; g: number; b: number; alpha: number } }
+  options?: { background?: { r: number; g: number; b: number; alpha: number }; bgColor?: string; productColor?: string; noShadow?: boolean }
 ) {
   const response = await generateContentWithRetry(
     `generateViewImage:${view}`,
@@ -4288,15 +4362,10 @@ async function generateViewImage(
 
   const rawIn = Buffer.from(imagePart.data as string, 'base64');
   const raw = isHoodieMockupPrompt(prompt)
-    ? await sharp(rawIn, { failOn: 'none' })
-      .ensureAlpha()
-      .modulate({ brightness: 0.92, saturation: 1.0 })
-      .linear(1, -6)
-      .png()
-      .toBuffer()
+    ? await sharp(rawIn, { failOn: 'none' }).ensureAlpha().png().toBuffer()
     : rawIn;
 
-  const desiredBg = (req.body as any)?.bgColor === 'lightgray' || options?.bgColor === 'lightgray' ? LIGHT_GRAY_BG : WHITE_BG;
+  const desiredBg = options?.bgColor === 'lightgray' || (req.body as any)?.bgColor === 'lightgray' ? LIGHT_GRAY_BG : WHITE_BG;
   const background = options?.background ?? desiredBg;
   const insetScale = 0.9;
   const insetWidth = Math.max(1, Math.round(targetWidth * insetScale));
@@ -4317,7 +4386,7 @@ async function generateViewImage(
 
   let finalBuf: Buffer;
   if (isHoodieMockupPrompt(prompt)) {
-    finalBuf = await normalizeHoodieMockupEcom(resized, options?.bgColor);
+    finalBuf = await normalizeHoodieMockupEcom(resized, options?.bgColor, { noShadow: options?.noShadow });
   } else if (options?.bgColor === 'lightgray') {
     // Directly flatten to light grey background - simpler and more reliable
     const transparent = await ensureBackgroundlessPngBase64Strict(resized.toString('base64'));
@@ -4345,7 +4414,7 @@ async function generateViewImageFromBase(
   targetHeight: number,
   userPrompt?: string,
   extraInstruction?: string,
-  options?: { background?: { r: number; g: number; b: number; alpha: number }; bgColor?: string }
+  options?: { background?: { r: number; g: number; b: number; alpha: number }; bgColor?: string; noShadow?: boolean }
 ) {
   const inlineData = pngBase64ToInlineData(baseImageBase64);
   const response = await generateContentWithRetry(
@@ -4385,12 +4454,7 @@ async function generateViewImageFromBase(
 
   const rawIn = Buffer.from(imagePart.data as string, 'base64');
   const raw = isHoodieMockupPrompt(userPrompt || '')
-    ? await sharp(rawIn, { failOn: 'none' })
-      .ensureAlpha()
-      .modulate({ brightness: 0.92, saturation: 1.0 })
-      .linear(1, -6)
-      .png()
-      .toBuffer()
+    ? await sharp(rawIn, { failOn: 'none' }).ensureAlpha().png().toBuffer()
     : rawIn;
 
   const finalBg = options?.bgColor === 'lightgray' ? LIGHT_GRAY_BG : WHITE_BG;
@@ -4405,7 +4469,7 @@ async function generateViewImageFromBase(
 
   let finalBuf: Buffer;
   if (isHoodieMockupPrompt(userPrompt || '')) {
-    finalBuf = await normalizeHoodieMockupEcom(resized, options?.bgColor);
+    finalBuf = await normalizeHoodieMockupEcom(resized, options?.bgColor, { noShadow: options?.noShadow });
   } else if (options?.bgColor === 'lightgray') {
     // Directly flatten to light grey background - simpler and more reliable
     const transparent = await ensureBackgroundlessPngBase64Strict(resized.toString('base64'));
@@ -4626,7 +4690,13 @@ app.post('/api/generate-views', async (req: Request, res: Response) => {
     assertPromptEnhancerSelectionDevOnly({ label: 'generate-views', userPrompt, promptForModel, modelText: sampleModelText });
 
     const tiles = await Promise.all(
-      views.map((view) => generateViewImage(promptForModel, styleEffective, view, tileWidth, tileHeight))
+      views.map((view) =>
+        generateViewImage(promptForModel, styleEffective, view, tileWidth, tileHeight, {
+          bgColor: (req.body as any)?.bgColor,
+          productColor: (req.body as any)?.productColor,
+          noShadow: hoodieMockup, // hoodie mockups must stay shadowless for uniform backgrounds
+        })
+      )
     );
 
     const composite = await composeComposite(tiles, grid.columns, grid.rows, tileWidth, tileHeight);
@@ -4869,27 +4939,20 @@ app.post('/api/generate-base', async (req: Request, res: Response) => {
     });
     if (hoodieMockup) {
       if (isLightGray) {
-        // Special path: Remove BG first (from pure white), THEN modulate subject, THEN flatten to target grey.
+        // Special path: Remove BG first (from pure white), THEN flatten to target grey (no darkening).
         const transparent = await forceTransparentFromWhite(baseImage);
 
-        const modulated = await sharp(Buffer.from(transparent, 'base64'), { failOn: 'none' })
+        const flattened = await sharp(Buffer.from(transparent, 'base64'), { failOn: 'none' })
           .ensureAlpha()
-          .modulate({ brightness: 0.92, saturation: 1.0 })
-          .linear(1, -6)
           .flatten({ background: LIGHT_GRAY_BG })
           .png()
           .toBuffer();
 
-        baseImage = modulated.toString('base64');
+        baseImage = flattened.toString('base64');
       } else {
-        // Standard path: Modulate first (affects BG), then normalize
-        const clamped = await sharp(Buffer.from(baseImage, 'base64'), { failOn: 'none' })
-          .ensureAlpha()
-          .modulate({ brightness: 0.92, saturation: 1.0 })
-          .linear(1, -6)
-          .png()
-          .toBuffer();
-        const normalized = await normalizeHoodieMockupEcom(clamped, incomingBg);
+        // Standard path: Normalize without darkening; allow shadowless rendering.
+        const clamped = await sharp(Buffer.from(baseImage, 'base64'), { failOn: 'none' }).ensureAlpha().png().toBuffer();
+        const normalized = await normalizeHoodieMockupEcom(clamped, incomingBg, { noShadow: true });
         baseImage = normalized.toString('base64');
       }
     } else if (isLightGray) {
@@ -4993,24 +5056,17 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
       .toBuffer();
     if (hoodieMockup) {
       if (isLightGray) {
-        // Special path: Remove BG first (from pure white), THEN modulate subject, THEN flatten to target grey.
+        // Special path: Remove BG first (from pure white), THEN flatten to target grey (no darkening).
         const transparent = await forceTransparentFromWhite(baseFullBuffer.toString('base64'));
 
         baseFullBuffer = await sharp(Buffer.from(transparent, 'base64'), { failOn: 'none' })
           .ensureAlpha()
-          .modulate({ brightness: 0.92, saturation: 1.0 })
-          .linear(1, -6)
           .flatten({ background: tileBackground })
           .png()
           .toBuffer();
       } else {
-        baseFullBuffer = await sharp(baseFullBuffer, { failOn: 'none' })
-          .ensureAlpha()
-          .modulate({ brightness: 0.92, saturation: 1.0 })
-          .linear(1, -6)
-          .png()
-          .toBuffer();
-        baseFullBuffer = await normalizeHoodieMockupEcom(baseFullBuffer, incomingBg);
+        baseFullBuffer = await sharp(baseFullBuffer, { failOn: 'none' }).ensureAlpha().png().toBuffer();
+        baseFullBuffer = await normalizeHoodieMockupEcom(baseFullBuffer, incomingBg, { noShadow: true });
       }
     } else if (isLightGray) {
       // Directly flatten to light grey background (remove bg first)
@@ -5043,7 +5099,7 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
           requestedResolution,
           promptForModel,
           undefined,
-          { background: tileBackground, bgColor: incomingBg }
+          { background: tileBackground, bgColor: incomingBg, noShadow: hoodieMockup }
         );
         const outBuf = forceWhite
           ? Buffer.from(await ensureSolidWhiteBackgroundStrict(generated.buffer.toString('base64')), 'base64')
@@ -5147,7 +5203,7 @@ app.post('/api/generate-views-from-base', async (req: Request, res: Response) =>
                 requestedResolution,
                 promptForModel,
                 retryInstructions[attempt],
-                { background: tileBackground }
+                { background: tileBackground, bgColor: incomingBg, noShadow: hoodieMockup }
               );
               outBuf = forceWhite
                 ? Buffer.from(await ensureSolidWhiteBackgroundStrict(regenerated.buffer.toString('base64')), 'base64')
@@ -5365,8 +5421,8 @@ app.post('/api/uniform/convert-model', async (req: Request, res: Response) => {
   if (!resolution || !allowedResolutions.has(resolution)) {
     return safeJson(res, { error: `Invalid resolution. Allowed: ${Array.from(allowedResolutions).join(', ')}` }, 400);
   }
-  if (modelKey !== 'male' && modelKey !== 'female') {
-    return safeJson(res, { error: 'Invalid modelKey. Allowed: male, female.' }, 400);
+  if (modelKey !== 'male' && modelKey !== 'female' && modelKey !== 'boy' && modelKey !== 'girl') {
+    return safeJson(res, { error: 'Invalid modelKey. Allowed: male, female, boy, girl.' }, 400);
   }
   if (!views.length) return safeJson(res, { error: 'views is required.' }, 400);
 
@@ -5535,8 +5591,8 @@ app.post('/api/convert-model', async (req: Request, res: Response) => {
         : '';
   const style = styleRaw.trim().toLowerCase();
 
-  if (!modelKey || (modelKey !== 'male' && modelKey !== 'female')) {
-    return safeJson(res, { error: 'Invalid modelKey. Allowed: male, female.' }, 400);
+  if (!modelKey || (modelKey !== 'male' && modelKey !== 'female' && modelKey !== 'boy' && modelKey !== 'girl')) {
+    return safeJson(res, { error: 'Invalid modelKey. Allowed: male, female, boy, girl.' }, 400);
   }
   if (
     style &&
@@ -7307,18 +7363,22 @@ if (fs.existsSync(clientIndexHtml)) {
   });
 }
 
-app
-  .listen(port)
-  .once('listening', () => {
-    console.log(
-      `[server] PID=${process.pid} listening on http://localhost:${port} | cwd=${process.cwd()} | loadedRootEnv=${loadedRootEnv} | loadedServerEnv=${loadedServerEnv} | maskedKey=${GEMINI_KEY.length >= 8 ? `${GEMINI_KEY.slice(0, 4)}...${GEMINI_KEY.slice(-4)}` : '(too short)'
-      } | model=gemini-2.5-flash-image`
-    );
-  })
-  .on('error', (err: any) => {
-    if (err?.code === 'EADDRINUSE') {
-      console.error(`[server] Port ${port} is already in use. Stop the other process and retry.`);
-      process.exit(1);
-    }
-    throw err;
-  });
+if (require.main === module) {
+  app
+    .listen(port)
+    .once('listening', () => {
+      console.log(
+        `[server] PID=${process.pid} listening on http://localhost:${port} | cwd=${process.cwd()} | loadedRootEnv=${loadedRootEnv} | loadedServerEnv=${loadedServerEnv} | maskedKey=${GEMINI_KEY.length >= 8 ? `${GEMINI_KEY.slice(0, 4)}...${GEMINI_KEY.slice(-4)}` : '(too short)'
+        } | model=gemini-2.5-flash-image`
+      );
+    })
+    .on('error', (err: any) => {
+      if (err?.code === 'EADDRINUSE') {
+        console.error(`[server] Port ${port} is already in use. Stop the other process and retry.`);
+        process.exit(1);
+      }
+      throw err;
+    });
+}
+
+export { app, buildMannequinConversionPrompt, modelFrontPrompt, modelBackPrompt };
