@@ -445,23 +445,34 @@ function buildTitlesPrompt(input: { productName: string; category?: string; coun
     categoryLine,
     seedLine,
     `Generate exactly ${input.count} unique titles.`,
-    'Rules: Each title should be descriptive and catchy. Generate 2–3 short titles. The TOTAL COMBINED length of 2-3 of these titles (separated by spaces) MUST be between 100 and 120 characters total. Use spaces only.',
-    "Do NOT end with a dangling connector/article (e.g. don't end with: and, or, for, with, to, in, of, the, a, an).",
-    `CRITICAL: Every title MUST include the product name terms exactly as written in "${input.productName}" (do not autocorrect, do not replace with synonyms).`,
-    'CRITICAL: Do NOT include any brand names, trademarked terms, company names, or seller/store names (e.g., Nike, Adidas, Apple, Disney). Strictly follow the user input without inventing brands.',
-    'Focus strictly on the provided product name and category context. Do not add unrelated brands or comparisons.',
-    'Do NOT add occupational context or audience terms (e.g., professional, business, corporate, office, colleagues) unless the user provided them in the product name or category.',
+    '',
+    'CRITICAL FORMATTING RULES:',
+    '- Output ONLY the titles, plain text, one title per line.',
+    '- No numbering, no bullets, no dashes, no quotes, no extra text or commentary.',
+    '- Each title MUST be exactly 100–120 characters long (including spaces). NOT less, NOT more.',
+    '- Do NOT exceed 120 characters under any circumstance.',
+    '- If a title is shorter than 100 characters, EXTEND it; if longer than 120, TRUNCATE it.',
+    '- No line breaks within titles; each line is a complete, standalone title.',
+    '',
+    'CONTENT RULES:',
+    '- CRITICAL: Every title MUST include the product name terms exactly as written in "${input.productName}" (do not autocorrect, do not replace with synonyms).',
+    '- CRITICAL: Do NOT include any brand names, trademarked terms, company names, or seller/store names (e.g., Nike, Adidas, Apple, Disney).',
+    '- Focus strictly on the provided product name and category context. Do not add unrelated brands or comparisons.',
+    '- Do NOT add occupational context or audience terms (e.g., professional, business, corporate, office, colleagues) unless the user provided them.',
     input.category
-      ? 'CRITICAL: Do NOT invent a different product type. Every title MUST clearly match the provided category/product type.'
-      : 'CRITICAL: If the product name does not clearly include a product type (e.g., only a single ambiguous word), do NOT guess a product type. Return {"titles":[]} instead.',
-    'Include buyer-intent keywords and (when relevant) material, style, season, audience, gift intent, and use case.',
-    'Keep titles relevant to the product; do not invent a different primary product type (e.g. do not turn a hoodie into a t-shirt).',
-    'Avoid duplicates; no numbering; no extra commentary.',
-    'CRITICAL: NO punctuation (commas, colons, pipes, semicolons, etc.). Use ONLY spaces to separate words.',
-    'Return ONLY valid JSON in this exact shape: {"titles":["..."]}',
+      ? '- CRITICAL: Do NOT invent a different product type. Every title MUST clearly match the provided category/product type.'
+      : '- CRITICAL: If the product name does not clearly include a product type (e.g., only a single ambiguous word), do NOT guess a product type. Return {"titles":[]} instead.',
+    '- Do NOT end with dangling connectors/articles (e.g., do not end with: and, or, for, with, to, in, of, the, a, an).',
+    '- Include buyer-intent keywords and (when relevant) material, style, season, audience, gift intent, and use case.',
+    '- Avoid duplicates; keep titles unique and relevant to the product.',
+    '- CRITICAL: NO punctuation (commas, colons, pipes, semicolons, periods, etc.). Use ONLY spaces to separate words.',
+    '',
+    'OUTPUT FORMAT:',
+    'Return ONLY valid JSON in this exact shape: {"titles":["title1","title2","title3",...]}',
+    'Do NOT wrap in markdown, do NOT add explanations, do NOT include any text outside the JSON object.',
   ]
     .filter(Boolean)
-    .join(' ');
+    .join('\n');
 }
 
 function buildKeywordsPrompt(input: { productName: string; category?: string; count: number; seed?: string }) {
@@ -474,6 +485,7 @@ function buildKeywordsPrompt(input: { productName: string; category?: string; co
     seedLine,
     `Generate exactly ${input.count} unique keywords.`,
     'Rules: mix short + long-tail; include generic + broad search intents plus specific buyer-intent phrases.',
+    'Each keyword set should be returned as comma-separated items (e.g., "keyword one, keyword two, ..."). Avoid duplicates. Keep total length within 350 characters.',
     'CRITICAL: Do NOT include any brand names, trademarked terms, company names, or seller/store names (e.g., Nike, Adidas, Apple, Disney). Strictly follow the user input without inventing brands.',
     'Focus strictly on the provided product name and category context. Do not add unrelated brands or comparisons.',
     input.category
@@ -482,8 +494,8 @@ function buildKeywordsPrompt(input: { productName: string; category?: string; co
     'Include synonyms, themes, style descriptors, audience/recipient, occasions, and use-cases when relevant.',
     'Keep keywords relevant to the product; do not invent a different primary product type (e.g. do not turn a hoodie into a t-shirt).',
     'Avoid duplicates; no numbering; no extra commentary.',
-    'CRITICAL: NO punctuation (commas, colons, pipes, semicolons, etc.). Use ONLY spaces to separate keywords.',
-    'CRITICAL: Ensure the total length of keywords generated strictly targets 350 characters total. Generate many descriptive keywords.',
+    'CRITICAL: Do NOT include numbering. Use commas between keywords; avoid other punctuation like pipes or semicolons.',
+    'CRITICAL: Ensure the total length of all keywords combined stays within 350 characters total.',
     'Return ONLY valid JSON in this exact shape: {"keywords":["..."]}',
   ]
     .filter(Boolean)
@@ -4758,25 +4770,57 @@ app.post('/api/generate-product-titles', async (req: Request, res: Response) => 
     const perBatch = Math.max(10, Math.ceil(count / 2));
     const all: string[] = [];
 
-    for (let i = 0; i < batches; i += 1) {
-      const prompt = buildTitlesPrompt({ productName, category: category || undefined, count: perBatch, seed });
-      const parsed = await generateTextJsonWithModelFallback<{ titles: unknown }>('generate-product-titles', prompt);
+    const normalizeTitles = (raw: unknown): string[] => {
+      const text =
+        typeof raw === 'string'
+          ? raw
+          : Array.isArray((raw as any)?.titles)
+            ? (raw as any).titles.map((t: any) => String(t ?? '')).join('\n')
+            : typeof (raw as any)?.titles === 'string'
+              ? String((raw as any)?.titles)
+              : '';
 
-      const titlesRaw = normalizeLines(parsed?.titles, 180);
-      const titles = titlesRaw
-        .map((t) => trimDanglingTailWordsForTitle(trimIfLooksCutAtLimit(t, 120)))
-        .filter((t) => t.length >= 15)
+      const lines = text
+        .split(/\r?\n/)
+        .map((l) => l.replace(/^\s*[\d]+[.)-]\s*/, '').replace(/^\s*[•-]\s*/, '').trim())
+        .filter(Boolean);
+
+      return lines
+        .map((t) => {
+          let s = trimDanglingTailWordsForTitle(trimIfLooksCutAtLimit(t, 120)).trim();
+          if (s.length > 120) {
+            const slice = s.slice(0, 120);
+            const lastSpace = slice.lastIndexOf(' ');
+            s = lastSpace > 90 ? slice.slice(0, lastSpace).trimEnd() : slice.trimEnd();
+          }
+          return s;
+        })
+        .filter((t) => t.length >= 100 && t.length <= 120)
         .filter((t) => !containsBlockedBrand(t))
         .filter((t) => titleMatchesUserInput(t, productName))
         .filter((t) => (category ? titleMatchesCategory(t, category) : true));
-      all.push(...titles);
-      await sleep(900);
+    };
 
+    let attempt = 0;
+    while (attempt < batches && uniqStable(all).length < count) {
+      const prompt =
+        attempt === 0
+          ? buildTitlesPrompt({ productName, category: category || undefined, count: perBatch, seed })
+          : [
+              buildTitlesPrompt({ productName, category: category || undefined, count: perBatch, seed }),
+              'If any title is outside 100–120 characters, regenerate ALL titles and ensure every line is within 100–120 characters.'
+            ].join(' ');
+
+      const parsed = await generateTextJsonWithModelFallback<{ titles: unknown }>('generate-product-titles', prompt);
+      const cleaned = normalizeTitles(parsed);
+      all.push(...cleaned);
+      attempt += 1;
       if (uniqStable(all).length >= count) break;
+      await sleep(900);
     }
 
     const titles = uniqStable(all).slice(0, count);
-    if (titles.length === 0) return safeJson(res, { error: 'Gemini returned no titles.' }, 502);
+    if (titles.length === 0) return safeJson(res, { error: 'Unable to generate titles within 100-120 characters. Please try again.' }, 502);
     return safeJson(res, { titles });
   } catch (err: any) {
     console.error('Generate product titles error:', err);

@@ -129,8 +129,6 @@ const productColorOptions = [
   { id: 'burgundy', label: 'Burgundy' },
   { id: 'charcoal', label: 'Charcoal' },
   { id: 'olive', label: 'Olive' },
-  { id: 'pink', label: 'Pink' },
-  { id: 'purple', label: 'Purple' },
 ];
 
 const mannequinOptions: { id: MannequinModelKey; label: string }[] = [
@@ -1702,7 +1700,7 @@ useEffect(() => {
   }, [editedImageDataUrl, editedViews]);
   const previewCompact = Boolean(uploadedImageDataUrl) && (hasEditedViews || Boolean(editedImageDataUrl));
 
-  const selectedViewsLabel = 'View Angles';
+  const selectedViewsLabel = 'View';
   const effectiveStyle: ArtStyleKey = selectedStyle ?? 'realistic';
   const styleButtonLabel = 'Style';
   const hasReferenceImage = Boolean(uploadedImageDataUrl || uploadedImageFile);
@@ -2510,7 +2508,7 @@ useEffect(() => {
                 onClose={() => setOpenMenu(null)}
                 button={
                   <ToolbarDropdownButton
-                    label={`BG: ${bgColorOptions.find(o => o.id === selectedBgColor)?.label || 'White'}`}
+                    label="BG"
                     icon={Palette}
                     isOpen={openMenu === 'bgColor'}
                     onClick={() => setOpenMenu((prev) => (prev === 'bgColor' ? null : 'bgColor'))}
@@ -2545,7 +2543,7 @@ useEffect(() => {
                 onClose={() => setOpenMenu(null)}
                 button={
                   <ToolbarDropdownButton
-                    label={`Color: ${productColorOptions.find(o => o.id === selectedProductColor)?.label || 'Default'}`}
+                    label="Color"
                     icon={Palette}
                     isOpen={openMenu === 'productColor'}
                     onClick={() => setOpenMenu((prev) => (prev === 'productColor' ? null : 'productColor'))}
@@ -2553,8 +2551,8 @@ useEffect(() => {
                   />
                 }
               >
-                <div className="p-1.5">
-                  <div className="grid grid-cols-2 gap-1.5 w-[220px]">
+                <div className="p-1.5 max-w-[min(560px,90vw)] max-h-[320px] overflow-y-auto">
+                  <div className="flex flex-col gap-2">
                     {productColorOptions.map((opt) => (
                       <button
                         key={opt.id}
@@ -2564,8 +2562,8 @@ useEffect(() => {
                           setOpenMenu(null);
                         }}
                         className={clsx(
-                          "h-[36px] px-2 rounded-lg text-xs border text-center transition-all",
-                          selectedProductColor === opt.id ? "bg-purple-50 border-purple-200 text-purple-700 font-medium" : "bg-white hover:bg-slate-50 border-slate-100"
+                          "w-full h-[40px] px-3 rounded-lg text-sm border text-left transition-all bg-white text-slate-900",
+                          selectedProductColor === opt.id ? "bg-purple-50 border-purple-200 text-purple-700 font-medium" : "hover:bg-slate-50 border-slate-200"
                         )}
                       >
                         {opt.label}
@@ -2578,8 +2576,8 @@ useEffect(() => {
                         setOpenMenu(null);
                       }}
                       className={clsx(
-                        "h-[36px] px-2 rounded-lg text-xs border text-center transition-all col-span-2",
-                        !selectedProductColor ? "bg-purple-50 border-purple-200 text-purple-700 font-medium" : "bg-white hover:bg-slate-50 border-slate-100"
+                        "w-full h-[40px] px-3 rounded-lg text-sm border text-left transition-all bg-white text-slate-900",
+                        !selectedProductColor ? "bg-purple-50 border-purple-200 text-purple-700 font-medium" : "hover:bg-slate-50 border-slate-200"
                       )}
                     >
                       Clear Selection
@@ -2642,7 +2640,7 @@ useEffect(() => {
                 ) : (
                   <span className="flex items-center gap-2 whitespace-nowrap">
                     <Sparkles className="w-4 h-4 shrink-0 flex-none" />
-                    <span className="whitespace-nowrap">Generate Image</span>
+                    <span className="whitespace-nowrap">Generate</span>
                   </span>
                 )}
               </button>
