@@ -16,6 +16,7 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
     const [keywords, setKeywords] = useState<string[]>([]);
     const [titlesText, setTitlesText] = useState('');
     const [keywordsText, setKeywordsText] = useState('');
+    const [titlesDirty, setTitlesDirty] = useState(false);
     const [titlesLoading, setTitlesLoading] = useState(false);
     const [keywordsLoading, setKeywordsLoading] = useState(false);
     const [titlesCount, setTitlesCount] = useState<number>(15);
@@ -64,85 +65,83 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
         }
     };
 
-    // Parse titles from raw response, handling bullets, numbering, and multiple formats
-    const parseTitles = (raw: string | string[]): string[] => {
-        let text = '';
-        if (Array.isArray(raw)) {
-            text = raw.map((v) => String(v ?? '')).join('\n');
-        } else if (typeof raw === 'string') {
-            text = raw;
-        }
-        
-        // Split by newlines and bullets; strip prefixes like "1.", "2)", "•", "-", etc.
-        const lines = text
+    // Parse titles from raw response into line candidates. We intentionally do NOT split on pipes, to avoid
+    // accidentally breaking valid titles into fragments that then get padded into long garbage output.
+    const parseTitles = (raw: string): string[] => {
+        const normalized = String(raw || '')
+            // Insert line breaks before inline numbering like "1) Title 2) Title"
+            .replace(/\s+(\d+[.)]\s+)/g, '\n$1');
+
+        return normalized
             .split(/\r?\n/)
-            .flatMap((line) => line.split(/\s*[•|]\s*/))
-            .map((line) => {
-                // Remove leading numbering: "1.", "2)", "3-", etc.
-                let cleaned = line.replace(/^\s*[\d]+\s*[.)\-:]\s*/, '');
-                // Remove leading bullets/dashes
-                cleaned = cleaned.replace(/^\s*[•\-\*]\s*/, '');
-                return cleaned.trim();
-            })
-            .filter((line) => line.length > 0);
-        
-        return lines;
+            .flatMap((line) => line.split(/•/))
+            .map((line) => line.trim())
+            .filter(Boolean);
     };
 
-    const enforceTitleLength = (title: string, minLen: number = 100, maxLen: number = 120): string => {
-        let t = title.replace(/\s+/g, ' ').trim();
-        if (!t) return t;
+    function normalizeTitle(title: string): string {
+        return String(title || '')
+            .replace(/\s+/g, ' ')
+            .replace(/^[\d\W]+/, '')
+            .trim();
+    }
 
-        // Truncate if too long: find word boundary and clean trailing punctuation
-        if (t.length > maxLen) {
-            const slice = t.slice(0, maxLen);
-            const lastSpace = slice.lastIndexOf(' ');
-            const safeEnd = lastSpace > minLen - 10 ? lastSpace : maxLen;
-            t = slice.slice(0, safeEnd).replace(/[\s|,;:\-—.!?]+$/g, '').trim();
+    function enforceTotalLength(text: string, min = 100, max = 120): string {
+        let t = String(text || '').replace(/\s+/g, ' ').trim();
+
+        if (t.length > max) {
+            t = t.slice(0, max);
+            t = t.replace(/\s+\S*$/, ''); // word boundary
+            t = t.replace(/[,\-—:;.|]+$/, '').trim();
         }
 
-        // If already in range, return as-is
-        if (t.length >= minLen && t.length <= maxLen) return t;
+        const fillers = [' Premium Gift', ' Collector Edition', ' High Detail', ' Limited Release'];
+        let i = 0;
+        while (t.length < min && i < fillers.length) {
+            if (t.length + fillers[i].length <= max) t += fillers[i];
+            i += 1;
+        }
+        while (t.length < min && t.length + 8 <= max) t += ' Premium';
 
-        // Pad if too short using realistic filler phrases
-        if (t.length < minLen) {
-            const fillers = [
-                ' Premium Gift',
-                ' Collector Edition',
-                ' Display Model',
-                ' High Detail',
-                ' Limited Release',
-                ' Deluxe Model',
-                ' Professional Grade',
-                ' Enhanced Edition'
-            ];
+        return t.trim();
+    }
 
-            // Try to add complete filler phrases that fit
-            for (const phrase of fillers) {
-                if (t.length >= minLen) break;
-                if (t.length + phrase.length <= maxLen) {
-                    t = `${t}${phrase}`;
-                }
-            }
+    function normalizeKeywords(raw: string): string {
+        return String(raw || '')
+            .replace(/[\r\n]+/g, ' ')
+            .replace(/,/g, ' ')
+            .replace(/[•|·]/g, ' ')
+            .replace(/\b\d+[\).\]]\s*/g, '')
+            .replace(/[^a-zA-Z0-9\s-]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
 
-            // If still below minimum, pad with spaces and short words
-            while (t.length < minLen && t.length + ' Premium'.length <= maxLen) {
-                t = `${t} Premium`;
-            }
+    function enforceKeywordLength(text: string, min = 300, max = 350): string {
+        let t = normalizeKeywords(text);
 
-            // Final safety: if somehow still below, pad with generic word
-            if (t.length < minLen && t.length + ' Item'.length <= maxLen) {
-                t = `${t} Item`;
+        if (t.length > max) {
+            t = t.slice(0, max);
+            t = t.replace(/\s+\S*$/, '').trim();
+        }
+
+        if (t.length < min) {
+            const words = t.split(' ').filter(Boolean);
+            let i = 0;
+            while (t.length < min && words.length) {
+                const w = words[i % Math.min(words.length, 8)];
+                if (t.length + 1 + w.length > max) break;
+                t += ` ${w}`;
+                i += 1;
             }
         }
 
-        return t.trim().slice(0, maxLen);
-    };
+        return t.replace(/\s+/g, ' ').trim();
+    }
 
 
 
     const generateTitles = async () => {
-        console.debug('[listing] generateTitles click');
         const candidate = normalizeQuery(titlesFieldText) || normalizeQuery(titlesText);
         const query = candidate || titlesLastQuery;
 
@@ -158,34 +157,37 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     productName: query,
-                    count: titlesCount,
+                    count: 10,
                 }),
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data?.error || 'Failed to generate titles.');
 
-            // Parse the response (handles bullets, numbering, multiple formats)
-            const rawTitles = Array.isArray(data?.titles) 
-                ? data.titles 
-                : typeof data?.titles === 'string'
-                ? [data.titles]
-                : [];
-            
-            const parsed = parseTitles(rawTitles);
+            const raw =
+                Array.isArray(data?.titles)
+                    ? data.titles.filter((t: any) => typeof t === 'string').join('\n')
+                    : typeof data?.titles === 'string'
+                      ? data.titles
+                      : '';
+            if (!raw.trim()) throw new Error('No titles returned.');
+
+            const parsed = parseTitles(raw)
+                .map((t) => normalizeTitle(t))
+                .filter(Boolean);
             if (!parsed.length) throw new Error('No titles returned.');
 
-            // Enforce length constraints on each title
-            const enforced = parsed.map((t) => enforceTitleLength(t, 100, 120));
-            
-            // Filter valid titles and limit to requested count
-            const finalTitles = enforced
-                .filter((t) => t.length >= 100 && t.length <= 120)
-                .slice(0, titlesCount);
-            
-            if (!finalTitles.length) throw new Error('No valid titles between 100-120 characters were produced.');
+            // Select a single best title then hard-enforce TOTAL length 100-120 chars.
+            const inRange = parsed.filter((t) => t.length >= 100 && t.length <= 120);
+            const bestTitle = (inRange.sort((a, b) => b.length - a.length)[0] ?? parsed[0]) || '';
+            const finalTitle = enforceTotalLength(bestTitle, 100, 120);
 
-            setTitles(finalTitles);
-            setTitlesText(finalTitles.join('\n'));
+            if (finalTitle.length < 100 || finalTitle.length > 120) {
+                throw new Error('Could not produce a title within 100-120 characters.');
+            }
+
+            setTitles([finalTitle]);
+            setTitlesText(finalTitle);
+            setTitlesDirty(false);
             setTitlesLastQuery(query);
         } catch (e: any) {
             setError(e?.message || 'Failed to generate titles.');
@@ -195,7 +197,6 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
     };
 
     const generateKeywords = async () => {
-        console.debug('[listing] generateKeywords click');
         const candidate = normalizeQuery(keywordsFieldText) || normalizeQuery(keywordsText);
         // Use candidate first; fallback to last query for regeneration if input is hidden/empty.
         const query = candidate || keywordsLastQuery;
@@ -220,8 +221,12 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
             const list = Array.isArray(data?.keywords) ? data.keywords.filter((t: any) => typeof t === 'string') : [];
             if (list.length === 0) throw new Error('No keywords returned.');
             const trimmed = list.slice(0, keywordsCount);
+            const finalKeywords = enforceKeywordLength(trimmed.join(' '), 300, 350);
+            if (finalKeywords.length < 300 || finalKeywords.length > 350) {
+                throw new Error('Could not produce keywords within 300-350 characters.');
+            }
             setKeywords(trimmed);
-            setKeywordsText(trimmed.join(', '));
+            setKeywordsText(finalKeywords);
             setKeywordsLastQuery(query);
         } catch (e: any) {
             setError(e?.message || 'Failed to generate keywords.');
@@ -308,10 +313,8 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
     // Keep outputs within requested character ranges whenever generated.
     const cleanPunctuation = (s: string) => s.replace(/[|,;:!]/g, ' ').replace(/\s+/g, ' ').trim();
 
-    const titleLines = titlesText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    const maxTitleLength = titleLines.length ? Math.max(...titleLines.map((l) => l.length)) : 0;
-    const totalTitlesCharCount = titlesText.length;
-    const keywordsCharCount = keywordsText.trim().length;
+    const titlesCharCount = titlesText.length;
+    const keywordsCharCount = keywordsText.length;
     const keywordsBadges = keywords.map(cleanPunctuation).filter(Boolean);
     const keywordsResultLimited = keywordsText || keywordsBadges.join(' ');
 
@@ -386,10 +389,7 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
                             <label className="text-sm font-semibold text-slate-900">Generated Titles</label>
                             <div className="flex items-center gap-1.5">
                                 <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
-                                    {maxTitleLength}/120
-                                </span>
-                                <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full" title="Total characters across all titles">
-                                    Total: {totalTitlesCharCount}
+                                    {titlesCharCount}/120
                                 </span>
                             </div>
                         </div>
@@ -405,27 +405,28 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
                         </div>
                     </div>
                     <div className="relative w-full">
-                        <div className="w-full rounded-xl border border-slate-200 bg-white">
+                        <div className="relative w-full rounded-xl border border-slate-200 bg-white">
                             <textarea
                                 value={titlesText}
-                                onChange={(e) => setTitlesText(e.target.value)}
+                                onChange={(e) => {
+                                    setTitlesDirty(true);
+                                    setTitlesText(e.target.value);
+                                }}
                                 placeholder="Generated titles will appear here (editable)..."
                                 className="w-full resize-y border-0 bg-transparent px-3 pr-16 py-3 text-sm text-slate-800 focus:outline-none focus:ring-0"
                                 rows={3}
                             />
-                        </div>
-                        {titlesText.trim().length > 0 && (
-                            <div className="absolute top-2 right-2 left-auto z-10">
+                            {titlesText.trim().length > 0 && (
                                 <button
                                     onClick={() => copyText(titlesText, 'titles')}
-                                    className="inline-flex items-center gap-1.5 text-xs font-medium text-purple-700 border border-purple-200 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
+                                    className="absolute top-2 right-2 left-auto z-10 inline-flex items-center gap-1.5 text-xs font-medium text-purple-700 border border-purple-200 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
                                     type="button"
                                 >
                                     {copiedKey === 'titles' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                                     {copiedKey === 'titles' ? 'Copied' : 'Copy'}
                                 </button>
-                            </div>
-                        )}
+                            )}
+                        </div>
                     </div>
                 </div>
 
@@ -435,7 +436,7 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
                         <div className="flex items-center gap-2">
                             <label className="text-sm font-semibold text-slate-900">Generated Keywords</label>
                             <span className="text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
-                                {Math.min(350, keywordsCharCount)}/350
+                                {keywordsCharCount}/350
                             </span>
                         </div>
                         <div className="flex items-center gap-2">
@@ -447,20 +448,10 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
                             >
                                 {keywordsLoading ? 'Generating...' : 'Generate Keywords'}
                             </button>
-                            {keywordsText.trim().length > 0 && (
-                                <button
-                                    onClick={() => copyText(keywordsText || keywordsResultLimited, 'keywords')}
-                                    className="inline-flex items-center gap-1.5 text-xs font-medium text-purple-700 border border-purple-200 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
-                                    type="button"
-                                >
-                                    {copiedKey === 'keywords' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                                    {copiedKey === 'keywords' ? 'Copied' : 'Copy All'}
-                                </button>
-                            )}
                         </div>
                     </div>
                     <div className="relative w-full">
-                        <div className="w-full rounded-xl border border-slate-200 bg-white">
+                        <div className="relative w-full rounded-xl border border-slate-200 bg-white">
                         <textarea
                             value={keywordsText}
                             onChange={(e) => setKeywordsText(e.target.value)}
@@ -468,19 +459,17 @@ export function ListingAssistantInline({ onUseAsPrompt }: Props) {
                             className="w-full resize-y border-0 bg-transparent px-3 pr-16 py-3 text-sm text-slate-800 focus:outline-none focus:ring-0"
                             rows={2}
                         />
-                        </div>
                         {keywordsText.trim().length > 0 && (
-                            <div className="absolute top-2 right-2 z-10">
-                                <button
-                                    onClick={() => copyText(keywordsText || keywordsResultLimited, 'keywords')}
-                                    className="inline-flex items-center gap-1.5 text-xs font-medium text-purple-700 border border-purple-200 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
-                                    type="button"
-                                >
-                                    {copiedKey === 'keywords' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                                    {copiedKey === 'keywords' ? 'Copied' : 'Copy'}
-                                </button>
-                            </div>
+                            <button
+                                type="button"
+                                className="absolute top-2 right-2 left-auto z-10 inline-flex items-center gap-1.5 text-xs font-medium text-purple-700 border border-purple-200 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors"
+                                onClick={() => copyText(keywordsText || keywordsResultLimited, 'keywords')}
+                            >
+                                {copiedKey === 'keywords' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                                {copiedKey === 'keywords' ? 'Copied' : 'Copy'}
+                            </button>
                         )}
+                        </div>
                     </div>
                 </div>
             </div>

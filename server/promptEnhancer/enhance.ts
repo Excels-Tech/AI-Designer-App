@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { templates } from './templates';
+import { allowBranding } from '../utils/brandingPolicy';
 
 export type ModelFormat = 'sdxl' | 'midjourney' | 'generic';
 export type AspectRatio = '1:1' | '16:9' | '9:16' | '4:3';
@@ -139,19 +140,25 @@ export function enhancePrompt(prompt: string, options: EnhanceOptions = {}): { e
   const stylePreset = normalizePhrase(options.stylePreset ?? '');
   const styleBias = detectStyleBias(`${base} ${stylePreset}`.trim());
 
-  // Detect stationery-like requests (letterhead, stationery, logo, visiting card, envelope)
-  const stationeryLike = /\b(letter-?head|stationery|business card|visiting card|envelope|logo|stationer(y)?)\b/i.test(`${base} ${stylePreset}`);
+  // Detect stationery-like requests. IMPORTANT: do not treat "no logo" as a stationery/logo request.
+  const stationeryLike =
+    /\b(letter-?head|stationery|business card|visiting card|envelope|stationer(y)?)\b/i.test(`${base} ${stylePreset}`) ||
+    (allowBranding(`${base} ${stylePreset}`) && /\blogo\b/i.test(`${base} ${stylePreset}`));
+  const brandingAllowed = allowBranding(`${base} ${stylePreset}`);
 
   const rand = makeRng(seedFromString(`${base}|${stylePreset}|${modelFormat}|${aspectRatio}|${creativity}`));
-  const groups = computeGroupsToInclude(creativity);
+  let groups = computeGroupsToInclude(creativity);
+  // Prevent stationery/logo phrasing from being injected into non-stationery prompts by default.
+  if (!stationeryLike || !brandingAllowed) groups = groups.filter((g) => g !== 'stationery');
 
   const picked: string[] = [];
   for (const groupKey of groups) {
+    if (groupKey === 'stationery' && !brandingAllowed) continue;
     const phrases = templates.phraseGroups[groupKey].phrases as any;
     const biased = filterPhrasesForBias(groupKey, phrases, styleBias, stylePreset);
     // If this is a stationery-style prompt, avoid photographic/camera/lighting phrases
     let candidatePhrases = biased as { phrase: string; weight: number }[];
-    if (stationeryLike) {
+    if (stationeryLike && brandingAllowed) {
       const banKeywords = [
         'bokeh',
         'golden hour',
@@ -179,7 +186,7 @@ export function enhancePrompt(prompt: string, options: EnhanceOptions = {}): { e
       // If filtering removed everything, fall back to original biased list
       if (!candidatePhrases.length) candidatePhrases = biased as any;
     }
-    picked.push(weightedPick(biased as any, rand));
+    picked.push(weightedPick(candidatePhrases as any, rand));
   }
 
   const parts = uniqueNonEmpty([base, stylePreset, ...picked, formatAspectRatio(modelFormat, aspectRatio)]);

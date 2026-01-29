@@ -82,6 +82,6 @@
         "dev:server": "tsx watch server/index.ts",
         "build": "vite build",
         "start": "tsx server/index.ts",
-    "test": "node --import tsx --test --test-concurrency=1 server/promptEnhancer/enhance.test.ts server/promptEnhancer/runtime.test.ts server/utils/stripKeysDeep.test.ts server/logging/logLeakScan.test.ts server/logging/responsePolicy.test.ts server/handlers/generateViewsResponse.test.ts server/handlers/saveDesignPayload.test.ts server/prompts/hoodieMockup.test.ts server/hoodieMockup.test.ts server/modelPrompt.test.ts"
+    "test": "node --import tsx --test --test-concurrency=1 server/promptEnhancer/enhance.test.ts server/promptEnhancer/runtime.test.ts server/utils/stripKeysDeep.test.ts server/logging/logLeakScan.test.ts server/logging/responsePolicy.test.ts server/handlers/generateViewsResponse.test.ts server/handlers/saveDesignPayload.test.ts server/prompts/hoodieMockup.test.ts server/hoodieMockup.test.ts server/modelPrompt.test.ts server/utils/brandingPolicy.test.ts"
   }
 }

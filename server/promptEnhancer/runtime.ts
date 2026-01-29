@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { enhancePrompt, type AspectRatio, type EnhanceOptions, type ModelFormat } from './enhance';
 import { buildHoodieMockupPrompt } from '../prompts/hoodieMockup';
+import { allowBranding, NO_BRANDING_BLOCK_NEGATIVE, NO_BRANDING_BLOCK_POSITIVE } from '../utils/brandingPolicy';
 
 function escapeRegExp(input: string): string {
   return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -382,22 +383,15 @@ function hasMultiplePeopleIntent(p: string): boolean {
 function isGraphicOrDesignPrompt(p: string): boolean {
   const s = extractUserRequestSegment(p).toLowerCase();
   if (!s.trim()) return false;
-  return [
-    'logo',
-    'icon',
-    'branding',
-    'brand identity',
-    'typography',
-    'poster',
-    'flyer',
-    'banner',
-    'thumbnail',
-    'cover',
-    'sticker',
-    'clipart',
-    'seamless pattern',
-    'pattern',
-  ].some((w) => keywordPattern(w).test(s));
+
+  // Treat branding/logo/typography as "design prompt" ONLY when the user explicitly wants text/logos added.
+  // This prevents "no logo/no text" from switching the enhancer into stationery/logo mode.
+  const logoLike = ['logo', 'icon', 'branding', 'brand identity', 'typography'].some((w) => keywordPattern(w).test(s));
+  if (logoLike) return allowBranding(s);
+
+  return ['poster', 'flyer', 'banner', 'thumbnail', 'cover', 'sticker', 'clipart', 'seamless pattern', 'pattern'].some((w) =>
+    keywordPattern(w).test(s)
+  );
 }
 
 function hasWatermarkIntent(p: string): boolean {
@@ -407,26 +401,10 @@ function hasWatermarkIntent(p: string): boolean {
 }
 
 function hasBrandingIntent(p: string): boolean {
-  const s = extractUserRequestSegment(p).toLowerCase();
-  if (!s.trim()) return false;
-  const keywords = [
-    'brand',
-    'branding',
-    'logo',
-    'wordmark',
-    'watermark',
-    'label',
-    'packaging',
-    'bottle label',
-    'box design',
-    'tagline',
-    'text on',
-    'caption',
-    'sticker',
-    'badge',
-    'emblem',
-  ];
-  return keywords.some((w) => keywordPattern(w).test(s));
+  // Align with server branding policy: only treat branding as "requested" when user explicitly
+  // asks to add/include it (not when they say "no text/no logo").
+  const s = extractUserRequestSegment(p);
+  return allowBranding(s);
 }
 
 function hasBackgroundIntent(p: string): boolean {
@@ -598,9 +576,10 @@ function isAnimalPrompt(p: string): boolean {
 }
 
 function userRequestedBranding(p: string): boolean {
-  const s = extractUserRequestSegment(p).toLowerCase();
-  if (!s.trim()) return false;
-  return /\b(logo|logotype|wordmark|brand(ed)?|branding|badge|crest|emblem|icon|print|printed|graphic|pattern|design|text|number|sponsor|leaf\s+logo|chest\s+logo|front\s+print)\b/.test(s);
+  // Keep enhancer behavior consistent with server policy:
+  // allow branding only when the user explicitly asks to add/include text/logos.
+  const s = extractUserRequestSegment(p);
+  return allowBranding(s);
 }
 
 function applyApparelModePreface(p: string, mode: ApparelMode): string {
@@ -944,9 +923,9 @@ export function maybeEnhancePrompt(
     enhancedPrompt = enhancedPrompt.replace(/\s{2,}/g, ' ').replace(/,\s*,/g, ',').replace(/,\s*$/g, '').trim();
   }
 
-  // Default to plain/unbranded outputs unless the user explicitly asked for branding/text/watermarks.
+  // Default to no branding / no text unless the user explicitly asked for it.
   if (!brandingRequested && !isGraphicOrDesignPrompt(userPrompt)) {
-    enhancedPrompt = `${enhancedPrompt}\nPlain, unbranded output: solid color fabric only, no logos, no brand names, no badges, no crests, no emblems, no symbols, no numbers, no stripes, no patches, no prints/patterns, no text, no watermarks. Keep the uniform completely plain.`.trim();
+    enhancedPrompt = `${enhancedPrompt}\n${NO_BRANDING_BLOCK_POSITIVE}`.trim();
 
     if (negativePrompt) {
       const negatives = new Set(
@@ -955,39 +934,14 @@ export function maybeEnhancePrompt(
           .map((s) => s.trim())
           .filter(Boolean)
       );
-      [
-        'logo',
-        'text',
-        'watermark',
-        'label',
-        'brand name',
-        'caption',
-        'emblem',
-        'badge',
-        'crest',
-        'symbol',
-        'wordmark',
-        'sponsor',
-        'number',
-        'jersey number',
-        'branding',
-        'print',
-        'pattern',
-        'stripe',
-        'patch',
-        'non-plain uniform',
-        'non-plain kit',
-        'decorated uniform',
-        'letters',
-        'numbers',
-        'typography',
-        'wordmark',
-        'slogan',
-      ].forEach((word) => negatives.add(word));
+      NO_BRANDING_BLOCK_NEGATIVE.replace(/^NEGATIVE:\s*/i, '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .forEach((w) => negatives.add(w));
       negativePrompt = Array.from(negatives).join(', ');
     } else {
-      negativePrompt =
-        'logo, text, watermark, branding, labels, captions, emblem, badge, crest, symbol, sponsor, number, jersey number, print, pattern, stripe, patch, non-plain uniform, non-plain kit, decorated uniform';
+      negativePrompt = NO_BRANDING_BLOCK_NEGATIVE.replace(/^NEGATIVE:\s*/i, '');
     }
   }
 

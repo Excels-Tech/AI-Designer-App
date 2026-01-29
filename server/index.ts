@@ -23,6 +23,7 @@ import express, { Request, Response } from 'express';
 import sharp from 'sharp';
 import { GoogleGenAI } from '@google/genai';
 import { connectMongo, getDb } from './db';
+import { allowBranding, NO_BRANDING_BLOCK_NEGATIVE, NO_BRANDING_BLOCK_POSITIVE } from './utils/brandingPolicy';
 import { Design } from './models/Design';
 import { VideoDesign } from './models/VideoDesign';
 import {
@@ -161,10 +162,30 @@ const viewLabels: Record<ViewKey, string> = {
   back: 'Back View',
   left: 'Left Side',
   right: 'Right Side',
-  threeQuarter: '3/4 View',
-  closeUp: 'Close-up View',
+  // UI repurposes these ids for detail close-ups; keep ids stable but update prompt-facing labels.
+  threeQuarter: 'Hood Label View',
+  closeUp: 'Sleeve Cuff View',
   top: 'Top View',
 };
+
+type ProductType = 'hoodie' | 'soccer' | 'shirt' | 'generic';
+
+function detectProductType(text: string): { type: ProductType; isSoccerKit: boolean } {
+  const t = (text || '').toLowerCase();
+  const isSoccer = /(soccer|football)\s*(kit|uniform|jersey)/.test(t) || /\bfootball kit\b/.test(t);
+  if (isSoccer) return { type: 'soccer', isSoccerKit: /\b(kit|uniform)\b/.test(t) };
+  if (/(t-?shirt|tee|shirt)\b/.test(t)) return { type: 'shirt', isSoccerKit: false };
+  if (/(hoodie|hooded|sweatshirt|pullover)\b/.test(t)) return { type: 'hoodie', isSoccerKit: false };
+  return { type: 'generic', isSoccerKit: false };
+}
+
+function viewLabelForPrompt(view: ViewKey, basePrompt: string): string {
+  if (view !== 'threeQuarter' && view !== 'closeUp') return viewLabels[view];
+  const { type } = detectProductType(basePrompt);
+  if (type === 'soccer') return view === 'threeQuarter' ? 'Jersey Collar Stitch View' : 'Sleeve Patch / Badge View';
+  if (type === 'shirt') return view === 'threeQuarter' ? 'Collar Stitch View' : 'Sleeve Hem View';
+  return viewLabels[view];
+}
 
 const allowedResolutions = new Set([512, 1024, 1536, 2048]);
 const port = Number(process.env.PORT || 4000);
@@ -345,7 +366,7 @@ function normalizeLines(items: unknown, maxLen = 500): string[] {
   for (const it of items) {
     if (typeof it !== 'string') continue;
     const v = it
-      .replace(/^\s*[-*•\d]+[.)\]]\s*/g, '')
+      .replace(/^\s*[-*\u2022\d]+[.)\]]\s*/g, '')
       .replace(/\s+/g, ' ')
       .trim();
     if (!v) continue;
@@ -400,7 +421,7 @@ function trimDanglingTailWordsForTitle(input: string): string {
   let s = String(input ?? '').replace(/\s+/g, ' ').trim();
   if (!s) return '';
   // Trim any trailing punctuation/separators first.
-  s = s.replace(/[|,;:\-–—]+$/g, '').trimEnd();
+  s = s.replace(/[|,;:\-]+$/g, '').trimEnd();
   // Remove trailing stopword(s) like "... play or".
   for (let i = 0; i < 3; i += 1) {
     const m = /(\s+)([A-Za-z]+)\s*$/.exec(s);
@@ -408,7 +429,7 @@ function trimDanglingTailWordsForTitle(input: string): string {
     const word = (m[2] || '').toLowerCase();
     if (!TITLE_DANGLING_TAIL_WORDS.has(word)) break;
     s = s.slice(0, m.index).trimEnd();
-    s = s.replace(/[|,;:\-–—]+$/g, '').trimEnd();
+    s = s.replace(/[|,;:\-]+$/g, '').trimEnd();
   }
   return s;
 }
@@ -449,7 +470,7 @@ function buildTitlesPrompt(input: { productName: string; category?: string; coun
     'CRITICAL FORMATTING RULES:',
     '- Output ONLY the titles, plain text, one title per line.',
     '- No numbering, no bullets, no dashes, no quotes, no extra text or commentary.',
-    '- Each title MUST be exactly 100–120 characters long (including spaces). NOT less, NOT more.',
+    '- Each title MUST be exactly 100-120 characters long (including spaces). NOT less, NOT more.',
     '- Do NOT exceed 120 characters under any circumstance.',
     '- If a title is shorter than 100 characters, EXTEND it; if longer than 120, TRUNCATE it.',
     '- No line breaks within titles; each line is a complete, standalone title.',
@@ -554,7 +575,8 @@ const BLOCKED_BRAND_REGEX = new RegExp(
 function containsBlockedBrand(text: string): boolean {
   const s = String(text ?? '');
   if (!s.trim()) return false;
-  if (/[®™]/.test(s)) return true;
+  // Detect common mojibake sequences so we can reject/retry corrupted model output.
+  if (/[®™]/.test(s) || /\u00E2/.test(s)) return true;
   return BLOCKED_BRAND_REGEX.test(s);
 }
 
@@ -807,7 +829,7 @@ const NO_SHADOWS_PROMPT =
 
 const APPAREL_MATTE_LIGHTING_PROMPT = [
   'LIGHTING: soft, diffuse, even studio lighting. Balanced exposure. Natural midtones.',
-  'MATERIAL: completely matte cotton/fleece fabric. Preserve fabric texture and folds clearly.',
+  'MATERIAL: completely matte textile fabric (cotton/fleece/polyester depending on the garment). Preserve fabric texture and folds clearly.',
   'ABSOLUTELY NO shine, NO gloss, NO reflections, NO glint, and NO specularity.',
   'NO harsh specular highlights, NO glossy shine, NO wet/plastic look, NO metallic/pearlescent finish.',
   'NO blown highlights, NO clipped whites, NO HDR hot spots.',
@@ -858,11 +880,9 @@ function getApparelBackgroundPrompt(bgColor?: string) {
 }
 
 function wantsBranding(text: string): boolean {
-  const s = String(text ?? '').toLowerCase();
-  if (!s.trim()) return false;
-  return /\b(logo|brand|branding|brand name|watermark|signature|text|typography|label|emblem|icon|monogram|slogan|print|graphic|badge|crest|wordmark|number|jersey)\b/.test(
-    s
-  );
+  // "Branding" here means the user explicitly wants text/logos to appear.
+  // Do NOT treat "no text/no logo/no branding" as branding intent.
+  return allowBranding(text);
 }
 
 function userRequestedBrandingServer(text: string): boolean {
@@ -898,8 +918,8 @@ function isWhiteApparelPrompt(text: string): boolean {
 
 const FULL_FRAME_POSITIVE_PROMPT = [
   'FRAMING: Full-length shot. Entire main subject fully visible head-to-toe (top-to-bottom).',
-  'STRICT ZOOM: Zoomed-out framing. Subject appears smaller and occupies only ~60–70% of the image height.',
-  'COMPOSITION: Centered subject with lots of whitespace. Leave ~15–25% empty margin around the subject on all sides.',
+  'STRICT ZOOM: Zoomed-out framing. Subject appears smaller and occupies only ~60-70% of the image height.',
+  'COMPOSITION: Centered subject with lots of whitespace. Leave ~15-25% empty margin around the subject on all sides.',
   'Subject fits comfortably inside the frame; never crop any part of the subject. Keep generous padding.',
 ].join(' ');
 
@@ -908,11 +928,8 @@ const FULL_FRAME_NEGATIVE_PROMPT = [
   'NO cropped edges. NO extreme crop. NO partial view. NO cut-off legs. NO cut-off sleeves.',
 ].join(' ');
 
-const NO_LOGO_GUARD_PROMPT =
-  'STRICT: Do NOT add any logos, emblems, crests, badges, stripes, numbers, text, typography, words, slogans, letters, wordmarks, patterns, watermarks, emails, contact info, team names, or brand names. Fabric must be completely plain solid color only. NO WRITING.';
-
-const NO_LOGO_NEGATIVE =
-  'NEGATIVE: logo, watermark, signature, brand, branding, emblem, icon, text, letters, monogram, badge, label, wordmark, corner overlay.';
+const NO_LOGO_GUARD_PROMPT = `STRICT: ${NO_BRANDING_BLOCK_POSITIVE}`;
+const NO_LOGO_NEGATIVE = NO_BRANDING_BLOCK_NEGATIVE;
 
 const WHITE_BACKGROUND_GUARD_PROMPT =
   'STRICT BACKGROUND: Pure solid white (#FFFFFF) only. No scenery, no stadium, no field, no grass, no sky, no trees, no crowd, no horizon, no floor, no props, no shapes or graphics. No shadows or drop shadows. If anything appears behind the product, replace it with solid white.';
@@ -3049,7 +3066,7 @@ async function fallbackKmeansColorLayersDynamic(options: {
     if (areas[c] < minArea) removed.add(c);
   }
 
-  // Merge near-identical clusters (ΔE threshold) using union-find.
+  // Merge near-identical clusters (خ”E threshold) using union-find.
   const parent = Array.from({ length: bestK }, (_, i) => i);
   const find = (a: number) => {
     let x = a;
@@ -3204,28 +3221,82 @@ const viewSpecificInstructions: Record<ViewKey, string> = {
     'The subject should be facing LEFT in the frame (front points to the LEFT side of the image).',
     "Show the RIGHT side only; do NOT show the subject's LEFT side.",
   ].join(' '),
-  threeQuarter: [
-    'STRICT: Three-quarter view from FRONT-RIGHT.',
-    "Camera sees the front and the subject's RIGHT side at the same time.",
-    'The subject is turned slightly LEFT (front points slightly LEFT).',
-  ].join(' '),
-  closeUp: [
-    'STRICT: Close-up view of the same product/design.',
-    'Camera is closer and zoomed in to show design details (logos, patterns, texture) clearly.',
-    'Keep the product centered; do NOT add frames, boxes, borders, or background patterns.',
-    'Do not crop important design elements; keep main chest/logo area fully visible.',
-  ].join(' '),
+  // Detail view instructions are product-aware (hoodie vs jersey vs shirt) and are resolved in `viewInstructionForPrompt(...)`.
+  threeQuarter: 'STRICT: Detail close-up (threeQuarter).',
+  closeUp: 'STRICT: Detail close-up (closeUp).',
   top: 'STRICT: Top-down overhead view. Camera directly above. Show the top view only.',
 };
+
+function viewInstructionForPrompt(view: ViewKey, basePrompt: string): string {
+  if (view !== 'threeQuarter' && view !== 'closeUp') return viewSpecificInstructions[view];
+
+  const { type, isSoccerKit } = detectProductType(basePrompt);
+  if (type === 'soccer') {
+    if (view === 'threeQuarter') {
+      return [
+        'STRICT: Jersey Collar Stitch View (detail close-up).',
+        'EXTREME CLOSE-UP of the jersey collar/neckline stitching and fabric weave texture.',
+        'Crop out the full kit; no full product shot.',
+        'Focus on collar seam and neckline details only.',
+      ].join(' ');
+    }
+    return [
+      'STRICT: Sleeve Patch / Badge View (detail close-up).',
+      'EXTREME CLOSE-UP of the chest/sleeve badge/patch area and fabric weave texture.',
+      'Crop out the full kit; no full product shot.',
+      isSoccerKit ? 'This is a soccer kit (jersey + shorts).' : 'This is a soccer jersey.',
+    ].join(' ');
+  }
+
+  if (type === 'shirt') {
+    if (view === 'threeQuarter') {
+      return [
+        'STRICT: Collar Stitch View (detail close-up).',
+        'EXTREME CLOSE-UP of the collar/neckline seam stitching and fabric texture.',
+        'Crop out the full shirt; no full product shot.',
+      ].join(' ');
+    }
+    return [
+      'STRICT: Sleeve Hem View (detail close-up).',
+      'EXTREME CLOSE-UP of the sleeve hem/cuff stitching and fabric texture.',
+      'Crop out the full shirt; no full product shot.',
+    ].join(' ');
+  }
+
+  // Hoodie default (existing behavior).
+  if (view === 'threeQuarter') {
+    return [
+      'STRICT: Hood Label View (detail close-up).',
+      'EXTREME CLOSE-UP inside the hood and neckline area. Focus on inner fleece texture and neck seam/label area.',
+      'Crop out most of the hoodie exterior; no full hoodie shot.',
+      'Focus only inside hood / neck seam / label zone. Do NOT show pocket or sleeves.',
+    ].join(' ');
+  }
+  return [
+    'STRICT: Sleeve Cuff View (detail close-up).',
+    'EXTREME CLOSE-UP of the sleeve cuff only. Ribbed knit cuff detail filling most of the frame (60-80%).',
+    'Show stitching and ribbing texture clearly. Focus on sleeve end.',
+    'Crop out the hoodie body and chest/pocket area. Do NOT show full hoodie or full product shot.',
+  ].join(' ');
+}
+
+// TODO: Upgrade to real OCR/vision check. Kept as a hook so we can retry generation when unwanted
+// branding/text shows up despite the prompt constraints.
+function containsDisallowedBranding(_imageBase64: string): boolean {
+  return false;
+}
 
 function buildViewPrompt(basePrompt: string, style: StyleKey, view: ViewKey, width: number, height: number) {
   const hoodieMockup = isHoodieMockupPrompt(basePrompt);
   const brandingOk = wantsBranding(basePrompt);
   const backgroundOk = wantsBackgroundScene(basePrompt);
   const allow3d = wants3D(basePrompt);
+  const isDetailView = view === 'threeQuarter' || view === 'closeUp';
+  const label = viewLabelForPrompt(view, basePrompt);
+  const instruction = viewInstructionForPrompt(view, basePrompt);
   return [
-    `Single-frame image of the SAME product/design viewed from the ${viewLabels[view]} angle.`,
-    `View requirement: ${viewSpecificInstructions[view]}`,
+    `Single-frame image of the SAME product/design viewed from the ${label} angle.`,
+    `View requirement: ${instruction}`,
     `No grids, no collages, no multi-panel layouts. One centered subject.`,
     !brandingOk ? NO_LOGO_GUARD_PROMPT : null,
     !brandingOk ? NO_LOGO_NEGATIVE : null,
@@ -3235,9 +3306,10 @@ function buildViewPrompt(basePrompt: string, style: StyleKey, view: ViewKey, wid
     isApparelPrompt(basePrompt) ? APPAREL_MATTE_LIGHTING_PROMPT : null,
     isWhiteApparelPrompt(basePrompt) ? WHITE_APPAREL_EXPOSURE_PROMPT : null,
     hoodieMockup ? HOODIE_MOCKUP_NEGATIVE_PROMPT : null,
-    FULL_FRAME_POSITIVE_PROMPT,
-    FULL_FRAME_NEGATIVE_PROMPT,
-    'Consistency: keep the same zoom level, padding, and camera distance across all requested views.',
+    // Detail close-ups must not be forced into full-frame / zoomed-out framing.
+    isDetailView ? null : FULL_FRAME_POSITIVE_PROMPT,
+    isDetailView ? null : FULL_FRAME_NEGATIVE_PROMPT,
+    isDetailView ? null : 'Consistency: keep the same zoom level, padding, and camera distance across all requested views.',
     `Keep lighting, materials, and colors identical to every other view.`,
     `Do not mirror or flip the subject. Do not swap left/right. Each requested view must be distinct and match its angle.`,
     hoodieMockup ? HOODIE_MOCKUP_BACKGROUND_PROMPT : isApparelPrompt(basePrompt) ? APPAREL_WHITE_BACKGROUND_PROMPT : WHITE_BACKGROUND_PROMPT,
@@ -3309,12 +3381,15 @@ function buildViewFromBasePrompt(
   const brandingOk = wantsBranding(userPrompt || '');
   const backgroundOk = wantsBackgroundScene(userPrompt || '');
   const allow3d = wants3D(userPrompt || '');
+  const isDetailView = view === 'threeQuarter' || view === 'closeUp';
+  const label = viewLabelForPrompt(view, userPrompt || '');
+  const instruction = viewInstructionForPrompt(view, userPrompt || '');
 
   return [
     !brandingOk ? NO_LOGO_GUARD_PROMPT : null,
     !brandingOk ? NO_LOGO_NEGATIVE : null,
-    `Create a single image of the SAME design from the ${viewLabels[view]} angle.`,
-    `View requirement: ${viewSpecificInstructions[view]}`,
+    `Create a single image of the SAME design from the ${label} angle.`,
+    `View requirement: ${instruction}`,
     sideStrict,
     extraInstruction?.trim() ? `IMPORTANT: ${extraInstruction.trim()}` : null,
     'Use this exact design. Do not change the main subject identity, colors, patterns, or layout. Only change camera angle.',
@@ -3326,9 +3401,10 @@ function buildViewFromBasePrompt(
     hoodieMockup ? HOODIE_MOCKUP_NEGATIVE_PROMPT : null,
     brandingOk ? LOGO_WATERMARK_FIDELITY_PROMPT : null,
     'PRINT PLACEMENT: If the base image shows any prints/logos/text, keep them fixed; otherwise, do not add any new prints.',
-    FULL_FRAME_POSITIVE_PROMPT,
-    FULL_FRAME_NEGATIVE_PROMPT,
-    'Consistency: keep the same zoom level, padding, and camera distance across all requested views.',
+    // Detail close-ups must not be forced into full-frame / zoomed-out framing.
+    isDetailView ? null : FULL_FRAME_POSITIVE_PROMPT,
+    isDetailView ? null : FULL_FRAME_NEGATIVE_PROMPT,
+    isDetailView ? null : 'Consistency: keep the same zoom level, padding, and camera distance across all requested views.',
     'STRICT: Do not add socks, shoes, mannequins, models, people, faces, hands, or body parts unless the user prompt explicitly asks for them.',
     userPrompt?.trim()
       ? `User prompt (secondary reference): ${userPrompt.trim()}. The attached base image is the ground-truth design reference.`
@@ -3374,9 +3450,9 @@ function buildStyleConversionPrompt(style: StyleKey) {
 function buildMannequinConversionPrompt(modelKey: MannequinModelKey) {
   const subject =
     modelKey === 'boy'
-      ? 'real boy (male child, age ~8–12)'
+      ? 'real boy (male child, age ~8-12)'
       : modelKey === 'girl'
-        ? 'real girl (female child, age ~8–12)'
+        ? 'real girl (female child, age ~8-12)'
         : modelKey === 'male'
           ? 'real adult male model'
           : 'real adult female model';
@@ -3408,9 +3484,9 @@ function buildMannequinConversionPrompt(modelKey: MannequinModelKey) {
 function modelFrontPrompt(modelKey: MannequinModelKey, extraConstraints?: string, bgColor?: string) {
   const subject =
     modelKey === 'boy'
-      ? 'real boy (male child, age ~8–12)'
+      ? 'real boy (male child, age ~8-12)'
       : modelKey === 'girl'
-        ? 'real girl (female child, age ~8–12)'
+        ? 'real girl (female child, age ~8-12)'
         : modelKey === 'male'
           ? 'real adult male model'
           : 'real adult female model';
@@ -3438,9 +3514,9 @@ function modelFrontPrompt(modelKey: MannequinModelKey, extraConstraints?: string
 function modelBackPrompt(modelKey: MannequinModelKey, extraConstraints?: string, bgColor?: string) {
   const subject =
     modelKey === 'boy'
-      ? 'real boy (male child, age ~8–12)'
+      ? 'real boy (male child, age ~8-12)'
       : modelKey === 'girl'
-        ? 'real girl (female child, age ~8–12)'
+        ? 'real girl (female child, age ~8-12)'
         : modelKey === 'male'
           ? 'real adult male model'
           : 'real adult female model';
@@ -4472,7 +4548,7 @@ async function generateViewImageFromBase(
   const finalBg = options?.bgColor === 'lightgray' ? LIGHT_GRAY_BG : WHITE_BG;
   const background = options?.background ?? finalBg;
   // IMPORTANT: do not intentionally shrink non-front views.
-  // We always return an image that is exactly targetWidth × targetHeight,
+  // We always return an image that is exactly targetWidth أ— targetHeight,
   // and rely on prompt + post-processing for safe framing.
   const resized = await sharp(raw)
     .resize(targetWidth, targetHeight, { fit: 'contain', background })
@@ -4782,7 +4858,7 @@ app.post('/api/generate-product-titles', async (req: Request, res: Response) => 
 
       const lines = text
         .split(/\r?\n/)
-        .map((l) => l.replace(/^\s*[\d]+[.)-]\s*/, '').replace(/^\s*[•-]\s*/, '').trim())
+        .map((l) => l.replace(/^\s*[\d]+[.)-]\s*/, '').replace(/^\s*[\u2022-]\s*/, '').trim())
         .filter(Boolean);
 
       return lines
@@ -4808,7 +4884,7 @@ app.post('/api/generate-product-titles', async (req: Request, res: Response) => 
           ? buildTitlesPrompt({ productName, category: category || undefined, count: perBatch, seed })
           : [
               buildTitlesPrompt({ productName, category: category || undefined, count: perBatch, seed }),
-              'If any title is outside 100–120 characters, regenerate ALL titles and ensure every line is within 100–120 characters.'
+              'If any title is outside 100-120 characters, regenerate ALL titles and ensure every line is within 100-120 characters.'
             ].join(' ');
 
       const parsed = await generateTextJsonWithModelFallback<{ titles: unknown }>('generate-product-titles', prompt);
@@ -6474,7 +6550,7 @@ app.post('/api/image/generate', async (req: Request, res: Response) => {
       const hueA = hashToHue(`${variationSeed}|${batchId}|${idx}|a`);
       const hueB = (hueA + 38 + idx * 13) % 360;
       const safePrompt = prompt.replace(/[<>]/g, '').slice(0, 120);
-      const meta = `${platform} • ${designType} • ${width}×${height}`;
+      const meta = `${platform} - ${designType} - ${width}x${height}`;
       return `
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
   <defs>
@@ -6520,7 +6596,7 @@ app.post('/api/image/generate', async (req: Request, res: Response) => {
         10,
         Math.round(Math.min(width, height) * 0.022)
       )}" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial">
-    Variation ${idx + 1} • ${new Date().toLocaleString()}
+    Variation ${idx + 1} - ${new Date().toLocaleString()}
   </text>
 </svg>`;
     };
@@ -7426,3 +7502,4 @@ if (require.main === module) {
 }
 
 export { app, buildMannequinConversionPrompt, modelFrontPrompt, modelBackPrompt };
+

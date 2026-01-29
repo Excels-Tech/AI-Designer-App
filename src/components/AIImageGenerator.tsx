@@ -26,6 +26,7 @@ type ArtStyleKey = 'realistic' | '3d' | 'lineart' | 'watercolor';
 type ViewKey = 'front' | 'back' | 'left' | 'right' | 'threeQuarter' | 'closeUp' | 'top';
 type FramingMode = 'preserve' | 'zoomIn' | 'zoomOut';
 type MannequinModelKey = 'none' | 'male' | 'female' | 'boy' | 'girl';
+type ProductType = 'hoodie' | 'soccer' | 'shirt' | 'generic';
 
 interface AIImageGeneratorProps {
   onGenerate?: (composite: string) => void;
@@ -95,13 +96,13 @@ const styleOptions: { id: ArtStyleKey; label: string; preview: string; helper: s
   },
 ];
 
-const viewOptions: { id: ViewKey; label: string }[] = [
+const baseViewOptions: { id: ViewKey; label: string }[] = [
   { id: 'front', label: 'Front View' },
   { id: 'back', label: 'Back View' },
   { id: 'left', label: 'Left Side' },
   { id: 'right', label: 'Right Side' },
-  { id: 'threeQuarter', label: '3/4 View' },
-  { id: 'closeUp', label: 'Close-up View' },
+  { id: 'threeQuarter', label: 'Hood Label View' },
+  { id: 'closeUp', label: 'Sleeve Cuff View' },
 ];
 
 const bgColorOptions = [
@@ -139,7 +140,7 @@ const mannequinOptions: { id: MannequinModelKey; label: string }[] = [
   { id: 'girl', label: 'Girl' },
 ];
 
-const viewLabel = (view: ViewKey) => viewOptions.find((v) => v.id === view)?.label ?? view;
+const viewLabel = (view: ViewKey) => baseViewOptions.find((v) => v.id === view)?.label ?? view;
 
 const VIEW_ORDER: ViewKey[] = ['front', 'back', 'left', 'right', 'threeQuarter', 'closeUp', 'top'];
 
@@ -157,6 +158,14 @@ const appendPromptModifier = (prompt: string, modifier: string) => {
   const needsPunctuation = !/[.!?]$/.test(trimmedPrompt);
   return `${trimmedPrompt}${needsPunctuation ? '.' : ''} ${trimmedModifier}`;
 };
+
+function detectProductType(text: string): ProductType {
+  const t = (text || '').toLowerCase();
+  if (/(soccer|football)\s*(kit|uniform|jersey)/.test(t) || /\bfootball kit\b/.test(t)) return 'soccer';
+  if (/(t-?shirt|tee|shirt)\b/.test(t)) return 'shirt';
+  if (/(hoodie|hooded|sweatshirt|pullover)\b/.test(t)) return 'hoodie';
+  return 'generic';
+}
 
 function userRequestedBrand(prompt: string): boolean {
   const p = (prompt || '').toLowerCase();
@@ -239,8 +248,8 @@ function applyCategoryTemplate(userPrompt: string): { prompt: string; category: 
     return {
       category,
       prompt: [
-        'High quality apparel/garment design mockup. One garment only, centered, clean background.',
-        'Keep the garment fully visible.',
+        'High quality apparel/garment product mockup. One product only, centered, clean background.',
+        'Keep the product fully visible.',
         `User request: ${base}`,
       ].join(' '),
     };
@@ -1643,6 +1652,27 @@ export function AIImageGenerator({ onGenerate }: AIImageGeneratorProps) {
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const pendingResolutionClearRef = useRef(false);
 
+  const productTypeUi = useMemo(() => detectProductType(prompt), [prompt]);
+  const viewOptionsUi = useMemo(() => {
+    const detailLabels =
+      productTypeUi === 'soccer'
+        ? { threeQuarter: 'Jersey Collar Stitch View', closeUp: 'Sleeve Patch / Badge View' }
+        : productTypeUi === 'shirt'
+          ? { threeQuarter: 'Collar Stitch View', closeUp: 'Sleeve Hem View' }
+          : { threeQuarter: 'Hood Label View', closeUp: 'Sleeve Cuff View' };
+
+    return baseViewOptions.map((opt) => {
+      if (opt.id === 'threeQuarter') return { ...opt, label: detailLabels.threeQuarter };
+      if (opt.id === 'closeUp') return { ...opt, label: detailLabels.closeUp };
+      return opt;
+    });
+  }, [productTypeUi]);
+
+  const viewLabel = useCallback(
+    (view: ViewKey) => viewOptionsUi.find((v) => v.id === view)?.label ?? view,
+    [viewOptionsUi]
+  );
+
   const baseVariant = useMemo(() => variants.find((v) => v.kind === 'base') ?? null, [variants]);
   const baseHasAnyImage = useMemo(() => (baseVariant?.images?.length ?? 0) > 0, [baseVariant]);
 
@@ -1882,6 +1912,8 @@ useEffect(() => {
     }
     const templated = applyCategoryTemplate(trimmedPrompt);
     const safePrompt = applyBrandSafety(templated.prompt);
+    const productType = detectProductType(trimmedPrompt);
+    const isSoccerKit = productType === 'soccer' && /\b(kit|uniform)\b/i.test(trimmedPrompt);
     console.info('[ai] category', templated.category);
     console.log('User selected resolution:', resolution);
     const variationPhrases = [
@@ -1896,22 +1928,54 @@ useEffect(() => {
       typeof crypto !== 'undefined' && 'randomUUID' in crypto ? (crypto as any).randomUUID() : `${Date.now()}-${Math.random()}`;
 
     let colorModifiers = '';
-    if (selectedBgColor === 'lightgray') {
-      colorModifiers += ' light grey background, soft studio lighting.';
-    } else {
-      colorModifiers += ' pure white background.';
-    }
+    // Background is driven by the photoreal studio block below (pure white, no visible shadow).
     if (selectedProductColor) {
       colorModifiers += ` The product color is ${selectedProductColor}.`;
       if (selectedProductColor === 'white') {
         // Reinforce white garments so they aren't interpreted as background/transparent.
         colorModifiers +=
-          ' Pure white (not grey), opaque fabric, visible stitching and texture, realistic shadows, do not make the garment translucent, do not tint the garment grey. The hoodie color must be pure white (#ffffff), not grey or off-white. The fabric is opaque white cotton fleece with visible stitching and texture. Maintain strong highlights and shadows while keeping the garment white. Do NOT tint the garment grey to increase contrast with the background.';
+          ' Pure white (not grey), opaque fabric, visible stitching and texture, realistic shadows, do not make the garment translucent, do not tint the garment grey. The garment color must be pure white (#ffffff), not grey or off-white. The fabric must stay opaque with visible stitching and texture. Maintain highlights and shadows while keeping the garment white. Do NOT tint the garment grey to increase contrast with the background.';
       }
     }
 
-    const extraRealism = effectiveStyle === '3d' ? ' Photorealistic studio photo, NOT 3D render, NOT CGI.' : '';
-    const finalPrompt = appendPromptModifier(safePrompt, `Variation: ${variation}. ${colorModifiers}${extraRealism} RequestId: ${requestId}.`);
+    const soccerBoost =
+      productType === 'soccer'
+        ? isSoccerKit
+          ? 'This is a soccer uniform / football kit: jersey + shorts, performance sportswear.'
+          : 'This is a soccer jersey / football jersey, performance sportswear.'
+        : '';
+
+    const subject =
+      productType === 'soccer'
+        ? isSoccerKit
+          ? 'a real soccer kit (jersey + shorts)'
+          : 'a real soccer jersey'
+        : productType === 'shirt'
+          ? 'a real t-shirt'
+          : productType === 'hoodie'
+            ? 'a real hoodie'
+            : 'the described product';
+
+    const materialDetail =
+      productType === 'soccer'
+        ? 'Real sports fabric micro-texture visible (polyester knit / breathable mesh), realistic stitching and seams.'
+        : 'Real fabric/material micro-texture visible, realistic stitching and seams.';
+
+    const ultraRealPhoto = `
+Ultra-photorealistic e-commerce studio PRODUCT PHOTOGRAPH of ${subject}.
+${materialDetail}
+Natural folds and subtle imperfections (not perfect CG smoothness).
+True-to-life proportions and construction details.
+Camera: 85mm lens, f/8, sharp focus, realistic exposure, high-resolution.
+Background: pure solid white (#FFFFFF), uniform with no gradient.
+Lighting: soft diffused studio lighting with NO visible shadow (no cast shadow, no drop shadow, no floor shadow).
+Negative prompts: CGI, 3D render, illustration, cartoon, plastic, smooth, waxy, unreal engine, octane render, synthetic fabric.
+`.trim();
+
+    const finalPrompt = appendPromptModifier(
+      safePrompt,
+      `Variation: ${variation}. ${colorModifiers} ${soccerBoost} ${ultraRealPhoto} Clipped on white / alpha cutout. No floor. No surface. RequestId: ${requestId}.`
+    );
 
     const normalizedViews = normalizeViews(selectedViews);
     if (!normalizedViews.length) {
@@ -2480,7 +2544,7 @@ useEffect(() => {
               >
                 <div className="p-1.5">
                   <div className="space-y-1">
-                    {viewOptions.map((view) => {
+                    {viewOptionsUi.map((view) => {
                       const active = selectedViews.includes(view.id);
                       return (
                         <button
